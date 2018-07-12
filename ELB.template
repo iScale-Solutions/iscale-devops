@@ -1,0 +1,149 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "ELB Deployment",
+    "Parameters": {
+        "NetworkStack": {
+            "Description": "Name of the Network Stack",
+            "MinLength": "1",
+            "Type": "String",
+            "ConstraintDescription": "Network stack Name cannot be null"
+        },
+        "SSLCertARN": {
+         "Description": "ARN of the SSL certificate",
+         "MinLength": "1",
+         "Type": "String",
+         "ConstraintDescription": "SSL ARN cannot be null"
+        }
+    },
+    "Conditions": {
+    },
+    "Mappings": {
+    },
+    "Resources": {
+       "PublicELBSecurityGroup": {
+          "Type": "AWS::EC2::SecurityGroup",
+          "Properties": {
+             "VpcId": { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-VPC"} }, 
+             "GroupDescription": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "ELB Security Group" ] ] },
+             "SecurityGroupIngress": [
+                 {
+                     "IpProtocol": "tcp",
+                     "FromPort": "443",
+                     "ToPort": "443",
+                     "CidrIp": "0.0.0.0/0"
+                 },
+                 {
+                     "IpProtocol": "tcp",
+                     "FromPort": "80",
+                     "ToPort": "80",
+                     "CidrIp": "0.0.0.0/0"
+                 }
+             ],
+             "Tags": [{
+                "Key": "Name",
+                "Value": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "ELB Security Group" ] ] }
+             }]
+         }
+      },
+      "PublicELBSSLListener": {
+         "Type": "AWS::ElasticLoadBalancingV2::Listener",
+         "Properties": {
+            "Certificates": [{ "CertificateArn": { "Ref": "SSLCertARN" }}], 
+            "DefaultActions": [{
+                  "Type": "forward",
+                  "TargetGroupArn": {
+                     "Ref": "DefaultTargetGroup"
+                  }
+               }],
+               "LoadBalancerArn": { "Ref": "PublicELB" },
+               "Port": "443",
+               "Protocol": "HTTPS"
+            }
+      },
+      "PublicELBHTTPListener": {
+         "Type": "AWS::ElasticLoadBalancingV2::Listener",
+         "Properties": {
+            "DefaultActions": [{
+                  "Type": "forward",
+                  "TargetGroupArn": {
+                     "Ref": "DefaultTargetGroup"
+                  }
+               }],
+               "LoadBalancerArn": { "Ref": "PublicELB" },
+               "Port": "80",
+               "Protocol": "HTTP"
+            }
+      },
+      "DefaultTargetGroup": {
+         "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+         "Properties": {
+             "HealthCheckIntervalSeconds": "10",
+             "HealthCheckProtocol": "HTTP",
+             "HealthCheckTimeoutSeconds": "2",
+             "HealthyThresholdCount": "2",
+             "UnhealthyThresholdCount": "3",
+             "HealthCheckPath": "/health.php",
+             "Matcher": { "HttpCode": "200" },
+             "Port": "80",
+             "Protocol": "HTTP",
+             "TargetGroupAttributes": [],
+             "Targets": [],
+             "TargetType": "instance",
+             "VpcId": { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-VPC" } },
+             "Tags": [{
+                "Key": "Name",
+                "Value": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "Default Target Group" ] ] }
+             }]
+         }
+      },
+      "PublicELB": {
+         "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+         "Properties": {
+             "Scheme": "internet-facing",
+             "Subnets": [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-PublicSubnetAZ1"} }, { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-PublicSubnetAZ2"} } ],
+             "LoadBalancerAttributes": [
+                 {
+                     "Key": "idle_timeout.timeout_seconds",
+                     "Value": "300"
+                 }
+             ],
+             "SecurityGroups": [{ "Ref": "PublicELBSecurityGroup" }],
+             "Tags": [{
+                "Key": "Name",
+                "Value": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "Public ELB" ] ] }
+             }]
+          }
+       },
+       "PublicWebACL": {
+          "Type": "AWS::WAFRegional::WebACL",
+          "Properties": {
+             "Name": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "Public Web ACL" ] ] },
+             "DefaultAction": {
+                "Type": "ALLOW"
+             },
+             "MetricName": "PublicWebACL",
+             "Rules": []
+          }
+       },
+       "PublicWebACLAssociation": {
+          "Type": "AWS::WAFRegional::WebACLAssociation",
+          "Properties": {
+             "ResourceArn": { "Ref": "PublicELB" },
+             "WebACLId": { "Ref": "PublicWebACL" }
+          }
+       }
+   },
+   "Outputs": {
+       "Region": {
+          "Value": { "Ref": "AWS::Region" }
+       },
+       "SSLListener" : {
+          "Value": { "Ref": "PublicELBSSLListener" },
+          "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-SSLListener" }}
+       },
+       "HTTPListener" : {
+          "Value": { "Ref": "PublicELBHTTPListener" },
+          "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-HTTPListener" }}
+       }
+   }
+}
