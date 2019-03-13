@@ -1,0 +1,328 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Network deployment",
+    "Parameters": {
+        "SetupName": {
+            "Description": "Setup Name (E.g 'ABC Production')",
+            "MinLength": "1",
+            "Type": "String",
+            "AllowedPattern" : "[a-zA-Z][a-zA-Z0-9]*",
+            "ConstraintDescription": "Setup Name invalid"
+        }
+    },
+    "Conditions": {
+    },
+    "Mappings": {
+       "Network": {
+          "VPC": {
+             "Cidr" : "10.0.0.0/24",
+             "PublicSubnetAZ1": "10.0.0.0/26",
+             "PublicSubnetAZ2": "10.0.0.64/26",
+          }
+       }
+    },
+    "Resources": {
+        "VPC": {
+            "Type": "AWS::EC2::VPC",
+            "Properties": {
+                "EnableDnsSupport": "true",
+                "EnableDnsHostnames": "true",
+                "CidrBlock": {
+                    "Fn::FindInMap": [
+                        "Network",
+                        "VPC",
+                        "Cidr"
+                    ]
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                           "Ref": "SetupName"
+                        }
+                    }
+                ]
+            }
+        },
+        "VPCFlowLogRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "vpc-flow-logs.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyName": "VPCFlowLogsAccess",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                       "logs:CreateLogGroup",
+                                       "logs:CreateLogStream",
+                                       "logs:DescribeLogGroups",
+                                       "logs:DescribeLogStreams",
+                                       "logs:PutLogEvents"
+                                    ],     
+                                    "Resource": [
+                                        "*"
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "VPCFlowLogsGroup" : {
+           "Type": "AWS::Logs::LogGroup",
+           "DeletionPolicy": "Retain",
+           "Properties": {
+              "LogGroupName": { "Fn::Join" : [ "-", [ { "Ref": "VPC" }, "FlowLogs"] ] },
+              "RetentionInDays": 365
+           }
+        },
+        "VPCFlowLog" : {
+           "Type" : "AWS::EC2::FlowLog",
+           "Properties" : {
+              "DeliverLogsPermissionArn" : { "Fn::GetAtt" : ["VPCFlowLogRole", "Arn"] },
+              "LogGroupName" : { "Ref": "VPCFlowLogsGroup" },
+              "ResourceId" : { "Ref" : "VPC" },
+              "ResourceType" : "VPC",
+              "TrafficType" : "ALL"
+           }
+        },
+        "InternetGateway": {
+            "DependsOn": "VPC",
+            "Type": "AWS::EC2::InternetGateway",
+            "Properties": {
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": { "Fn::Join" : [ " ", [ { "Ref": "SetupName" }, "Internet Gateway"] ] }
+                    }
+                ]
+            }
+        },
+        "GatewayToInternet": {
+            "DependsOn": "VPC", 
+            "Type": "AWS::EC2::VPCGatewayAttachment",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "InternetGatewayId": {
+                    "Ref": "InternetGateway"
+                }
+            }
+        },
+        "PublicRouteTable": {
+            "Type": "AWS::EC2::RouteTable",
+            "DependsOn": "GatewayToInternet",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": { "Fn::Join" : [ " - ", [ { "Ref": "SetupName" }, "Public Route Table" ] ] }
+                    }
+                ]
+            }
+        },
+        "PublicRoute": {
+            "Type": "AWS::EC2::Route",
+            "DependsOn": ["GatewayToInternet", "PublicRouteTable"],
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "PublicRouteTable"
+                },
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "GatewayId": {
+                    "Ref": "InternetGateway"
+                }
+            }
+        },
+        "PublicSubnetAZ1": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "MapPublicIpOnLaunch": true,
+                "CidrBlock": {
+                   "Fn::FindInMap": [
+                        "Network",
+                        "VPC",
+                        "PublicSubnetAZ1"
+                    ]
+                },
+                "AvailabilityZone": {
+                    "Fn::Select": [
+                        "0",
+                        {
+                            "Fn::GetAZs": {
+                                "Ref": "AWS::Region"
+                            }
+                        }
+                    ]
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    "Public subnet ",
+                                    {
+                                        "Fn::Select": [
+                                            "0",
+                                            {
+                                                "Fn::GetAZs": {
+                                                    "Ref": "AWS::Region"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "PublicSubnetAZ1RouteTableAssociation": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {
+                    "Ref": "PublicSubnetAZ1"
+                },
+                "RouteTableId": {
+                    "Ref": "PublicRouteTable"
+                }
+            }
+        },
+        "PublicSubnetAZ2": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "MapPublicIpOnLaunch": true,
+                "CidrBlock": {
+                    "Fn::FindInMap": [
+                        "Network",
+                        "VPC",
+                        "PublicSubnetAZ2"
+                    ]
+                },
+                "AvailabilityZone": {
+                    "Fn::Select": [
+                        "1",
+                        {
+                            "Fn::GetAZs": {
+                                "Ref": "AWS::Region"
+                            }
+                        }
+                    ]
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    "Public subnet ",
+                                    {
+                                        "Fn::Select": [
+                                            "1",
+                                            {
+                                                "Fn::GetAZs": {
+                                                    "Ref": "AWS::Region"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "PublicSubnetAZ2RouteTableAssociation": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {
+                    "Ref": "PublicSubnetAZ2"
+                },
+                "RouteTableId": {
+                    "Ref": "PublicRouteTable"
+                }
+            }
+        },
+        "PublicNetworkAcl": {
+            "Type": "AWS::EC2::NetworkAcl",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "VPC"
+                },
+                "Tags": [
+                    {
+                        "Key": "Application",
+                        "Value": {
+                            "Ref": "AWS::StackId"
+                        }
+                    },
+                    {
+                        "Key": "Name",
+                        "Value": "VPC Network Acl"
+                    }
+                ]
+            }
+        }
+    },
+    "Outputs": {
+        "Region": {
+            "Value": { "Ref": "AWS::Region" }
+        },
+        "SetupName": {
+           "Description" : "Setup Name",
+           "Value": { "Ref": "SetupName" },
+           "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-SetupName" }}
+        },
+        "VPC": {
+            "Description" : "Name of the VPC",
+            "Value": { "Ref": "VPC" },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-VPC" }}
+        },
+        "PublicSubnetAZ1": {
+            "Description" : "Name of the Public subnet for AZ1",
+            "Value": { "Ref": "PublicSubnetAZ1" },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-PublicSubnetAZ1" }}
+        },
+        "PublicSubnetAZ2": {
+            "Description" : "Name of the Public subnet for AZ2",
+            "Value": { "Ref": "PublicSubnetAZ2" },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-PublicSubnetAZ2" }}
+        }
+   }
+}
