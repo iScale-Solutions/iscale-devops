@@ -1,0 +1,173 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Dev Server Deployment",
+    "Parameters": {
+        "NetworkStack": {
+            "Description": "Name of the Network Stack",
+            "MinLength": "1",
+            "Type": "String",
+            "ConstraintDescription": "Network stack Name cannot be null"
+        },
+        "InstanceKeyName": {
+            "Description": "EC2 KeyPair Name",
+            "MinLength": "1",
+            "Type": "AWS::EC2::KeyPair::KeyName",
+            "ConstraintDescription": "Must be the name of an existing EC2 KeyPair."
+        }, 
+       "AppServerAMI": {
+           "Description": "Name of AppServer AMI",
+           "MinLength": "1",
+           "Type": "AWS::EC2::Image::Id",
+           "Default": "ami-07d0584085943b744",
+           "ConstraintDescription": "AppServer AMI cannot be null"
+        }
+    },
+    "Conditions": {
+    },
+    "Mappings": {
+    },
+    "Resources": {
+       "AppServerRole": {
+          "Type": "AWS::IAM::Role",
+          "Properties": {
+             "AssumeRolePolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                   {
+                      "Effect": "Allow",
+                      "Principal": { "Service": [ "ec2.amazonaws.com" ] },
+                            "Action": [ "sts:AssumeRole" ]
+                   }
+                ]
+             },
+             "Path": "/"
+          }
+       },
+       "AllowSendAWSLogsPolicy": {
+         "Type": "AWS::IAM::Policy",
+         "Properties": {
+            "PolicyName": "AllowSendAWSLogs",
+            "PolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [
+               {
+                  "Effect": "Allow",
+                  "Action": [
+                     "logs:CreateLogGroup",
+                     "logs:CreateLogStream",
+                     "logs:DescribeLogGroups",
+                     "logs:DescribeLogStreams",
+                     "logs:PutLogEvents"
+                  ],
+                  "Resource": "*"
+               }]
+             },
+             "Roles": [{ "Ref": "AppServerRole" }]
+          }
+       },
+       "AllowEC2InfoPolicy": {
+         "Type": "AWS::IAM::Policy",
+         "Properties": {
+            "PolicyName": "AllowAccessToEC2Info",
+            "PolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [
+               {
+                  "Effect": "Allow",
+                  "Action": [
+                     "ec2:DescribeInstanceStatus",
+                     "ec2:DescribeTags"
+                  ],
+                  "Resource": "*"
+               }]
+            },
+            "Roles": [{ "Ref": "AppServerRole" }]
+          }
+       },
+       "AppServerSecurityGroup": {
+          "Type": "AWS::EC2::SecurityGroup",
+          "Properties": {
+             "VpcId": { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-VPC"} },
+             "GroupDescription": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "AppServer Security Group" ] ] },
+             "SecurityGroupIngress": [
+               {
+                  "IpProtocol": "tcp",
+                  "FromPort": "22",
+                  "ToPort": "22",
+                  "CidrIp": "0.0.0.0/0",
+                  "Description": "Access from anywhere"
+                },
+                {
+                  "IpProtocol": "tcp",
+                  "FromPort": "8888",
+                  "ToPort": "8888",
+                  "CidrIp": "0.0.0.0/0",
+                  "Description": "TinyProxy Access from anywhere"
+                }
+            ],
+             "Tags": [{
+                "Key": "Name",
+                "Value": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "AppServer Security Group" ] ] }
+             }]
+          }
+      },
+      "AppServerRole": {
+          "Type": "AWS::IAM::Role",
+          "Properties": {
+             "AssumeRolePolicyDocument": {
+                "Version": "2012-10-17",
+                   "Statement": [
+                      {
+                         "Effect": "Allow",
+                         "Principal": {
+                         "Service": [
+                            "ec2.amazonaws.com"
+                            ]
+                         },
+                         "Action": [
+                            "sts:AssumeRole"
+                         ]
+                      }
+                  ]
+               },
+               "Path": "/"
+            }
+        },
+       "AppServerInstanceProfile": {
+            "Type": "AWS::IAM::InstanceProfile",
+            "Properties": {
+                "Path": "/",
+                "Roles": [
+                    {
+                        "Ref": "AppServerRole"
+                    }
+                ]
+            }
+      },
+      "AppServerInstance": {
+         "Type": "AWS::EC2::Instance",
+         "Properties": {
+            "ImageId": { "Ref": "AppServerAMI" },
+            "KeyName": { "Ref": "InstanceKeyName" },
+            "InstanceType": "t3.nano",
+            "IamInstanceProfile": { "Ref": "AppServerInstanceProfile" },
+            "DisableApiTermination": false,
+            "NetworkInterfaces": [ {
+               "AssociatePublicIpAddress": "true",
+               "DeviceIndex": "0",
+               "GroupSet": [ 
+                  { "Ref": "AppServerSecurityGroup" }
+               ],
+               "SubnetId": { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-PublicSubnetAZ1"} }
+            }],
+            "Tags": [{
+               "Key": "Name",
+               "Value": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "AppServer Instance" ] ] },
+             }
+             ]
+          }
+      }
+   },
+   "Outputs": {
+   }
+}
