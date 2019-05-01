@@ -1,0 +1,152 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Hosting DB Deployment",
+    "Parameters": {
+        "LocalDomainName": {
+            "Description": "Local VPC domain name (E.g 'hosting.prod')",
+            "MinLength": "1",
+            "Type": "String",
+            "ConstraintDescription": "Domain Name cannot be empty"
+        },
+        "NetworkStack": {
+            "Description": "Name of the Network Stack",
+            "MinLength": "1",
+            "Type": "String",
+            "ConstraintDescription": "Network stack Name cannot be null"
+        },
+        "DBSnapshotIdentifier": {
+            "Description": "Name of the DB snpashot to launch",
+            "MinLength": "1",
+            "Type": "String",
+            "Default": "arn:aws:rds:us-west-2:338284463834:snapshot:empty-postgresql-db",
+            "ConstraintDescription": "DB Snapshot Name cannot be null"
+        }
+    },
+    "Conditions": {
+    },
+    "Mappings": {
+    },
+    "Resources": {
+       "DNS": {
+          "Type": "AWS::Route53::HostedZone",
+          "Properties": {
+             "HostedZoneConfig": {
+                "Comment": { "Fn::Join": [ "", [ "Local domain for ", { "Fn::ImportValue" : {"Fn::Sub" : "${NetworkStack}-VPC"} } ] ] }
+             },
+             "Name": { "Ref": "LocalDomainName" },
+             "VPCs": [{
+                 "VPCId": { "Fn::ImportValue" : {"Fn::Sub" : "${NetworkStack}-VPC" } },
+                 "VPCRegion": { "Ref": "AWS::Region" }
+             }],
+             "HostedZoneTags": [{
+                "Key": "Name",
+                "Value": { "Fn::Join": [ " - ", [ { "Ref": "LocalDomainName" }, { "Fn::ImportValue" : {"Fn::Sub" : "${NetworkStack}-VPC"} }  ] ] }
+             }]
+          }
+      },
+      "DBSubnetGroup": {
+         "Type" : "AWS::RDS::DBSubnetGroup",
+         "Properties" : {
+            "DBSubnetGroupDescription" : { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "DB Subnet Group" ] ] },
+            "SubnetIds" : [
+               { "Fn::ImportValue" : {"Fn::Sub" : "${NetworkStack}-PrivateSubnetAZ1"} },
+               { "Fn::ImportValue" : {"Fn::Sub" : "${NetworkStack}-PrivateSubnetAZ2"} }
+            ],
+            "Tags" : [ {"Key" : "Name", "Value" : { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "DB Subnet Group" ] ] } } ]
+         }
+      },
+      "DBParameterGroup": {
+         "Type": "AWS::RDS::DBParameterGroup",
+         "DeletionPolicy": "Delete",
+         "Properties" : {
+            "Description" : { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "DB Parameter Group" ] ] },
+            "Family" : "postgres11",
+            "Parameters" : {
+            }
+         }
+      },
+      "DBSecurityGroup": {
+         "Type": "AWS::EC2::SecurityGroup",
+         "Properties": {
+            "VpcId": { "Fn::ImportValue" : {"Fn::Sub" : "${NetworkStack}-VPC"} },
+            "GroupDescription": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "DB Security Group" ] ] },
+            "SecurityGroupIngress": [
+               {
+                  "IpProtocol": "tcp",
+                  "FromPort": "5432",
+                  "ToPort": "5432",
+                  "CidrIp": "0.0.0.0/0",
+                  "Description": "Access from AppServer"
+                }
+            ],
+            "Tags": [{
+               "Key": "Name",
+               "Value": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "DB Security Group" ] ] }
+            }]
+         }
+      },
+      "DBInstanceMonitoringRole": {
+         "Type": "AWS::IAM::Role",
+         "Properties": {
+             "AssumeRolePolicyDocument": {
+             "Version": "2012-10-17",
+             "Statement": [
+             {
+                "Sid": "",
+                "Effect": "Allow",
+                "Principal": {
+                   "Service": "monitoring.rds.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+             }
+          ]},
+          "ManagedPolicyArns": [
+            "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
+          ],
+          "Path": "/"
+          }
+      },
+      "DBInstance" : {
+         "Type": "AWS::RDS::DBInstance",
+         "Properties": {
+            "DBName" : { "Ref": "AWS::NoValue"},
+            "DeletionProtection": "true",
+            "DeleteAutomatedBackups": "false", 
+            "Engine": "postgres",
+            "DBInstanceClass": "db.t2.small",
+            "BackupRetentionPeriod": "30",
+            "VPCSecurityGroups": [{ "Ref" : "DBSecurityGroup" }],
+            "DBSubnetGroupName": { "Ref": "DBSubnetGroup" },
+            "AllocatedStorage": "20",
+            "DBSnapshotIdentifier" : { "Ref" : "DBSnapshotIdentifier" },
+            "EnablePerformanceInsights": "true",
+            "MonitoringInterval": "10",
+            "MonitoringRoleArn": { "Fn::GetAtt": [ "DBInstanceMonitoringRole", "Arn" ]},
+            "CopyTagsToSnapshot": "true",
+            "MultiAZ" : "true"
+        },
+        "DeletionPolicy" : "Snapshot"
+      },
+      "DBRoute53Record": {
+          "Type": "AWS::Route53::RecordSet",
+          "Properties": {
+             "HostedZoneId": { "Ref" : "DNS" },
+             "Comment": "Local DNS for DB",
+             "Name": { "Fn::Join": [ "", [ "db.", { "Ref": "LocalDomainName" } ] ] },
+             "Type": "CNAME",
+             "TTL": "3600",
+             "ResourceRecords": [
+                { "Fn::GetAtt": [ "DBInstance", "Endpoint.Address" ]}
+             ]
+         }
+      }
+   },
+   "Outputs": {
+       "Region": {
+           "Value": { "Ref": "AWS::Region" }
+       },
+       "RDSAddress": {
+           "Value": { "Ref": "DBRoute53Record" }
+       }
+   }
+}
