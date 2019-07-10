@@ -30,12 +30,6 @@
       "Default" : "uploan.qa", 
       "ConstraintDescription" : "must be a valid domain name"
     },
-    "InstanceType" : {
-      "Description" : "EC2 instance type",
-      "Type" : "String",
-      "AllowedValues" : [ "t3.medium", "m3.large", "m3.xlarge", "m3.2xlarge", "cc2.8xlarge", "c3.xlarge", "c3.2xlarge", "c3.4xlarge", "c3.8xlarge", "c4.xlarge", "c4.2xlarge", "c4.4xlarge", "c4.8xlarge", "t2.large", "m4.large", "m4.xlarge", "m4.2xlarge", "m4.4xlarge", "m4.10xlarge", "m4.16xlarge" ],
-      "ConstraintDescription" : "must be a valid EC2 instance type."
-    },
     "VPC" : {
       "Description" : "VPC to deploy into",
       "Type" : "AWS::EC2::VPC::Id"
@@ -75,9 +69,47 @@
        "MinLength": "1",
        "Type": "String",
        "ConstraintDescription": "SSL ARN cannot be null"
+    },
+    "SettingsType": {
+       "Description": "Type of settings to apply",
+       "Type": "String",
+       "Default": "QA",
+       "AllowedValues": [ "QA", "Staging", "Production" ]
     }
   },
   "Mappings" : {
+     "Settings": {
+        "QA": {
+           "DBMultiAZ": "false",
+           "DBRetentionPeriod": "7",
+           "DBInstanceClass": "db.t3.small",
+           "RedisNbNodes": "1",
+           "RedisNodeType": "cache.t2.micro",
+           "RedisRetentionPeriod": "7",
+           "LMSInstanceType": "t3.medium",
+           "WilliamInstanceType": "t3.medium"
+        },
+        "Staging": {
+           "DBMultiAZ": "false",
+           "DBRetentionPeriod": "7",
+           "DBInstanceClass": "db.t3.small",
+           "RedisNbNodes": "1",
+           "RedisNodeType": "cache.t2.micro",
+           "RedisRetentionPeriod": "7",
+           "LMSInstanceType": "t3.medium",
+           "WilliamInstanceType": "t3.medium"
+        },
+        "Production": {
+           "DBMultiAZ": "true",
+           "DBRetentionPeriod": "30",
+           "DBInstanceClass": "db.t3.xlarge",
+           "RedisNbNodes": "2",
+           "RedisNodeType": "cache.r5.large",
+           "RedisRetentionPeriod": "30",
+           "LMSInstanceType": "t3.xlarge",
+           "WilliamInstanceType": "t3.xlarge"
+        }
+     }
   },
   "Resources" : {
      "ELBSecurityGroup": {
@@ -222,7 +254,7 @@
         "Type" : "AWS::EC2::Instance",
         "Properties" : {
            "KeyName" : { "Ref" : "KeyName" },
-           "InstanceType" : { "Ref" : "InstanceType" },
+           "InstanceType" :  { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "LMSInstanceType" ] },
            "ImageId" : { "Ref" : "AppServerAMI" },
            "IamInstanceProfile": { "Ref": "AppServerInstanceProfile" },
            "NetworkInterfaces" : [ {
@@ -258,7 +290,7 @@
         "Type" : "AWS::EC2::Instance",
         "Properties" : {
            "KeyName" : { "Ref" : "KeyName" },
-           "InstanceType" : { "Ref" : "InstanceType" },
+           "InstanceType" : { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "WilliamInstanceType" ] },
            "ImageId" : { "Ref" : "AppServerAMI" },
            "IamInstanceProfile": { "Ref": "AppServerInstanceProfile" },
            "NetworkInterfaces" : [ {
@@ -350,7 +382,7 @@
          "Type": "AWS::RDS::DBInstance",
          "Properties": {
             "AllocatedStorage": 20,
-            "DBInstanceClass": "db.t3.small",
+            "DBInstanceClass": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "DBInstanceClass" ] },
             "Engine": "MySQL",
             "EngineVersion": "5.7.22",
             "MasterUsername": "root",
@@ -363,13 +395,13 @@
             "StorageType": "gp2",
             "PubliclyAccessible": false,
             "DBSubnetGroupName": { "Ref": "DBSubnetGroup" },
-            "MultiAZ": false,
+            "MultiAZ": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "DBMultiAZ" ] },
             "VPCSecurityGroups": [ { "Ref": "DBSecurityGroup" } ],
             "DBParameterGroupName": { "Ref": "DBParameterGroup" },
             "MonitoringInterval": "10",
             "MonitoringRoleArn": { "Fn::GetAtt": [ "DBInstanceMonitoringRole", "Arn" ]},
             "CopyTagsToSnapshot": "true",
-            "BackupRetentionPeriod": 7,
+            "BackupRetentionPeriod": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "DBRetentionPeriod" ] },
             "AutoMinorVersionUpgrade": true
         },
         "DeletionPolicy": "Snapshot"
@@ -436,9 +468,9 @@
           "CacheSubnetGroupName": { "Ref": "RedisSubnetGroup" },
           "Engine": "redis",
           "EngineVersion": "5.0.4",
-          "CacheNodeType": "cache.t2.micro",
-          "NumCacheNodes": "1",
-          "SnapshotRetentionLimit": 7,
+          "CacheNodeType": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "RedisNodeType" ] },
+          "NumCacheNodes": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "RedisNbNodes" ] },
+          "SnapshotRetentionLimit": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "RedisRetentionPeriod" ] },
           "VpcSecurityGroupIds": [{
              "Fn::GetAtt": [
                 "RedisSecurityGroup",
