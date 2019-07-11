@@ -13,6 +13,14 @@
        "Type": "AWS::EC2::Image::Id",
        "ConstraintDescription": "AppServer AMI cannot be null"
     },
+    "WellnessServerAMI": {
+       "Description": "Name of Wellness Server AMI (only staging and prod)",
+       "Type": "AWS::EC2::Image::Id"
+    },
+    "WWWServerAMI": {
+       "Description": "Name of WWW Server AMI (only staging and prod)",
+       "Type": "AWS::EC2::Image::Id"
+    },
     "DomainName" : {
       "Description" : "Setup Domain Name",
       "Type" : "String",
@@ -88,7 +96,9 @@
            "RedisAutomaticFailoverEnabled": "false",
            "RedisRetentionPeriod": "7",
            "LMSInstanceType": "t3.medium",
-           "WilliamInstanceType": "t3.medium"
+           "WilliamInstanceType": "t3.medium",
+           "WellnessInstanceType": "t3.small",
+           "WWWInstanceType": "t3.small"
         },
         "Staging": {
            "DBMultiAZ": "false",
@@ -99,7 +109,9 @@
            "RedisAutomaticFailoverEnabled": "false",
            "RedisRetentionPeriod": "7",
            "LMSInstanceType": "t3.medium",
-           "WilliamInstanceType": "t3.medium"
+           "WilliamInstanceType": "t3.medium",
+           "WellnessInstanceType": "t3.small",
+           "WWWInstanceType": "t3.small"
         },
         "Production": {
            "DBMultiAZ": "true",
@@ -110,9 +122,16 @@
            "RedisAutomaticFailoverEnabled": "true",
            "RedisRetentionPeriod": "30",
            "LMSInstanceType": "t3.xlarge",
-           "WilliamInstanceType": "t3.xlarge"
+           "WilliamInstanceType": "t3.xlarge",
+           "WellnessInstanceType": "t3.medium",
+           "WWWInstanceType": "t3.medium"
         }
      }
+  },
+  "Conditions": {
+     "Production": { "Fn::Equals": [{ "Ref": "SettingsType" }, "Production"] },
+     "Staging": { "Fn::Equals": [{ "Ref": "SettingsType" }, "Staging"] },
+     "NotQA": { "Fn::Not" : [{ "Fn::Equals" : [ {"Ref" : "SettingsType"}, "QA" ] }] }
   },
   "Resources" : {
      "ELBSecurityGroup": {
@@ -151,7 +170,75 @@
            }]
         }
      },
+     "WellnessServerSecurityGroup": {
+        "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {
+           "VpcId": { "Ref": "VPC" },
+           "GroupDescription": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "Wellness Server Security Group" ] ] },
+           "SecurityGroupIngress": [{
+              "IpProtocol": "tcp",
+              "FromPort": "80",
+              "ToPort": "80",
+              "SourceSecurityGroupId" : { "Ref" : "ELBSecurityGroup" },
+              "Description": "HTTP Access from ELB"
+           }],
+           "Tags": [{
+              "Key": "Name",
+              "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "AppServer Security Group" ] ] }
+           }]
+        }
+     },
+     "WWWServerSecurityGroup": {
+        "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {
+           "VpcId": { "Ref": "VPC" },
+           "GroupDescription": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "Www Server Security Group" ] ] },
+           "SecurityGroupIngress": [{
+              "IpProtocol": "tcp",
+              "FromPort": "80",
+              "ToPort": "80",
+              "SourceSecurityGroupId" : { "Ref" : "ELBSecurityGroup" },
+              "Description": "HTTP Access from ELB"
+           }],
+           "Tags": [{
+              "Key": "Name",
+              "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "AppServer Security Group" ] ] }
+           }]
+        }
+     },
      "AppServerRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+            "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+               {
+                  "Effect": "Allow",
+                  "Principal": { "Service": [ "ec2.amazonaws.com" ] },
+                  "Action": [ "sts:AssumeRole" ]
+               }
+            ]
+         },
+         "Path": "/"
+         }
+     },
+     "WWWServerRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+            "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+               {
+                  "Effect": "Allow",
+                  "Principal": { "Service": [ "ec2.amazonaws.com" ] },
+                  "Action": [ "sts:AssumeRole" ]
+               }
+            ]
+         },
+         "Path": "/"
+         }
+     },
+     "WellnessServerRole": {
         "Type": "AWS::IAM::Role",
         "Properties": {
             "AssumeRolePolicyDocument": {
@@ -186,7 +273,11 @@
                 "Resource": "*"
              }]
            },
-           "Roles": [{ "Ref": "AppServerRole" }]
+           "Roles": [
+              { "Ref": "AppServerRole" },
+              { "Ref": "WellnessServerRole" },
+              { "Ref": "WWWServerRole" }
+           ]
        }
      },
      "AllowEC2InfoPolicy": {
@@ -205,7 +296,11 @@
                  "Resource": "*"
               }]            
            },
-           "Roles": [{ "Ref": "AppServerRole" }]
+          "Roles": [
+              { "Ref": "AppServerRole" },
+              { "Ref": "WellnessServerRole" },
+              { "Ref": "WWWServerRole" }
+           ]
         }
      },
      "DBSecurityGroup": {
@@ -322,6 +417,100 @@
             "Dimensions" : [ {
                "Name" : "InstanceId",
                "Value" : { "Ref" : "WilliamInstance" }
+            }]
+         }
+      },
+      "WellnessServerInstanceProfile": {
+        "Type": "AWS::IAM::InstanceProfile",
+        "Properties": {
+           "Path": "/",
+           "Roles": [{
+              "Ref": "WellnessServerRole"
+           }]
+        }
+      },
+      "WellnessInstance" : {
+        "Type" : "AWS::EC2::Instance",
+        "Condition": "NotQA",
+        "Properties" : {
+           "KeyName" : { "Ref" : "KeyName" },
+           "InstanceType" : { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "WellnessInstanceType" ] },
+           "ImageId" : { "Ref" : "WellnessServerAMI" },
+           "IamInstanceProfile": { "Ref": "WellnessServerInstanceProfile" },
+           "NetworkInterfaces" : [ {
+              "DeviceIndex" : "0",
+              "GroupSet" : [ { "Ref" : "AppServerDevAccessSecurityGroup" }, { "Ref": "WellnessServerSecurityGroup" } ],
+              "SubnetId" : { "Ref" : "AZ1PublicSubnetID" }
+            } ],
+           "Tags": [{
+              "Key": "Name",
+              "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "Wellness Server" ] ] }
+           }]
+         }
+      },
+      "WellnessCPUAlarm" : {
+         "Type" : "AWS::CloudWatch::Alarm",
+         "Condition": "NotQA",
+         "Properties" : {
+            "AlarmDescription" : { "Fn::Join": [ " ", [ "CPU Alarm for", { "Ref" : "AWS::StackName"}, "Wellness Server" ] ] },
+            "AlarmActions" : [ ],
+            "MetricName" : "CPUUtilization",
+            "Namespace" : "AWS/EC2",
+            "Statistic" : "Average",
+            "Period" : "60",
+            "EvaluationPeriods" : "3",
+            "Threshold" : "80",
+            "ComparisonOperator" : "GreaterThanThreshold",
+            "Dimensions" : [ {
+               "Name" : "InstanceId",
+               "Value" : { "Ref" : "WellnessInstance" }
+            }]
+         }
+      },
+      "WWWServerInstanceProfile": {
+        "Type": "AWS::IAM::InstanceProfile",
+        "Properties": {
+           "Path": "/",
+           "Roles": [{
+              "Ref": "WWWServerRole"
+           }]
+        }
+      },
+      "WWWInstance" : {
+        "Type" : "AWS::EC2::Instance",
+        "Condition": "NotQA",
+        "Properties" : {
+           "KeyName" : { "Ref" : "KeyName" },
+           "InstanceType" : { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "WWWInstanceType" ] },
+           "ImageId" : { "Ref" : "WWWServerAMI" },
+           "IamInstanceProfile": { "Ref": "WWWServerInstanceProfile" },
+           "NetworkInterfaces" : [ {
+              "DeviceIndex" : "0",
+              "GroupSet" : [ { "Ref" : "AppServerDevAccessSecurityGroup" }, { "Ref": "WWWServerSecurityGroup" } ],
+              "SubnetId" : { "Ref" : "AZ2PublicSubnetID" }
+            } ],
+           "Tags": [{
+              "Key": "Name",
+              "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "WWW Server" ] ] }
+           }]
+         }
+      },
+      "WWWCPUAlarm" : {
+         "Type" : "AWS::CloudWatch::Alarm",
+         "Condition": "NotQA",
+         "Properties" : {
+            "AlarmDescription" : { "Fn::Join": [ " ", [ "CPU Alarm for", { "Ref" : "AWS::StackName"}, "Wellness Server" ] ] },
+            "AlarmActions" : [ ],
+            "MetricName" : "CPUUtilization",
+            "Namespace" : "AWS/EC2",
+            "Statistic" : "Average",
+            "Period" : "60",
+            "EvaluationPeriods" : "3",
+            "Threshold" : "80",
+            "ComparisonOperator" : "GreaterThanThreshold",
+            "Dimensions" : [ {
+               "Name" : "InstanceId",
+               "Value" : { "Ref" : "WellnessInstance" }
             }]
          }
       },
@@ -491,8 +680,6 @@
         },
         "DeletionPolicy": "Snapshot"
      },
-
-
      "RedisRoute53Record" : {
        "Type" : "AWS::Route53::RecordSet",
        "Properties" : {
