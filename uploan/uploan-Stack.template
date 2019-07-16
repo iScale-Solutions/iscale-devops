@@ -2,16 +2,31 @@
   "AWSTemplateFormatVersion" : "2010-09-09",
   "Description" : "Uploan Stack Setup",
   "Parameters" : {
+     "EnableProtection": {
+        "AllowedValues": [
+           "true",
+           "false"
+        ],
+        "Default": "false",
+        "Description": "Enable Delete Protection on key resources",
+        "Type": "String"
+    },
     "KeyName" : {
       "Description" : "Name of an existing EC2 KeyPair for App Server",
       "Type" : "AWS::EC2::KeyPair::KeyName",
       "ConstraintDescription" : "must be the name of an existing EC2 KeyPair."
     },
-    "AppServerAMI": {
-       "Description": "Name of AppServer (LMS / William) AMI",
+    "LMSServerAMI": {
+       "Description": "Name of LMS Server AMI",
        "MinLength": "1",
        "Type": "AWS::EC2::Image::Id",
-       "ConstraintDescription": "AppServer AMI cannot be null"
+       "ConstraintDescription": "LMS Server AMI cannot be null"
+    },
+    "WilliamServerAMI": {
+       "Description": "Name of William Server AMI",
+       "MinLength": "1",
+       "Type": "AWS::EC2::Image::Id",
+       "ConstraintDescription": "William Server AMI cannot be null"
     },
     "WellnessServerAMI": {
        "Description": "Name of Wellness Server AMI (only staging and prod)",
@@ -91,6 +106,9 @@
            "DBMultiAZ": "false",
            "DBRetentionPeriod": "7",
            "DBInstanceClass": "db.t3.small",
+           "DBReadReplicaInstanceClass": "db.t3.micro",
+           "EnableDBPerformanceInsights": "false",
+           "PerformanceInsightsRetentionPeriod": "7",
            "RedisNbNodes": "1",
            "RedisNodeType": "cache.t2.micro",
            "RedisAutomaticFailoverEnabled": "false",
@@ -104,6 +122,9 @@
            "DBMultiAZ": "false",
            "DBRetentionPeriod": "7",
            "DBInstanceClass": "db.t3.small",
+           "DBReadReplicaInstanceClass": "db.t3.micro",
+           "EnableDBPerformanceInsights": "false",
+           "PerformanceInsightsRetentionPeriod": "7",
            "RedisNbNodes": "1",
            "RedisNodeType": "cache.t2.micro",
            "RedisAutomaticFailoverEnabled": "false",
@@ -117,6 +138,9 @@
            "DBMultiAZ": "true",
            "DBRetentionPeriod": "30",
            "DBInstanceClass": "db.t3.xlarge",
+           "DBReadReplicaInstanceClass": "db.t3.medium",
+           "EnableDBPerformanceInsights": "true",
+           "PerformanceInsightsRetentionPeriod": "731",
            "RedisNbNodes": "2",
            "RedisNodeType": "cache.r5.large",
            "RedisAutomaticFailoverEnabled": "true",
@@ -455,7 +479,7 @@
         "Properties" : {
            "KeyName" : { "Ref" : "KeyName" },
            "InstanceType" :  { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "LMSInstanceType" ] },
-           "ImageId" : { "Ref" : "AppServerAMI" },
+           "ImageId" : { "Ref" : "LMSServerAMI" },
            "IamInstanceProfile": { "Ref": "LMSServerInstanceProfile" },
            "NetworkInterfaces" : [ {
               "DeviceIndex" : "0",
@@ -491,7 +515,7 @@
         "Properties" : {
            "KeyName" : { "Ref" : "KeyName" },
            "InstanceType" : { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "WilliamInstanceType" ] },
-           "ImageId" : { "Ref" : "AppServerAMI" },
+           "ImageId" : { "Ref" : "WilliamServerAMI" },
            "IamInstanceProfile": { "Ref": "WilliamServerInstanceProfile" },
            "NetworkInterfaces" : [ {
               "DeviceIndex" : "0",
@@ -678,8 +702,11 @@
          "Properties": {
             "AllocatedStorage": 20,
             "DBInstanceClass": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "DBInstanceClass" ] },
+            "DeletionProtection": { "Ref": "EnableProtection"},
             "Engine": "MySQL",
             "EngineVersion": "5.7.22",
+            "EnablePerformanceInsights": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "EnableDBPerformanceInsights" ] },
+            "PerformanceInsightsRetentionPeriod": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "PerformanceInsightsRetentionPeriod" ] },
             "MasterUsername": "root",
             "MasterUserPassword": "password",
             "Tags": [{
@@ -697,7 +724,7 @@
             "MonitoringRoleArn": { "Fn::GetAtt": [ "DBInstanceMonitoringRole", "Arn" ]},
             "CopyTagsToSnapshot": "true",
             "BackupRetentionPeriod": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "DBRetentionPeriod" ] },
-            "AutoMinorVersionUpgrade": true
+            "AutoMinorVersionUpgrade": "true"
         },
         "DeletionPolicy": "Snapshot"
     },
@@ -717,6 +744,26 @@
           "TTL" : "60",
           "ResourceRecords" : [
              { "Fn::GetAtt" : [ "DBInstance", "Endpoint.Address" ] }
+          ]
+       }
+    },
+    "DBReadReplicaRoute53Record" : {
+       "DependsOn" : "DBReadReplicaInstance",
+       "Condition" : "Production",
+       "Type" : "AWS::Route53::RecordSet",
+       "Properties" : {
+          "HostedZoneName" : { "Fn::Join" : [ "", [ { "Ref" : "LocalDomainName" }, "." ]]},
+          "Comment" : "Local DNS for DB Read Replica",
+          "Name" : {
+             "Fn::Join" : [ "", [
+                {"Ref" : "AWS::StackName"}, "-replica.db.",
+                {"Ref" : "LocalDomainName"} ,"."
+             ] ]
+          },
+          "Type" : "CNAME",
+          "TTL" : "60",
+          "ResourceRecords" : [
+             { "Fn::GetAtt" : [ "DBReadReplicaInstance", "Endpoint.Address" ] }
           ]
        }
     },
@@ -756,7 +803,86 @@
             }]
          }
      },
-     "RedisReplicationGroup": {
+     "DBReadReplicaInstance": {
+         "Type": "AWS::RDS::DBInstance",
+         "Condition": "Production",
+         "Properties": {
+            "AllocatedStorage": 20,
+            "DBInstanceClass": { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "DBReadReplicaInstanceClass" ] },
+            "Tags": [{
+               "Key": "Name",
+               "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "Read Replica Database" ] ] }
+            }],
+            "StorageEncrypted": true,
+            "StorageType": "gp2",
+            "PubliclyAccessible": false,
+            "VPCSecurityGroups": [ { "Ref": "DBSecurityGroup" } ],
+            "DBParameterGroupName": { "Ref": "DBParameterGroup" },
+            "MonitoringInterval": "10",
+            "MonitoringRoleArn": { "Fn::GetAtt": [ "DBInstanceMonitoringRole", "Arn" ]},
+            "CopyTagsToSnapshot": "true",
+            "AutoMinorVersionUpgrade": "true",
+            "SourceDBInstanceIdentifier": { "Ref": "DBInstance" }
+        }
+    },
+    "DBReadReplicaCPUAlarm" : {
+       "Type" : "AWS::CloudWatch::Alarm",
+       "Condition": "Production",
+       "Properties" : {
+          "AlarmDescription" : { "Fn::Join": [ " ", [ "CPU Alarm for", { "Ref" : "AWS::StackName"}, "DB Read Replica Server" ] ] },
+          "AlarmActions" : [ ],
+          "MetricName" : "CPUUtilization",
+          "Namespace" : "AWS/RDS",
+          "Statistic" : "Average",
+          "Period" : "60",
+          "EvaluationPeriods" : "3", 
+          "Threshold" : "80",
+          "ComparisonOperator" : "GreaterThanThreshold",
+          "Dimensions" : [ {
+             "Name" : "InstanceId",
+             "Value" : { "Ref" : "DBReadReplicaInstance" }
+          }]
+       }
+    },
+    "DBReadReplicaLowStorageAlarm" : {
+       "Type" : "AWS::CloudWatch::Alarm",
+       "Condition": "Production",
+       "Properties" : {
+          "AlarmDescription" : { "Fn::Join": [ " ", [ "Low Storage Alarm for", { "Ref" : "AWS::StackName"}, "DB Read Replica Server" ] ] },
+          "AlarmActions" : [ ],
+          "MetricName" : "FreeStorageSpace",
+          "Namespace" : "AWS/RDS",
+          "Statistic" : "Average",
+          "Period" : "60",
+          "EvaluationPeriods" : "3",
+          "Threshold" : "1000000000",
+          "ComparisonOperator" : "LessThanThreshold",
+          "Dimensions" : [ {
+             "Name" : "InstanceId",
+             "Value" : { "Ref" : "DBReadReplicaInstance" }
+          }]
+       }
+    },
+   "DBReadReplicaLowStorageAlarm" : {
+       "Type" : "AWS::CloudWatch::Alarm",
+       "Condition": "Production",
+       "Properties" : {
+          "AlarmDescription" : { "Fn::Join": [ " ", [ "Replica Lag Alarm for", { "Ref" : "AWS::StackName"}, "DB Read Replica Server" ] ] },
+          "AlarmActions" : [ ],           
+          "MetricName" : "ReplicaLag",
+          "Namespace" : "AWS/RDS",
+          "Statistic" : "Average",
+          "Period" : "60",
+          "EvaluationPeriods" : "3",
+          "Threshold" : "5",
+          "ComparisonOperator" : "GreaterThanThreshold",           
+          "Dimensions" : [ {
+             "Name" : "InstanceId",
+             "Value" : { "Ref" : "DBReadReplicaInstance" }
+          }]
+       }
+    },
+    "RedisReplicationGroup": {
        "Type": "AWS::ElastiCache::ReplicationGroup",
        "Properties": {
           "AtRestEncryptionEnabled": "true",
@@ -848,7 +974,7 @@
              "LoadBalancerAttributes": [
                 { "Key": "idle_timeout.timeout_seconds", "Value": "50" },
                 { "Key": "routing.http2.enabled", "Value": "true" },
-                { "Key": "deletion_protection.enabled", "Value": "false" }
+                { "Key": "deletion_protection.enabled", "Value": { "Ref": "EnableProtection"} }
              ],
              "SecurityGroups": [{ "Ref": "ELBSecurityGroup" }, { "Ref": "ELBDevAccessSecurityGroup" }],
              "Tags": [{
@@ -1183,6 +1309,11 @@
     "DBLocalDNSName" : {
       "Value" : { "Ref": "DBRoute53Record" },
       "Description" : "Local DNS of the DB"
+    },
+    "DBReadReplicaLocalDNSName" : {
+      "Condition": "Production",
+      "Value" : { "Ref": "DBReadReplicaRoute53Record" },
+      "Description" : "Local DNS of the DB Read Replica"
     },
     "S3Bucket" : {
       "Value" : { "Ref": "S3DataBucket" },
