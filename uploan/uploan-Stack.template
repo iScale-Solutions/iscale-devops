@@ -16,6 +16,10 @@
       "Type" : "AWS::EC2::KeyPair::KeyName",
       "ConstraintDescription" : "must be the name of an existing EC2 KeyPair."
     },
+    "JumpServerAMI": { 
+       "Description": "Name of Jump Server AMI",
+       "Type": "AWS::EC2::Image::Id",
+    },
     "LMSServerAMI": {
        "Description": "Name of LMS Server AMI",
        "MinLength": "1",
@@ -109,6 +113,7 @@
            "DBInstanceClass": "db.t3.small",
            "DBReadReplicaInstanceClass": "db.t3.micro",
            "EnableDBPerformanceInsights": "false",
+           "JumpInstanceType": "t3.micro",
            "PerformanceInsightsRetentionPeriod": "7",
            "RedisNbNodes": "1",
            "RedisNodeType": "cache.t2.micro",
@@ -126,6 +131,7 @@
            "DBInstanceClass": "db.t3.small",
            "DBReadReplicaInstanceClass": "db.t3.micro",
            "EnableDBPerformanceInsights": "false",
+           "JumpInstanceType": "t3.micro",
            "PerformanceInsightsRetentionPeriod": "7",
            "RedisNbNodes": "1",
            "RedisNodeType": "cache.t2.micro",
@@ -143,6 +149,7 @@
            "DBInstanceClass": "db.t3.xlarge",
            "DBReadReplicaInstanceClass": "db.t3.medium",
            "EnableDBPerformanceInsights": "true",
+           "JumpInstanceType": "t3.small",
            "PerformanceInsightsRetentionPeriod": "731",
            "RedisNbNodes": "2",
            "RedisNodeType": "cache.r5.large",
@@ -212,7 +219,7 @@
         "Type": "AWS::EC2::SecurityGroup",
         "Properties": {
            "VpcId": { "Ref": "VPC" },
-           "GroupDescription": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "Www Server Security Group" ] ] },
+           "GroupDescription": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "WWW Server Security Group" ] ] },
            "SecurityGroupIngress": [{
               "IpProtocol": "tcp",
               "FromPort": "80",
@@ -223,6 +230,18 @@
            "Tags": [{
               "Key": "Name",
               "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "WWW Server Security Group" ] ] }
+           }]
+        }
+     },
+     "JumpServerSecurityGroup": {
+        "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {
+           "VpcId": { "Ref": "VPC" },
+           "GroupDescription": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "Jump Server Security Group" ] ] },
+           "SecurityGroupIngress": [{ }],
+           "Tags": [{
+              "Key": "Name",
+              "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "Jump Server Security Group" ] ] }
            }]
         }
      },
@@ -244,6 +263,22 @@
               }]
            }
         }
+     },
+     "JumpServerRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+            "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+               {
+                  "Effect": "Allow",
+                  "Principal": { "Service": [ "ec2.amazonaws.com" ] },
+                  "Action": [ "sts:AssumeRole" ]
+               }
+            ]
+         },
+         "Path": "/"
+         }
      },
      "LMSServerRole": {
         "Type": "AWS::IAM::Role",
@@ -392,6 +427,7 @@
              }]
            },
            "Roles": [
+              { "Ref": "JumpServerRole" },
               { "Ref": "LMSServerRole" },
               { "Ref": "WilliamServerRole" },
               { "Ref": "WellnessServerRole" },
@@ -416,6 +452,7 @@
               }]            
            },
           "Roles": [
+              { "Ref": "JumpServerRole" },
               { "Ref": "LMSServerRole" },
               { "Ref": "WilliamServerRole" },
               { "Ref": "WellnessServerRole" },
@@ -455,6 +492,25 @@
            }]
         }
      },
+     "DBReadReplicaSecurityGroup": {
+        "Type": "AWS::EC2::SecurityGroup",
+        "Condition": "Production",
+        "Properties": {
+           "VpcId": { "Ref": "VPC" },
+           "GroupDescription": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "DB Read Replica Security Group" ] ] },
+           "SecurityGroupIngress": [{
+              "IpProtocol": "tcp",
+              "FromPort": "3306",
+              "ToPort": "3306",
+              "SourceSecurityGroupId" : { "Ref" : "JumpServerSecurityGroup" },
+              "Description": "Access from Jump Server"
+           }],
+           "Tags": [{
+              "Key": "Name",
+              "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "DB Read Replica Security Group" ] ] }
+           }]
+        }
+     },
      "RedisSecurityGroup": {
         "Type": "AWS::EC2::SecurityGroup",
         "Properties": {
@@ -470,6 +526,16 @@
            "Tags": [{
               "Key": "Name",
               "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "Redis Security Group" ] ] }
+           }]
+        }
+     },
+     "JumpServerInstanceProfile": {
+        "Condition": "Production",
+        "Type": "AWS::IAM::InstanceProfile",
+        "Properties": {
+           "Path": "/",
+           "Roles": [{
+              "Ref": "JumpServerRole"
            }]
         }
      },
@@ -491,6 +557,45 @@
            }]
         }
      },
+     "JumpInstance" : {
+        "Type" : "AWS::EC2::Instance",
+        "Condition": "Production",
+        "Properties" : {
+           "KeyName" : { "Ref" : "KeyName" },
+           "InstanceType" :  { "Fn::FindInMap": [ "Settings", { "Ref": "SettingsType" }, "JumpInstanceType" ] },
+           "ImageId" : { "Ref" : "JumpServerAMI" },
+           "IamInstanceProfile": { "Ref": "JumpServerInstanceProfile" },
+           "DisableApiTermination": { "Ref": "EnableProtection"},
+           "NetworkInterfaces" : [ {
+              "DeviceIndex" : "0",
+              "GroupSet" : [ {"Ref": "AppServerDevAccessSecurityGroup" }, { "Ref": "JumpServerSecurityGroup" } ],
+              "SubnetId" : { "Ref" : "AZ1PublicSubnetID" }
+            } ],
+           "Tags": [{
+              "Key": "Name",
+              "Value": { "Fn::Join": [ " ", [ { "Ref" : "AWS::StackName"}, "Jump Server" ] ] }
+           }]
+         }
+      },
+      "JumpCPUAlarm" : {
+         "Type" : "AWS::CloudWatch::Alarm",
+         "Condition": "Production",
+         "Properties" : {
+            "AlarmDescription" : { "Fn::Join": [ " ", [ "CPU Alarm for", { "Ref" : "AWS::StackName"}, "Jump Server" ] ] },
+            "AlarmActions" : [ ],
+            "MetricName" : "CPUUtilization",
+            "Namespace" : "AWS/EC2",
+            "Statistic" : "Average",
+            "Period" : "60",
+            "EvaluationPeriods" : "3",
+            "Threshold" : "80",
+            "ComparisonOperator" : "GreaterThanThreshold",
+            "Dimensions" : [ {
+               "Name" : "InstanceId",
+               "Value" : { "Ref" : "JumpInstance" }
+            }]
+         }
+      },
      "LMSInstance" : {
         "Type" : "AWS::EC2::Instance",
         "Properties" : {
@@ -837,7 +942,7 @@
             "StorageEncrypted": true,
             "StorageType": "gp2",
             "PubliclyAccessible": false,
-            "VPCSecurityGroups": [ { "Ref": "DBSecurityGroup" } ],
+            "VPCSecurityGroups": [ { "Ref": "DBReadReplicaSecurityGroup" } ],
             "DBParameterGroupName": { "Ref": "DBParameterGroup" },
             "MonitoringInterval": "10",
             "MonitoringRoleArn": { "Fn::GetAtt": [ "DBInstanceMonitoringRole", "Arn" ]},
