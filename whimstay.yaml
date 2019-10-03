@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This Creates a lambda function that starts/stops the instance every 8AM and 8PM (weekday) respectively.
+
+Parameters: 
+  instanceid:
+    Description: ID of the instance to start/stop
+    Type: String
+    Default: i-0324136e146f5577b
+  application:
+    Description: The name of the application
+    Type: String
+    Default: whimstay
+  environment:
+    Description: The environment (production, staging, development, etc)
+    Type: String
+    Default: production
+    AllowedValues:
+      - production
+      - staging
+      - development
+  envShort:
+    Description: The environment (prd, stg, dev, etc)
+    Type: String
+    Default: prd
+    AllowedValues:
+      - prd
+      - stg
+      - dev
+  organization:
+    Description: The organization (iscale)
+    Type: String
+    Default: iscale
+  regionShort:
+    Description: Region where the the resource is hosted (eu1 - EU-Central-1, uw2 - US-West-2, uw1 - US-West-1)
+    Type: String
+    Default: uw1
+  zipFile:
+    Description: Name of the zip file stored in S3
+    Type: String
+    Default: whimstay.zip
+  bucketName:
+    Description: Name of the s3 bucket
+    Type: String
+    Default: iscale-uw1-lambda
+  objVersion:
+    Description: The S3 Object Version
+    Type: String
+
+Resources:
+  scheduledEventRuleStop:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Stops the instance every day at 20:00 GMT+8 (Mon-Fri)
+      Name: !Join [ '-', [!Ref organization, !Ref envShort, !Ref regionShort,!Ref application, stop] ]
+      ScheduleExpression: "cron(0 12 ? * MON-FRI *)"
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt lambdaFunction.Arn
+        Id: !Join [ '-', [!Ref organization, !Ref envShort, !Ref regionShort,!Ref application] ]
+
+  permissionForEventsToInvokeLambdaStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Join [ '-', [!Ref organization, !Ref envShort, !Ref regionShort,!Ref application, lambda] ]
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt scheduledEventRuleStop.Arn
+
+  scheduledEventRuleStart:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Starts the instance every day at 08:00 GMT+8 (Mon-Fri)
+      Name: !Join [ '-', [!Ref organization, !Ref envShort, !Ref regionShort,!Ref application, start] ]
+      ScheduleExpression: "cron(0 0 ? * MON-FRI *)"
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt lambdaFunction.Arn 
+        Id: !Join [ '-', [!Ref organization, !Ref envShort, !Ref regionShort,!Ref application, lambda] ]
+
+  permissionForEventsToInvokeLambdaStart:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Join [ '-', [!Ref organization, !Ref envShort, !Ref regionShort,!Ref application, lambda] ]
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt scheduledEventRuleStart.Arn
+
+  lambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com" 
+            Action: 
+             - "sts:AssumeRole"
+      Policies:
+        - 
+         PolicyName: "root"
+         PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - "ec2:Start*"
+                  - "ec2:Stop*"
+                Resource: "*"
+              - 
+                Effect: "Allow"
+                Action: 
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+              - 
+                Effect: "Allow"
+                Action: 
+                  - "s3:*"
+                Resource: 
+                  - "arn:aws:s3:::iscale-uw1-lambda"
+                  - "arn:aws:s3:::iscale-uw1-lambda/*"
+                
+  lambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which starts/stops the instance on a given schedule"
+      FunctionName: !Join [ '-', [!Ref organization, !Ref envShort, !Ref regionShort,!Ref application, lambda] ]
+      Handler: !Join [ '.', [!Ref application, lambda_handler] ]
+      Role: !GetAtt lambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Environment:
+        Variables:
+          INSTANCEID: !Ref instanceid
+          REGION: !Ref AWS::Region
+      Code: 
+        S3Bucket: !Ref bucketName
+        S3Key: !Ref zipFile
+        S3ObjectVersion: !Ref objVersion
+      # Tags:
+      #   - "Application": !Ref application
+      #   - "Environment": !Ref environment
+      #   - "Organization": !Ref organization
