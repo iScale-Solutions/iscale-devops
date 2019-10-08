@@ -2,6 +2,11 @@
     "AWSTemplateFormatVersion": "2010-09-09",
     "Description": "iScale Solutions Website Deployment",
     "Parameters": {
+         "instanceType": {
+            "Description": "The type of the Instance",
+            "Type": "String",
+            "Default": "t3.medium"
+         },
         "GlobalDomainName": {
             "Description": "Global domain name (E.g 'iscale-solutions.com')",
             "MinLength": "1",
@@ -32,6 +37,37 @@
          "MinLength": "1",
          "Type": "String",
          "ConstraintDescription": "AppServer AMI cannot be null"
+        },
+        "name": {
+            "Description": "Name of the client",
+            "Type": "String",
+            "Default": "iscalesolutions"
+        },
+        "environment": {
+            "Description": "The environment (production, staging, development, etc)",
+            "Type": "String",
+            "Default": "production",
+            "AllowedValues": ["production","staging","development"]
+        },
+        "envShort": {
+            "Description": "The environment (prd, stg, dev, etc)",
+            "Type": "String",
+            "Default": "prd",
+            "AllowedValues": ["prd","stg","dev"]
+        },
+        "organization": {
+            "Description": "The organization (iScale)",
+            "Type": "String",
+            "Default": "iscale"
+        },
+        "regionShort": {
+            "Description": "Region where the the resource is hosted (eu1 - EU-Central-1, uw2 - US-West-2, uw1 - US-West-1)",
+            "Type": "String",
+            "Default": "uw2"
+        },
+        "snsTopicStack": {
+            "Description": "name of the SNS Topic Stack",
+            "Type": "String"
         }
     },
     "Conditions": {
@@ -70,7 +106,7 @@
             }],
             "Conditions": [{
                "Field": "host-header",
-               "Values": [ { "Fn::Join": [ "", [ "*.", "Ref": "GlobalDomainName" ] ] } ]
+               "Values": [ { "Fn::Join": [ "", [ "*.", {"Ref": "GlobalDomainName"} ] ] } ]
             }],
             "ListenerArn": { "Fn::ImportValue": {"Fn::Sub": "${ELBStack}-HTTPListener"} },
             "Priority": 701
@@ -100,7 +136,7 @@
             }],
             "Conditions": [{
                "Field": "host-header",
-               "Values": [ { "Fn::Join": [ "", [ "*.", "Ref": "GlobalDomainName" ] ] } ]
+               "Values": [ { "Fn::Join": [ "", [ "*.", {"Ref": "GlobalDomainName"} ] ] } ]
             }],
             "ListenerArn": { "Fn::ImportValue": {"Fn::Sub": "${ELBStack}-SSLListener"} },
             "Priority": 701
@@ -243,7 +279,7 @@
          "Properties": {
             "ImageId": { "Ref": "AppServerAMI" },
             "KeyName": { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-InstanceKeyName"} },
-            "InstanceType": "t3.small",
+            "InstanceType": { "Ref": "instanceType" },
             "IamInstanceProfile": { "Ref": "AppServerInstanceProfile" },
             "DisableApiTermination": false,
             "NetworkInterfaces": [ {
@@ -305,6 +341,94 @@
                   "DNSName": { "Fn::ImportValue": {"Fn::Sub": "${ELBStack}-PublicELBDNS"} }
                }
             }]
+         }
+      },
+      "cloudWatchAlarmCPUUtilization": {
+         "Type": "AWS::CloudWatch::Alarm",
+         "Properties": {
+            "AlarmName": { "Fn::Join" : [ "-", [ {"Ref" : "organization"}, {"Ref" : "envShort"}, {"Ref" : "regionShort"},{"Ref" : "name"}, "cpu-utilization"] ] },
+            "MetricName": "CPUUtilization",
+            "Namespace": "AWS/EC2",
+            "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+            "EvaluationPeriods": "1",
+            "Period": "300",
+            "Statistic": "Average",
+            "Threshold": "80",
+            "AlarmActions": [ {"Fn::ImportValue": {"Fn::Sub": "${snsTopicStack}-Arn"}} ],
+            "OKActions": [ {"Fn::ImportValue": {"Fn::Sub": "${snsTopicStack}-Arn"}} ],
+            "Dimensions": [
+               {
+                  "Name": "InstanceId",
+                  "Value": { "Ref": "AppServerInstance" }
+               }
+            ]
+         }
+      },
+      "cloudWatchAlarmStatusChecks": {
+         "Type": "AWS::CloudWatch::Alarm",
+         "Properties": {
+            "AlarmName": { "Fn::Join" : [ "-", [ {"Ref" : "organization"}, {"Ref" : "envShort"}, {"Ref" : "regionShort"},{"Ref" : "name"}, "status-checks"] ] },
+            "MetricName": "StatusCheckFailed",
+            "Namespace": "AWS/EC2",
+            "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+            "EvaluationPeriods": "1",
+            "Period": "300",
+            "Statistic": "Minimum",
+            "Threshold": "1",
+            "AlarmActions": [ {"Fn::ImportValue": {"Fn::Sub": "${snsTopicStack}-Arn"}} ],
+            "OKActions": [ {"Fn::ImportValue": {"Fn::Sub": "${snsTopicStack}-Arn"}} ],
+            "Dimensions": [
+               {
+                  "Name": "InstanceId",
+                  "Value": { "Ref": "AppServerInstance" }
+               }
+            ]
+         }
+      },
+      "cloudWatchAlarmCPUCreditBalance": {
+         "Type": "AWS::CloudWatch::Alarm",
+         "Properties": {
+            "AlarmName": { "Fn::Join" : [ "-", [ {"Ref" : "organization"}, {"Ref" : "envShort"}, {"Ref" : "regionShort"},{"Ref" : "name"}, "cpu-credit-balance"] ] },
+            "MetricName": "CPUCreditBalance",
+            "Namespace": "AWS/EC2",
+            "ComparisonOperator": "LessThanOrEqualToThreshold",
+            "EvaluationPeriods": "1",
+            "Period": "300",
+            "Statistic": "Minimum",
+            "Threshold": "24",
+            "AlarmActions": [ {"Fn::ImportValue": {"Fn::Sub": "${snsTopicStack}-Arn"}} ],
+            "OKActions": [ {"Fn::ImportValue": {"Fn::Sub": "${snsTopicStack}-Arn"}} ],
+            "Dimensions": [
+               {
+                  "Name": "InstanceId",
+                  "Value": { "Ref": "AppServerInstance" }
+               }
+            ]
+         }
+      },
+      "cloudWatchAlarmUnhealthyHostCount": {
+         "Type": "AWS::CloudWatch::Alarm",
+         "Properties": {
+            "AlarmName": { "Fn::Join" : [ "-", [ {"Ref" : "organization"}, {"Ref" : "envShort"}, {"Ref" : "regionShort"},{"Ref" : "name"}, "unhealthy-host-count"] ] },
+            "MetricName": "UnHealthyHostCount",
+            "Namespace": "AWS/ApplicationELB",
+            "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+            "EvaluationPeriods": "1",
+            "Period": "60",
+            "Statistic": "Maximum",
+            "Threshold": "1",
+            "AlarmActions": [ {"Fn::ImportValue": {"Fn::Sub": "${snsTopicStack}-Arn"}} ],
+            "OKActions": [ {"Fn::ImportValue": {"Fn::Sub": "${snsTopicStack}-Arn"}} ],
+            "Dimensions": [
+               {
+                  "Name": "LoadBalancer",
+                  "Value": {"Fn::ImportValue": {"Fn::Sub": "${ELBStack}-LoadBalancerFullName"}}
+               },
+               {
+                  "Name": "TargetGroup",
+                  "Value": { "Fn::GetAtt": ["AppServerTargetGroup","TargetGroupFullName"] }
+               }
+            ]
          }
       }
    },
