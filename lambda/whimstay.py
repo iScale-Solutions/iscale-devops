@@ -25,8 +25,8 @@ def lambda_handler(event, context):
             
             # Email settings
             subject = "New Proxy IP Generated"
-            body = ("This is an auto-generated message. Do not reply. \r\n"
-                    "You may connect to your whimstay proxy server with the following IP: " 
+            body = ("This is an auto-generated message. DO NOT REPLY. \r\n"
+                    "You may connect to your whimstay proxy instance using the following IP: " 
                     + public_ip)
             charset = "utf8"
     
