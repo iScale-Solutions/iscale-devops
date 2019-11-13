@@ -32,6 +32,12 @@
            "Type": "AWS::EC2::Image::Id",
            "ConstraintDescription": "AppServer AMI cannot be null"
         },
+        "AppServerAMIV2": {
+         "Description": "Name of AppServerV2 AMI",
+         "MinLength": "1",
+         "Type": "AWS::EC2::Image::Id",
+         "ConstraintDescription": "AppServerV2 AMI cannot be null"
+      },
         "PublicELBSecurityGroup": {
          "Description": "Name of the public ELB Security Group",
          "MinLength": "1",
@@ -226,6 +232,41 @@
              }]
          }
       },
+      "AppServerTargetGroupV2": {
+         "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+         "Properties": {
+             "HealthCheckIntervalSeconds": "10",
+             "HealthCheckProtocol": "HTTP",
+             "HealthCheckTimeoutSeconds": "2",
+             "HealthyThresholdCount": "2",
+             "UnhealthyThresholdCount": "3",
+             "HealthCheckPath": "/health.php",
+             "Matcher": { "HttpCode": "200" },
+             "Port": "80",
+             "Protocol": "HTTP",
+             "TargetGroupAttributes": [],
+             "VpcId": { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-VPC" } },
+             "Tags": [{
+                "Key": "Name",
+                "Value": { "Fn::Join": [ " ", [ { "Fn::ImportValue": {"Fn::Sub": "${NetworkStack}-SetupName"} }, "eSport AppServer Target Group V2" ] ] }
+             }]
+         }
+      },
+      "HTTPListenerRuleV2": {
+         "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+         "Properties": {
+            "Actions": [{
+               "Type": "forward",
+               "TargetGroupArn": { "Ref": "AppServerTargetGroupV2" }
+            }],
+            "Conditions": [{
+               "Field": "host-header",
+               "Values": [ { "Fn::Join": [ "", [ "test.", {"Ref": "GlobalDomainName"} ] ] } ]
+            }],
+            "ListenerArn": { "Fn::ImportValue": {"Fn::Sub": "${ELBStack}-HTTPListener"} },
+            "Priority": 101
+         }
+      },
       "HTTPListenerRule": {
          "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
          "Properties": {
@@ -271,6 +312,21 @@
             "Priority": 801
          }
       },
+      "SSLListenerRuleV2": {
+         "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+         "Properties": {
+            "Actions": [{
+               "Type": "forward",
+               "TargetGroupArn": { "Ref": "AppServerTargetGroupV2" }
+            }],
+            "Conditions": [{
+               "Field": "host-header",
+               "Values": [ { "Fn::Join": [ "", [ "test.", {"Ref": "GlobalDomainName"} ] ] } ]
+            }],
+            "ListenerArn": { "Fn::ImportValue": {"Fn::Sub": "${ELBStack}-SSLListener"} },
+            "Priority": 101
+         }
+      },
       "SSLListenerRuleDomain": {
          "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
          "Properties": {
@@ -299,7 +355,45 @@
                    }
                 ]
              },
-             "Path": "/"
+             "Path": "/",
+             "ManagedPolicyArns" : ["arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"]
+          }
+       },
+       "AllowAccessToS3": {
+         "Type": "AWS::IAM::Policy",
+         "Properties": {
+            "PolicyName": "AllowAccessToS3",
+            "PolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [
+               {
+                  "Effect": "Allow",
+                  "Action": [
+                     "s3:Get*",
+                     "s3:List*"
+                  ],
+                  "Resource": "*"
+               }]
+             },
+             "Roles": [{ "Ref": "AppServerRole" }]
+          }
+       },
+       "GetSecretValuePolicy": {
+         "Type": "AWS::IAM::Policy",
+         "Properties": {
+            "PolicyName": "GetSecretValue",
+            "PolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [
+               {
+                  "Effect": "Allow",
+                  "Action": [
+                     "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": "*"
+               }]
+             },
+             "Roles": [{ "Ref": "AppServerRole" }]
           }
        },
        "AllowSendAWSLogsPolicy": {
@@ -377,28 +471,6 @@
              }]
           }
       },
-      "AppServerRole": {
-          "Type": "AWS::IAM::Role",
-          "Properties": {
-             "AssumeRolePolicyDocument": {
-                "Version": "2012-10-17",
-                   "Statement": [
-                      {
-                         "Effect": "Allow",
-                         "Principal": {
-                         "Service": [
-                            "ec2.amazonaws.com"
-                            ]
-                         },
-                         "Action": [
-                            "sts:AssumeRole"
-                         ]
-                      }
-                  ]
-               },
-               "Path": "/"
-            }
-        },
        "AppServerInstanceProfile": {
             "Type": "AWS::IAM::InstanceProfile",
             "Properties": {
@@ -410,6 +482,32 @@
                 ]
             }
       },
+      "DefaultLaunchConfiguration": {
+         "Type" : "AWS::AutoScaling::LaunchConfiguration",
+         "Properties" : {
+             "AssociatePublicIpAddress" : false,
+             "IamInstanceProfile" : { "Ref": "AppServerInstanceProfile" },
+             "ImageId" : { "Ref": "AppServerAMIV2" },
+             "InstanceMonitoring" : true,
+             "InstanceType" : { "Ref": "instanceType" },
+             "KeyName" : "kmelchor",
+             "SecurityGroups" : [ { "Ref": "AppServerSecurityGroup" } ],
+             "UserData" : {"Fn::Base64" : 
+               {
+               "Fn::Join" : ["", [
+                  "#!/bin/bash\n",
+                  "yum -y update\n",
+                  "yum -y install jq\n",
+                  "yum -y install ruby\n",
+                  "yum -y install wget\n",
+                  "cd /home/ec2-user\n",
+                  "wget https://aws-codedeploy-", {"Ref" : "AWS::Region"}, ".s3.amazonaws.com/latest/install\n",
+                  "chmod +x ./install\n",
+                  "./install auto\n"
+               ]]
+               }}
+           }
+       },
       "AppServerInstance": {
          "Type": "AWS::EC2::Instance",
          "Properties": {
@@ -503,6 +601,21 @@
                },
                "Name": { "Ref": "GlobalDomainName" }
             }
+      },
+      "WWWRecordV2": {
+         "Type": "AWS::Route53::RecordSetGroup",
+         "Properties": {
+            "HostedZoneId": { "Ref": "HostedZone" },
+            "Comment": "WWW Record",
+            "RecordSets" : [{
+               "Name": { "Fn::Join": [ "", ["test.", { "Ref": "GlobalDomainName" }, "." ] ] },
+               "Type": "A",
+               "AliasTarget": {
+                  "HostedZoneId": { "Fn::ImportValue": {"Fn::Sub": "${ELBStack}-PublicELBCanonicalHostedZoneID"} },
+                  "DNSName": { "Fn::ImportValue": {"Fn::Sub": "${ELBStack}-PublicELBDNS"} }
+               }
+            }]
+         }
       },
       "WWWRecord": {
          "Type": "AWS::Route53::RecordSetGroup",
@@ -621,8 +734,35 @@
                }
             ]
          }
+      },
+      "DefaultSecret": {
+         "Type": "AWS::SecretsManager::Secret",
+         "Properties": {
+            "Name": { "Fn::Join" : [ "-", [ {"Ref" : "organization"}, {"Ref" : "envShort"}, {"Ref" : "regionShort"},{"Ref" : "name"}, "parameters"] ] }
+         }
       }
    },
    "Outputs": {
+      "Name" : {
+         "Description": "Unique name/identifier",
+         "Value" : {"Fn::Join" : [ "-", [ {"Ref" : "organization"}, {"Ref" : "envShort"}, {"Ref" : "regionShort"},{"Ref" : "name"}] ]},
+         "Export" : {
+            "Name" : {"Fn::Sub": "${AWS::StackName}-Name" }
+         }
+      },
+      "TargetGroupV2FullName" : {
+         "Description": "The Target Group V2 Full Name",
+         "Value" : {"Fn::GetAtt" : ["AppServerTargetGroupV2", "TargetGroupFullName"]},
+         "Export" : {
+            "Name" : {"Fn::Sub": "${AWS::StackName}-TargetGroupV2FullName" }
+         }
+      },
+      "TargetGroupName" : {
+         "Description": "The Target Group V2 Name",
+         "Value" : {"Fn::GetAtt" : ["AppServerTargetGroupV2", "TargetGroupName"]},
+         "Export" : {
+            "Name" : {"Fn::Sub": "${AWS::StackName}-TargetGroupName" }
+         }
+      }
    }
 }
