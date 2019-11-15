@@ -74,6 +74,7 @@ Resources:
         -
           TriggerEvents:
             - DeploymentSuccess
+            - DeploymentFailure
           TriggerName: Deployment
           TriggerTargetArn: !Ref CodeDeploySnsTopic
       AutoRollbackConfiguration:
@@ -138,6 +139,8 @@ Resources:
                 Action: 
                   - codedeploy:GetDeploymentGroup
                   - codedeploy:UpdateDeploymentGroup
+                  - codedeploy:GetDeployment
+                  - autoscaling:DeleteAutoScalingGroup
                 Resource: "*"
               - 
                 Effect: "Allow"
@@ -166,7 +169,7 @@ Resources:
   LambdaSubscription:
     Type: "AWS::SNS::Subscription"
     Properties:
-      Endpoint: !GetAtt CloudWatchLambdaFunction.Arn
+      Endpoint: !GetAtt CodeDeployLambdaFunction.Arn
       Protocol: lambda
       TopicArn: !Ref CodeDeploySnsTopic
 
@@ -187,25 +190,26 @@ Resources:
 # Lambda Section
 ####
 
-  CloudWatchLambdaResourcePolicy:
-    DependsOn: CloudWatchLambdaFunction
+  CodeDeployLambdaResourcePolicy:
+    DependsOn: CodeDeployLambdaFunction
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref CloudWatchLambdaFunction
+      FunctionName: !Ref CodeDeployLambdaFunction
       Action:  "lambda:InvokeFunction"
       Principal:  "sns.amazonaws.com"
       SourceArn: !Ref CodeDeploySnsTopic
 
-  CloudWatchLambdaFunction:
+  CodeDeployLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Join
       - '-'
       - - Fn::ImportValue: !Sub "${EsportStack}-Name"
-        - update-cloudwatch
+        - code-deploy
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.6
+      Timeout: 900
       Environment:
         Variables:
           ALARMS: !If
@@ -219,46 +223,71 @@ Resources:
 
           import boto3
           import os
+          import json
+          import time
 
           def lambda_handler(event, context):
 
               cd = boto3.client('codedeploy')
               cw = boto3.client('cloudwatch')
               cloudwatch = boto3.resource('cloudwatch')
+              ec2 = boto3.client('autoscaling')
               
-              # Get the new asg from the last successful deployment
-              response = cd.get_deployment_group(applicationName=os.environ['APPLICATION_NAME'],
-                                                deploymentGroupName=os.environ['DEPLOYMENT_GROUP_NAME'])
-                                                
-              ASG=response['deploymentGroupInfo']['autoScalingGroups'][0]['name']
-              
-              # Update cloudwatch alarm with the new ASG
-              for ALARM in os.environ['ALARMS'].split(","):
-                  
-                  # Get the existing parameters
-                  # This will be used to update the new alarm
-                  params = cw.describe_alarms(AlarmNames=[ALARM])
+              SNS_MSG=event['Records'][0]['Sns']['Message']
+              MSG=json.loads(SNS_MSG)
 
-                  # Update the alarm with dimensions
-                  metric = cloudwatch.Metric(params['MetricAlarms'][0]['Namespace'],
-                                            params['MetricAlarms'][0]['MetricName'])
-                  metric.put_alarm(
-                      AlarmName=params['MetricAlarms'][0]['AlarmName'],
-                      MetricName=params['MetricAlarms'][0]['MetricName'],
-                      Namespace=params['MetricAlarms'][0]['Namespace'],
-                      ComparisonOperator=params['MetricAlarms'][0]['ComparisonOperator'],
-                      EvaluationPeriods=params['MetricAlarms'][0]['EvaluationPeriods'],
-                      Period=params['MetricAlarms'][0]['Period'],
-                      Statistic=params['MetricAlarms'][0]['Statistic'],
-                      Threshold=params['MetricAlarms'][0]['Threshold'],
-                      AlarmActions=params['MetricAlarms'][0]['AlarmActions'],
-                      OKActions=params['MetricAlarms'][0]['OKActions'],
-                      Dimensions=[
-                          {
-                              'Name': 'AutoScalingGroupName',
-                              'Value': ASG
-                          },]
-                      )
+              STATUS=MSG['status']
+              DEPLOYMENT_ID=MSG['deploymentId']
+              # Get the new asg from the last successful deployment
+              # response = cd.get_deployment_group(applicationName=os.environ['APPLICATION_NAME'],
+              #                                   deploymentGroupName=os.environ['DEPLOYMENT_GROUP_NAME'])
+              response=cd.get_deployment(deploymentId=DEPLOYMENT_ID)
+              ASG=response['deploymentInfo']['targetInstances']['autoScalingGroups'][0]
+
+              #ASG=response['deploymentGroupInfo']['autoScalingGroups'][0]['name']
+              print("SNS Message:= " + SNS_MSG)
+              print("Deployment Status:= " + STATUS)
+              print("Deployment ID:= " + DEPLOYMENT_ID)
+              print("AutoScaling Group:= " + ASG)
+
+              if STATUS == 'SUCCEEDED':
+
+                print("Updating cloudwatch alarms")
+                # Update cloudwatch alarm with the new ASG
+                for ALARM in os.environ['ALARMS'].split(","):
+                    
+                    # Get the existing parameters
+                    # This will be used to update the new alarm
+                    params = cw.describe_alarms(AlarmNames=[ALARM])
+
+                    # Update the alarm with dimensions
+                    metric = cloudwatch.Metric(params['MetricAlarms'][0]['Namespace'],
+                                              params['MetricAlarms'][0]['MetricName'])
+                    metric.put_alarm(
+                        AlarmName=params['MetricAlarms'][0]['AlarmName'],
+                        MetricName=params['MetricAlarms'][0]['MetricName'],
+                        Namespace=params['MetricAlarms'][0]['Namespace'],
+                        ComparisonOperator=params['MetricAlarms'][0]['ComparisonOperator'],
+                        EvaluationPeriods=params['MetricAlarms'][0]['EvaluationPeriods'],
+                        Period=params['MetricAlarms'][0]['Period'],
+                        Statistic=params['MetricAlarms'][0]['Statistic'],
+                        Threshold=params['MetricAlarms'][0]['Threshold'],
+                        AlarmActions=params['MetricAlarms'][0]['AlarmActions'],
+                        OKActions=params['MetricAlarms'][0]['OKActions'],
+                        Dimensions=[
+                            {
+                                'Name': 'AutoScalingGroupName',
+                                'Value': ASG
+                            },]
+                        )
+
+              elif STATUS == 'FAILED':
+
+                # wait for 10 minutes before actually deleting the asg
+                time.sleep(600)
+                print("deleting autoscaling group:= " + ASG)
+                # Remove ASG after deployment
+                ec2.delete_auto_scaling_group(AutoScalingGroupName=ASG,ForceDelete=True)
 
   DeploymentGroupLambdaFunction:
     Type: AWS::Lambda::Function
