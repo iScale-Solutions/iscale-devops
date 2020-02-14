@@ -21,9 +21,8 @@ Metadata:
           - SNSStackName
       -
         Label:
-          default: "EC2 Configuration"
+          default: "EC2/Auto-Scaling Group Configuration"
         Parameters:
-          - AssociateEIP
           - AssociatePublicIp
           - InstanceAMI
           - InstanceType
@@ -32,6 +31,9 @@ Metadata:
           - KeyName
           - TopicArn
           - EnableCPUCreditAlarm
+          - MaxSize
+          - MinSize
+          - SpotPrice
       -
         Label:
           default: "S3 Configuration"
@@ -65,8 +67,6 @@ Metadata:
         default: "Load Balancer Stack Name"
       SNSStackName:
         default: "SNS Topic Stack Name"
-      AssociateEIP:
-        default: "Associate Elastic IP"
       AssociatePublicIp:
         default: "Associate Public IP"
       InstanceAMI:
@@ -81,6 +81,12 @@ Metadata:
         default: "Key Name"
       EnableCPUCreditAlarm:
         default: "Enable CPU Credit Alarm"
+      MaxSize:
+        default: "Max Size"
+      MinSize:
+        default: "Min Size"
+      SpotPrice:
+        default: "Spot Price"
       Versioning:
         default: "Versioning"
       HealthCheckIntervalSeconds:
@@ -137,13 +143,6 @@ Parameters:
     Description: the name of the SNS stack.
     Type: String
     Default: iscale-hosting-prd-uw2-sns
-  AssociateEIP:
-    Description: Set to true if associating elastic ip address to instance is enabled and AssociatePublicIp is true. Otherwise, set to false.
-    Type: String
-    Default: false
-    AllowedValues:
-      - true
-      - false
   AssociatePublicIp:
     Description: Set to true if associating public ip address to instance is enabled and AssociateEIP is true. Otherwise, set to false.
     Type: String
@@ -154,11 +153,11 @@ Parameters:
   InstanceAMI:
     Description: AMI image used by the EC2 instance.
     Type: String
-    Default: ami-06d810af681359989
+    Default: ami-077a363c9a9e6ef84
   InstanceType:
     Description: The instnace type of the EC2 instance (e.g. t2.micro, t2.small, c4.large, etc).
     Type: String
-    Default: t3.small
+    Default: t3.medium
   PolicyArns:
     Description: List of policy Arns associated to the EC2 instance.
     Type: String
@@ -181,6 +180,18 @@ Parameters:
     AllowedValues:
       - true
       - false
+  MaxSize:
+    Description: The maximum number of Amazon EC2 instances in the Auto Scaling group
+    Type: Number
+    Default: 1
+  MinSize:
+    Description: The minimum number of Amazon EC2 instances in the Auto Scaling group
+    Type: Number
+    Default: 1
+  SpotPrice:
+    Description: The maximum hourly price to be paid for any Spot Instance launched to fulfill the request. Spot Instances are launched when the price you specify exceeds the current Spot price.
+    Type: String
+    Default: 2
   Versioning:
     Description: Enables multiple versions of all objects in this bucket. You might enable versioning to prevent objects from being deleted or overwritten by mistake or to archive objects so that you can retrieve previous versions of them.
     Type: String
@@ -294,7 +305,6 @@ Mappings:
 Conditions:
 
   IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
-  IsAssociateEIP: !Equals [!Ref AssociateEIP, true]
   IsAssociatePublicIp: !Equals [!Ref AssociatePublicIp, true]
   HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
   IsSsl: !Equals [!Ref InstancePort, '443']
@@ -326,9 +336,9 @@ Resources:
     Properties: 
       Certificates: 
         - CertificateArn: !Ref DefaultCertificate
-      ListenerArn: arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
-      # Fn::ImportValue:
-        #   !Sub "${LoadBalancerStackName}-SSLListener" 
+      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-SSLListener" 
 
 ####
 # S3 Section
@@ -365,16 +375,13 @@ Resources:
       HealthCheckTimeoutSeconds: !Ref HealthCheckTimeoutSeconds
       HealthyThresholdCount: !Ref HealthyThresholdCount
       UnhealthyThresholdCount: !Ref UnhealthyThresholdCount
-      Targets:
-        - Id: !Ref DefaultInstance
-          Port: !Ref InstancePort
       Matcher: 
         HttpCode: !Ref HttpCodes
       Port: !Ref InstancePort
       Protocol: !If [IsSsl, "HTTPS", "HTTP"]
-      VpcId: vpc-0eeeb47ddc550dcb5
-        # Fn::ImportValue:
-        #   !Sub "${NetworkStackName}-VpcId"
+      VpcId: #vpc-0eeeb47ddc550dcb5
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
       Tags:
         - 
           Key: Name
@@ -397,9 +404,9 @@ Resources:
         - Field: host-header
           Values: 
             - !Join ['.', ['*', !Ref ClientDomainName]]
-      ListenerArn: arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
-        # Fn::ImportValue:
-        #   !Sub "${LoadBalancerStackName}-SSLListener" 
+      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn" 
       Priority: !Ref Priority1
 
   DefaultListenerRule2:
@@ -412,9 +419,9 @@ Resources:
         - Field: host-header
           Values: 
             - !Ref ClientDomainName
-      ListenerArn: arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
-        # Fn::ImportValue:
-        #   !Sub "${LoadBalancerStackName}-SSLListener"
+      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
       Priority: !Ref Priority2
 
   # These listeners are for HTTP
@@ -428,9 +435,9 @@ Resources:
         - Field: host-header
           Values: 
             - !Join ['.', ['*', !Ref ClientDomainName]]
-      ListenerArn: arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/4a01c6efc69d9d60
-        # Fn::ImportValue:
-        #   !Sub "${LoadBalancerStackName}-HTTPListener"
+      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/4a01c6efc69d9d60
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-HttpListenerArn"
       Priority: !Ref Priority1
 
   DefaultListenerRule4:
@@ -443,30 +450,34 @@ Resources:
         - Field: host-header
           Values:
             - !Ref ClientDomainName
-      ListenerArn: arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/4a01c6efc69d9d60
-        # Fn::ImportValue:
-        #   !Sub "${LoadBalancerStackName}-HTTPListener"
+      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/4a01c6efc69d9d60
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-HttpListenerArn"
       Priority: !Ref Priority2
 
-  DefaultInstance:
-    Type: AWS::EC2::Instance
-    Properties: 
-      ImageId: !Ref InstanceAMI
+
+####
+# AutoScaling Group Section
+####
+
+  DefaultLaunchConfig: 
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
       KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      ImageId: !Ref InstanceAMI
+      SecurityGroups: [!GetAtt DefaultSecurityGroup.GroupId]
       InstanceType: !Ref InstanceType
-      IamInstanceProfile: !Ref DefaultIamInstanceProfile
-      Monitoring: !Ref EnableMonitoring
-      NetworkInterfaces:
-        - AssociatePublicIpAddress: !Ref AssociatePublicIp
-          DeviceIndex: 0
-          GroupSet: [!GetAtt DefaultSecurityGroup.GroupId]
-          SubnetId: subnet-0283386e71fb12890	
-            # Fn::ImportValue:
-            #   !Sub "${NetworkStackName}-PublicSubnetId1"
+      AssociatePublicIpAddress: !Ref AssociatePublicIp
+      IamInstanceProfile: !GetAtt DefaultIamInstanceProfile.Arn
+      InstanceMonitoring: !Ref EnableMonitoring
+      SpotPrice: !Ref SpotPrice
       UserData:
         Fn::Base64: !Sub
           - |
             #cloud-config
+            runcmd:
+              - cfn-signal -e 0 --stack ${AWS::StackName} --resource ${ASG_LOGICAL_ID} --region ${AWS::Region}
+
             write_files:
               - path: /var/lib/cloud/instance/custom-data.sh
                 permissions: 0700
@@ -486,22 +497,42 @@ Resources:
             APPLICATION_SITE: !Ref OrgName
             INSTANCE_ROLE: !Ref DefaultIamRole
             BUCKET_NAME: !Ref DefaultBucket
+            ASG_LOGICAL_ID: DefaultAutoScalingGroup
+
+  DefaultAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+    CreationPolicy:
+      AutoScalingCreationPolicy:
+        MinSuccessfulInstancesPercent: 100
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+    Properties:
+      Cooldown: 60
+      MaxSize: !Ref MaxSize
+      MinSize: !Ref MinSize
+      VPCZoneIdentifier:
+        -
+          Fn::ImportValue:
+            !Sub "${NetworkStackName}-PublicSubnetId1"
+      TargetGroupARNs: [!Ref DefaultTargetGroup]
+      LaunchConfigurationName: !Ref DefaultLaunchConfig
       Tags:
         - 
           Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          PropagateAtLaunch: True
         - 
           Key: Environment
           Value: !Ref EnvName
+          PropagateAtLaunch: True
         - 
           Key: Organization
           Value: !Ref OrgName
-
-  DefaultEIP:
-    Type: AWS::EC2::EIP
-    Condition: IsAssociateEIP
-    Properties:
-      InstanceId: !Ref DefaultInstance
+          PropagateAtLaunch: True
 
 ####
 # VPC Section
@@ -512,9 +543,9 @@ Resources:
     Properties:
       GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-      VpcId: vpc-0eeeb47ddc550dcb5
-        # Fn::ImportValue:
-        #   !Sub "${NetworkStackName}-VpcId"
+      VpcId: #vpc-0eeeb47ddc550dcb5
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
       Tags:
         - 
           Key: Name
@@ -527,9 +558,9 @@ Resources:
       IpProtocol: TCP
       FromPort: !Ref InstancePort
       ToPort: !Ref InstancePort
-      SourceSecurityGroupId: sg-0b8f5f31b0f5bcd2e
-        # Fn::ImportValue:
-        #   !Sub "${LoadBalancerStackName}-SecurityGroupId"
+      SourceSecurityGroupId: #sg-0b8f5f31b0f5bcd2e
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-SecurityGroupId"
   
   DefultSecurityGroupEgress:
     Type: AWS::EC2::SecurityGroupEgress
@@ -589,34 +620,34 @@ Resources:
                   - s3:GetObject
                 Resource: !Join ["/",[!GetAtt DefaultBucket.Arn,"*"]]
 
-  LambdaIamRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Action: sts:AssumeRole
-            Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-      ManagedPolicyArns: 
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, lambda]]
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - 
-                Effect: Allow
-                Action:
-                  - ec2:DescribeImages
-                Resource: "*"
-              - 
-                Effect: Allow
-                Action: 
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: arn:aws:logs:*:*:*
+  # LambdaIamRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: 2012-10-17
+  #       Statement:
+  #         - Action: sts:AssumeRole
+  #           Effect: Allow
+  #           Principal:
+  #             Service: lambda.amazonaws.com
+  #     ManagedPolicyArns: 
+  #       - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  #     Policies:
+  #       - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, lambda]]
+  #         PolicyDocument:
+  #           Version: '2012-10-17'
+  #           Statement:
+  #             - 
+  #               Effect: Allow
+  #               Action:
+  #                 - ec2:DescribeImages
+  #               Resource: "*"
+  #             - 
+  #               Effect: Allow
+  #               Action: 
+  #                 - logs:CreateLogStream
+  #                 - logs:PutLogEvents
+  #               Resource: arn:aws:logs:*:*:*
 
 # ####
 # # Lambda Section
@@ -704,8 +735,8 @@ Resources:
           Fn::ImportValue:
             !Sub "${SNSStackName}-TopicArn"
       Dimensions:
-        - Name: InstanceId
-          Value: !Ref DefaultInstance
+        - Name: AutoScalingGroupName
+          Value: !Ref DefaultAutoScalingGroup
 
   StatusChecksCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -727,8 +758,8 @@ Resources:
           Fn::ImportValue:
             !Sub "${SNSStackName}-TopicArn"
       Dimensions:
-        - Name: InstanceId
-          Value: !Ref DefaultInstance
+        - Name: AutoScalingGroupName
+          Value: !Ref DefaultAutoScalingGroup
 
   CPUCreditBalanceCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -751,8 +782,8 @@ Resources:
           Fn::ImportValue:
             !Sub "${SNSStackName}-TopicArn"
       Dimensions:
-        - Name: InstanceId
-          Value: !Ref DefaultInstance
+        - Name: AutoScalingGroupName
+          Value: !Ref DefaultAutoScalingGroup
 
   UnhealthyHostCountCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -794,23 +825,3 @@ Outputs:
     Value: !GetAtt DefaultIamRole.Arn
     Export: 
       Name: !Sub ${AWS::StackName}-InstanceRoleArn
-
-  InstanceId:
-    Description: The EC2 instance id
-    Value: !Ref DefaultInstance
-    Export: 
-      Name: !Sub ${AWS::StackName}-InstanceId
-
-  PublicEIp:
-    Condition: IsAssociateEIP
-    Description: The EC2 instance public ip
-    Value: !Ref DefaultEIP
-    Export: 
-      Name: !Sub ${AWS::StackName}-PublicIp
-
-  PublicIp:
-    Condition: IsAssociatePublicIp
-    Description: The EC2 instance public ip
-    Value: !GetAtt DefaultInstance.PublicIp
-    Export: 
-      Name: !Sub ${AWS::StackName}-PublicIp
