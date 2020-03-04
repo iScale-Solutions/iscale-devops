@@ -1,0 +1,799 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions resources for Tasaki
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      -
+        Label:
+          default: "Stack Configuration"
+        Parameters:
+          - NetworkStackName
+          - LoadBalancerStackName
+          - SNSStackName
+      -
+        Label:
+          default: "EC2/Auto-Scaling Group Configuration"
+        Parameters:
+          - AssociatePublicIp
+          - InstanceAMI
+          - InstanceType
+          - PolicyArns
+          - EnableMonitoring
+          - KeyName
+          - TopicArn
+          - EnableCPUCreditAlarm
+          - MaxSize
+          - MinSize
+          - SpotPrice
+      -
+        Label:
+          default: "S3 Configuration"
+        Parameters:
+          - Versioning
+      -
+        Label:
+          default: "Load Balancer Configuration"
+        Parameters:
+          - HealthCheckIntervalSeconds
+          - HealthCheckPath
+          - HealthCheckTimeoutSeconds
+          - HealthyThresholdCount
+          - UnhealthyThresholdCount
+          - HttpCodes
+          - InstancePort
+          - ClientDomainName
+          - Priority1
+          - Priority2
+
+    ParameterLabels:
+      Name:
+        default: "Resource Name"
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+      NetworkStackName:
+        default: "Network Stack Name"
+      LoadBalancerStackName:
+        default: "Load Balancer Stack Name"
+      SNSStackName:
+        default: "SNS Topic Stack Name"
+      AssociatePublicIp:
+        default: "Associate Public IP"
+      InstanceAMI:
+        default: "Instance AMI ID"
+      InstanceType:
+        default: "Instance Type"
+      PolicyArns:
+        default: "Policy ARNs"
+      EnableMonitoring:
+        default: "Enable Monitoring"
+      KeyName:
+        default: "Key Name"
+      EnableCPUCreditAlarm:
+        default: "Enable CPU Credit Alarm"
+      MaxSize:
+        default: "Max Size"
+      MinSize:
+        default: "Min Size"
+      SpotPrice:
+        default: "Spot Price"
+      Versioning:
+        default: "Versioning"
+      HealthCheckIntervalSeconds:
+        default: "Health Check Interval in Seconds"
+      HealthCheckPath:
+        default: "Health Check Path"
+      HealthCheckTimeoutSeconds:
+        default: "Health Check Timeout in Seconds"
+      HealthyThresholdCount:
+        default: "Healthy Threshold Count"
+      UnhealthyThresholdCount:
+        default: "Unhealthy Threshold Count"
+      HttpCodes:
+        default: "Health Check HTTP Codes"
+      InstancePort:
+        default: "Instance Port"
+      ClientDomainName:
+        default: "Domain Name"
+      Priority1:
+        default: "Listener rule 1 Priority"
+      Priority2:
+        default: "Listener rule 2 Priority"
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: tasaki
+    MaxLength: 32 # Max length for target group name is only 32 characters.
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-hosting
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-network
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-loadbalancer
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-hosting-dev-uw2-tasaki-sns
+  AssociatePublicIp:
+    Description: Set to true if associating public ip address to instance is enabled and AssociateEIP is true. Otherwise, set to false.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  InstanceAMI:
+    Description: AMI image used by the EC2 instance.
+    Type: String
+    Default: ami-07afc2020539bc46e
+  InstanceType:
+    Description: The instnace type of the EC2 instance (e.g. t2.micro, t2.small, c4.large, etc).
+    Type: String
+    Default: t3.medium
+  PolicyArns:
+    Description: List of policy Arns associated to the EC2 instance.
+    Type: String
+    Default: "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  EnableMonitoring:
+    Description: Set to true if monitoring is enabled for the EC2 instance. Otherwise, disabled.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  KeyName:
+    Description: Name of the Key Pair to use.
+    Type: String
+    Default: ""
+  EnableCPUCreditAlarm:
+    Description: Set to true if CPU credit alarm is enabled (Applicable only for t* instance types. E.g. t2.small, t3.small). Otherwise, disabled.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  MaxSize:
+    Description: The maximum number of Amazon EC2 instances in the Auto Scaling group
+    Type: Number
+    Default: 1
+  MinSize:
+    Description: The minimum number of Amazon EC2 instances in the Auto Scaling group
+    Type: Number
+    Default: 1
+  SpotPrice:
+    Description: The maximum hourly price to be paid for any Spot Instance launched to fulfill the request. Spot Instances are launched when the price you specify exceeds the current Spot price.
+    Type: String
+    Default: 2
+  Versioning:
+    Description: Enables multiple versions of all objects in this bucket. You might enable versioning to prevent objects from being deleted or overwritten by mistake or to archive objects so that you can retrieve previous versions of them.
+    Type: String
+    Default: Enabled
+    AllowedValues:
+      - Enabled
+      - Suspended
+  HealthCheckIntervalSeconds:
+    Description: The approximate amount of time, in seconds, between health checks of an individual target.
+    Type: Number
+    Default: 10
+  HealthCheckPath:
+    Description: The ping path that is the destination on the targets for health checks.
+    Type: String
+    Default: /health.php
+  HealthCheckTimeoutSeconds:
+    Description: The amount of time, in seconds, during which no response from a target means a failed health check.
+    Type: Number
+    Default: 2
+  HealthyThresholdCount:
+    Description: The number of consecutive health checks successes required before considering an unhealthy target healthy.
+    Type: Number
+    Default: 2
+  UnhealthyThresholdCount:
+    Description: The number of consecutive health check failures required before considering a target unhealthy.
+    Type: Number
+    Default: 3
+  HttpCodes:
+    Description: The HTTP codes to use when checking for a successful response from a target.
+    Type: String
+    Default: 200,302
+  InstancePort:
+    Description: The port on which the targets receive traffic.
+    Type: Number
+    Default: 80
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+    Default: iscale-software.com
+  Priority1:
+    Description: The priority for listener rule 1.
+    Type: Number
+    Default: 259
+    MinValue: 1
+    MaxValue: 50000
+  Priority2:
+    Description: The priority for listener rule 2.
+    Type: Number
+    Default: 260
+    MinValue: 1
+    MaxValue: 50000
+
+Mappings: 
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
+  RegionShort:
+    us-east-2:
+      Name: ue2
+    us-east-1:
+      Name: ue1
+    us-west-1:
+      Name: uw1
+    us-west-2:
+      Name: uw2
+    ap-east-1:
+      Name: ae1
+    ap-south-1:
+      Name: as1
+    ap-northeast-1:
+      Name: ane1
+    ap-northeast-2:
+      Name: ane2
+    ap-northeast-3:
+      Name: ane3
+    ap-southeast-1:
+      Name: ase1
+    ap-southeast-2:
+      Name: ase2
+    ca-central-1:
+      Name: cc1
+    cn-north-1:
+      Name: cn1
+    cn-northwest-1:
+      Name: cnw1
+    eu-central-1:
+      Name: ec1
+    eu-west-1:
+      Name: ew1
+    eu-west-2:
+      Name: ew2
+    eu-west-3:
+      Name: ew3
+    eu-north-1:
+      Name: en1
+    me-south-1:
+      Name: ms1
+    sa-east-1:
+      Name: se1
+    us-gov-east-1:
+      Name: uge1
+    us-gov-west-1:
+      Name: ugw1 
+
+Conditions:
+
+  IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
+  IsAssociatePublicIp: !Equals [!Ref AssociatePublicIp, true]
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+  IsSsl: !Equals [!Ref InstancePort, '443']
+
+Resources:
+
+####
+# Certificate Section
+####
+
+  DefaultCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Join [".", ["tasaki", !Ref ClientDomainName]]
+      ValidationMethod: DNS
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  DefaultListenerCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties: 
+      Certificates: 
+        - CertificateArn: !Ref DefaultCertificate
+      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-SSLListener"
+
+####
+# S3 Section
+####
+
+  DefaultBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VersioningConfiguration:
+        Status: !Ref Versioning
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+# ####
+# # EFS Section
+# ####
+
+#   DefaultFileSystem:
+#     Type: AWS::EFS::FileSystem
+#     Properties:
+#       Encrypted: true
+#       KmsKeyId: !GetAtt DefaultKey.Arn
+
+#   DefaultKey:
+#     Type: AWS::KMS::Key
+#     Properties:
+#       KeyPolicy:
+#         Version: 2012-10-17
+#         Id: key-default-1
+#         Statement:
+#           - 
+#             Sid: Enable IAM User Permissions
+#             Effect: Allow
+#             Principal:
+#               AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':root']]
+#             Action:
+#               - 'kms:*'
+#             Resource: '*'
+#           - 
+#             Sid: Allow administration of the key
+#             Effect: Allow
+#             Principal:
+#               AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':role/MasterAccountAccessRole']]
+#             Action:
+#               - "kms:Create*"
+#               - "kms:Describe*"
+#               - "kms:Enable*"
+#               - "kms:List*"
+#               - "kms:Put*"
+#               - "kms:Update*"
+#               - "kms:Revoke*"
+#               - "kms:Disable*"
+#               - "kms:Get*"
+#               - "kms:Delete*"
+#               - "kms:ScheduleKeyDeletion"
+#               - "kms:CancelKeyDeletion"
+#             Resource: '*'
+#       Tags:
+#         - 
+#           Key: Name
+#           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+#         - 
+#           Key: Environment
+#           Value: !Ref EnvName
+#         - 
+#           Key: Organization
+#           Value: !Ref OrgName
+
+#   DefaultMountTarget1: 
+#     Type: AWS::EFS::MountTarget
+#     Properties: 
+#       FileSystemId: !Ref DefaultFileSystem
+#       SubnetId:
+#         Fn::ImportValue:
+#           !Sub "${NetworkStackName}-PublicSubnetId1"
+#       SecurityGroups: 
+#         - !Ref EfsSecurityGroup
+
+####
+# EC2 Section
+####
+
+  DefaultTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: !Ref HealthCheckIntervalSeconds
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckProtocol: !If [IsSsl, "HTTPS", "HTTP"]
+      HealthCheckTimeoutSeconds: !Ref HealthCheckTimeoutSeconds
+      HealthyThresholdCount: !Ref HealthyThresholdCount
+      UnhealthyThresholdCount: !Ref UnhealthyThresholdCount
+      Matcher: 
+        HttpCode: !Ref HttpCodes
+      Port: !Ref InstancePort
+      Protocol: !If [IsSsl, "HTTPS", "HTTP"]
+      VpcId: #vpc-0eeeb47ddc550dcb5
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  # These listeners are for SSL
+  DefaultListenerRule1:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref DefaultTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', ['tasaki', !Ref ClientDomainName]]
+      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn" 
+      Priority: !Ref Priority1
+
+  # DefaultListenerRule2:
+  #   DependsOn: 
+  #     - DefaultAutoScalingGroup
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  #   Properties: 
+  #     Actions: 
+  #       - Type: forward
+  #         TargetGroupArn: !Ref DefaultTargetGroup
+  #     Conditions: 
+  #       - Field: host-header
+  #         Values: 
+  #           - !Ref ClientDomainName
+  #     ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
+  #       Fn::ImportValue:
+  #         !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
+  #     Priority: !Ref Priority2
+
+  # These listeners are for HTTP
+  DefaultListenerRule3:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref DefaultTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', ['tasaki', !Ref ClientDomainName]]
+      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/4a01c6efc69d9d60
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-HttpListenerArn"
+      Priority: !Ref Priority1
+
+  # DefaultListenerRule4:
+  #   DependsOn: 
+  #     - DefaultAutoScalingGroup
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  #   Properties: 
+  #     Actions: 
+  #       - Type: forward
+  #         TargetGroupArn: !Ref DefaultTargetGroup
+  #     Conditions: 
+  #       - Field: host-header
+  #         Values:
+  #           - !Ref ClientDomainName
+  #     ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/4a01c6efc69d9d60
+  #       Fn::ImportValue:
+  #         !Sub "${LoadBalancerStackName}-HttpListenerArn"
+  #     Priority: !Ref Priority2
+
+
+####
+# AutoScaling Group Section
+####
+
+  DefaultLaunchConfig: 
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      ImageId: !Ref InstanceAMI
+      SecurityGroups: [!GetAtt DefaultSecurityGroup.GroupId]
+      InstanceType: !Ref InstanceType
+      AssociatePublicIpAddress: !Ref AssociatePublicIp
+      IamInstanceProfile: !GetAtt DefaultIamInstanceProfile.Arn
+      InstanceMonitoring: !Ref EnableMonitoring
+      SpotPrice: !Ref SpotPrice
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #cloud-config
+            write_files:
+              - path: /var/lib/cloud/instance/custom-data.sh
+                permissions: 0700
+                owner: root:root
+                content: |
+                  STACK_NAME=${AWS::StackName}
+                  AWS_REGION=${AWS::Region}
+                  DOMAIN=${DOMAIN}
+                  ENVIRONMENT=${ENVIRONMENT}
+                  CLIENT_NAME=${CLIENT_NAME}
+                  APPLICATION_SITE=${APPLICATION_SITE}
+                  INSTANCE_ROLE=${INSTANCE_ROLE}
+                  SECRET_ID=${SECRET_ID}
+                  EFS_NAME=${EFS_NAME}
+                  BASE_URL=https://${DOMAIN}/
+                  BUCKET_NAME=${BUCKET_NAME}
+          - DOMAIN: !Join [".", ["tasaki", !Ref ClientDomainName]]
+            ENVIRONMENT: !Ref EnvName
+            CLIENT_NAME: !Ref Name
+            APPLICATION_SITE: !Ref OrgName
+            INSTANCE_ROLE: !Ref DefaultIamRole
+            EFS_NAME: !Join ['.',[iscale-hosting-dev-uw2-tasaki, efs, !Ref 'AWS::Region', amazonaws.com]]
+            SECRET_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+            BUCKET_NAME: !Ref DefaultBucket
+
+  # # Auto Scaling Group should be created manually when using code deploy
+  # DefaultAutoScalingGroup:
+  #   Type: AWS::AutoScaling::AutoScalingGroup
+  #   UpdatePolicy:
+  #     AutoScalingReplacingUpdate:
+  #       WillReplace: true
+  #   CreationPolicy:
+  #     AutoScalingCreationPolicy:
+  #       MinSuccessfulInstancesPercent: 100
+  #     ResourceSignal:
+  #       Count: 1
+  #       Timeout: PT10M
+  #   Properties:
+  #     Cooldown: 60
+  #     MaxSize: !Ref MaxSize
+  #     MinSize: !Ref MinSize
+  #     VPCZoneIdentifier:
+  #       -
+  #         Fn::ImportValue:
+  #           !Sub "${NetworkStackName}-PublicSubnetId1"
+  #     TargetGroupARNs: [!Ref DefaultTargetGroup]
+  #     LaunchConfigurationName: !Ref DefaultLaunchConfig
+  #     Tags:
+  #       - 
+  #         Key: Name
+  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+  #         PropagateAtLaunch: True
+  #       - 
+  #         Key: Environment
+  #         Value: !Ref EnvName
+  #         PropagateAtLaunch: True
+  #       - 
+  #         Key: Organization
+  #         Value: !Ref OrgName
+  #         PropagateAtLaunch: True
+
+####
+# VPC Section
+####
+
+  DefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VpcId: #vpc-0eeeb47ddc550dcb5
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  DefaultSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt DefaultSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: !Ref InstancePort
+      ToPort: !Ref InstancePort
+      SourceSecurityGroupId: #sg-0b8f5f31b0f5bcd2e
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-SecurityGroupId"
+  
+  DefaultSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt DefaultSecurityGroup.GroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: "0.0.0.0/0"
+
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+      VpcId: #vpc-0eeeb47ddc550dcb5
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+
+  EfsSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt EfsSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !GetAtt DefaultSecurityGroup.GroupId
+
+####
+# Secrets Manager Section
+####
+
+  DefaultSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+####
+# IAM Section
+####
+
+  DefaultIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Roles:
+        - !Ref DefaultIamRole
+
+  DefaultIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Sid: "1"
+            Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Principal:
+              Service: "ec2.amazonaws.com"
+      ManagedPolicyArns:
+        - !Ref PolicyArns
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:GetBucketLocation
+                  - s3:ListAllMyBuckets
+                Resource: arn:aws:s3:::*
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:ListBucket
+                Resource: '*' #!GetAtt DefaultBucket.Arn
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: '*' #!Join ["/",[!GetAtt DefaultBucket.Arn,"*"]]
+              - 
+                Effect: "Allow"
+                Action: 
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DefaultSecret
+
+####
+# Cloudwatch Section
+####
+
+  UnhealthyHostCountCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], unhealthy-host-count] ]
+      MetricName: UnHealthyHostCount
+      Namespace: "AWS/ApplicationELB"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Maximum
+      Threshold: 1
+      AlarmActions:
+        - 
+          Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - 
+          Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: LoadBalancer
+          Value: 
+            Fn::ImportValue:
+              !Sub "${LoadBalancerStackName}-LoadBalancerFullName"
+        - Name: TargetGroup
+          Value: !GetAtt DefaultTargetGroup.TargetGroupFullName
+
+Outputs:
+
+  Name:
+    Description: Unique name/identifier
+    Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+    Export: 
+      Name: !Sub ${AWS::StackName}-Name
+
+  TargetGroupName:
+    Description: The name of the target group
+    Value: !GetAtt DefaultTargetGroup.TargetGroupName
+    Export: 
+      Name: !Sub ${AWS::StackName}-TargetGroupName
+
+  TargetGroupFullName:
+    Description: The full name of the target group
+    Value: !GetAtt DefaultTargetGroup.TargetGroupFullName
+    Export: 
+      Name: !Sub ${AWS::StackName}-TargetGroupFullName
+
+  SecurityGroupId:
+    Description: The security group id of the EC2 instance
+    Value: !GetAtt DefaultSecurityGroup.GroupId
+    Export: 
+      Name: !Sub ${AWS::StackName}-SecurityGroupId
+
+  InstanceRoleArn:
+    Description: The instance role arn attached to the EC2 Instance
+    Value: !GetAtt DefaultIamRole.Arn
+    Export: 
+      Name: !Sub ${AWS::StackName}-InstanceRoleArn
