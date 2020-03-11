@@ -153,7 +153,7 @@ Parameters:
   InstanceAMI:
     Description: AMI image used by the EC2 instance.
     Type: String
-    Default: ami-0763f205509ed70d0
+    Default: ami-0416ce00d28a1c051
   InstanceType:
     Description: The instnace type of the EC2 instance (e.g. t2.micro, t2.small, c4.large, etc).
     Type: String
@@ -365,6 +365,82 @@ Resources:
           Value: !Ref OrgName
 
 ####
+# EFS Section
+####
+
+  DefaultFileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    Properties:
+      Encrypted: true
+      KmsKeyId: !GetAtt DefaultKey.Arn
+      FileSystemTags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  DefaultKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - 
+            Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':root']]
+            Action:
+              - 'kms:*'
+            Resource: '*'
+          - 
+            Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':role/MasterAccountAccessRole']]
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: '*'
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  DefaultMountTarget1: 
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref DefaultFileSystem
+      SubnetId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-PublicSubnetId1"
+      SecurityGroups: 
+        - !Ref EfsSecurityGroup
+
+####
 # EC2 Section
 ####
 
@@ -501,12 +577,14 @@ Resources:
                   APPLICATION_SITE=${APPLICATION_SITE}
                   INSTANCE_ROLE=${INSTANCE_ROLE}
                   BUCKET_NAME=${BUCKET_NAME}
+                  EFS_NAME=${EFS_NAME}
           - DOMAIN: !Join [".", ["www", !Ref ClientDomainName]]
             ENVIRONMENT: !Ref EnvName
             CLIENT_NAME: !Ref Name
             APPLICATION_SITE: !Ref OrgName
             INSTANCE_ROLE: !Ref DefaultIamRole
             BUCKET_NAME: !Ref DefaultBucket
+            EFS_NAME: !Join ['.',[!Ref DefaultFileSystem, efs, !Ref 'AWS::Region', amazonaws.com]]
             ASG_LOGICAL_ID: DefaultAutoScalingGroup
 
   DefaultAutoScalingGroup:
@@ -662,6 +740,28 @@ Resources:
       FromPort: -1
       ToPort: -1
       CidrIp: "0.0.0.0/0"
+
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+      VpcId: #vpc-0eeeb47ddc550dcb5
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+
+  EfsSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt EfsSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !GetAtt DefaultSecurityGroup.GroupId
 
 ####
 # IAM Section
