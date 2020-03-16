@@ -358,6 +358,83 @@ Resources:
       TargetKeyId: !Ref DefaultKmsKey
 
 ####
+# Lambda Section
+####
+
+  PasswordGenerator:
+    Type: "Custom::PasswordGenerator"
+    Properties:
+      ServiceToken: !GetAtt DefaultLambdaFunction.Arn
+
+  DefaultLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, password-generator]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Code:
+        ZipFile: |
+
+          import cfnresponse
+          import json
+          import logging
+          import time
+          import base64
+          import string
+          import random
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+
+            responseData={}
+            physicalResourceId={}
+            request_type = event['RequestType']
+
+            try:
+
+              if request_type in ['Create', 'Update']:
+                responseData['DatabasePassword']=generate_random_password(20)
+                responseData['AdminPassword']=generate_random_password(20)
+              
+              send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
+              return
+
+            except Exception:
+
+              logger.exception('Error Encountered')
+              send(event, context, cfnresponse.FAILED, responseData, physicalResourceId)
+              return
+
+          def send(event, context, responseStatus, responseData, physicalResourceId=None):
+            resourceId = physicalResourceId or context.log_stream_name
+            responseBody = {'Status': responseStatus,
+                            'Reason': 'See the details in CloudWatch Log Stream: ' + context.log_stream_name,
+                            'PhysicalResourceId': resourceId,
+                            'StackId': event['StackId'],
+                            'RequestId': event['RequestId'],
+                            'LogicalResourceId': event['LogicalResourceId'],
+                            'Data': responseData}
+            logger.info('RESPONSE BODY:' + json.dumps(responseBody))
+            cfnresponse.send(event, context, responseStatus, responseData, resourceId)
+
+          def generate_random_password(password_length=20):
+            """
+            Generates a random password sent back to CF
+            :param password_length: Length of the password in number of characters
+            :return: String of the password
+            """
+            password = ''
+            char_set = string.ascii_uppercase + string.ascii_lowercase + string.digits + '-'
+            while '-' not in password:
+                password = ''.join(random.sample(char_set * 6, int(password_length)))
+
+            return password
+
+####
 # RDS Section
 ####
 
@@ -368,8 +445,21 @@ Resources:
       Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
       GenerateSecretString:
         SecretStringTemplate: !Sub
-          - '{"username": "${User}"}'
-          - { User: !Ref MasterUser }
+          - |
+            {
+              "ROOT_USER": "${ROOT_USER}",
+              "DB_PORT": "${DB_PORT}",
+              "DB_NAME": "${DB_NAME}",
+              "DB_USER": "${DB_USER}",
+              "DB_PASSWORD": "${DB_PASSWORD}",
+              "ADMIN_PASSWORD": "${ADMIN_PASSWORD}"
+            }
+          - ROOT_USER: !Ref MasterUser
+            DB_PORT: !Ref Port
+            DB_NAME: !Ref DatabaseName
+            DB_USER: odoo
+            DB_PASSWORD: !GetAtt PasswordGenerator.DatabasePassword
+            ADMIN_PASSWORD: !GetAtt PasswordGenerator.DatabasePassword
         GenerateStringKey: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         PasswordLength: 30
         ExcludeCharacters: '"@/\'
@@ -539,9 +629,41 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
 
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com" 
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - 
+          PolicyName: "LambdaDefaultFunctionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
 ####
 # CloudWatch Section
 ####
+
+  DefaultLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref DefaultLambdaFunction]]
 
   # PostgreSQL log / metrics / alarms
 
@@ -738,3 +860,15 @@ Outputs:
     Value: !GetAtt DefaultRDSCluster.ReadEndpoint.Address
     Export: 
       Name: !Sub ${AWS::StackName}-ClusterReadEndpointAddress
+
+  DatabasePassword:
+    Description: DatabasePassword
+    Value: !GetAtt PasswordGenerator.DatabasePassword
+    Export: 
+      Name: !Sub ${AWS::StackName}-DatabasePassword
+
+  AdminPassword:
+    Description: AdminPassword
+    Value: !GetAtt PasswordGenerator.AdminPassword
+    Export: 
+      Name: !Sub ${AWS::StackName}-AdminPassword
