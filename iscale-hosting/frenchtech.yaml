@@ -377,7 +377,7 @@ Resources:
       FileSystemTags:
         - 
           Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
         - 
           Key: Environment
           Value: !Ref EnvName
@@ -1003,6 +1003,110 @@ Resources:
               !Sub "${LoadBalancerStackName}-LoadBalancerFullName"
         - Name: TargetGroup
           Value: !GetAtt DefaultTargetGroup.TargetGroupFullName
+
+####
+# AWS Backup Section
+####
+
+  DefaultKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          # - 
+          #   Sid: AWS Partition
+          #   Effect: Allow
+          #   Principal:
+          #     AWS: !Join ['',['arn:',!Ref 'AWS::Partition',':iam::', !Ref 'AWS::AccountId', ':root']]
+          #   Action:
+          #     - 'kms:*'
+          #   Resource: '*'
+          - 
+            Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':root']]
+            Action:
+              - 'kms:*'
+            Resource: '*'
+          - 
+            Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':role/MasterAccountAccessRole']]
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: '*'
+          
+  DefaultBackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], backup-vault]]
+      EncryptionKeyArn: !GetAtt DefaultKmsKey.Arn
+      BackupVaultTags:
+        Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-vault]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+  DefaultBackupPlan:
+    DependsOn: DefaultBackupVault
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-plan]]
+        BackupPlanRule:
+          -
+            RuleName: DailyBackup
+            TargetBackupVault: !Ref DefaultBackupVault
+            ScheduleExpression: "cron(0 5 ? * * *)"
+      BackupPlanTags:
+        Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-plan]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+          
+  BackupRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+     AssumeRolePolicyDocument:
+       Version: "2012-10-17"
+       Statement:
+         -
+          Effect: "Allow"
+          Principal:
+            Service:
+              - "backup.amazonaws.com"
+          Action:
+            - "sts:AssumeRole"
+     ManagedPolicyArns:
+       - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup 
+       - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+
+  DefaultBackupSelection:
+    DependsOn: DefaultBackupPlan  
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref DefaultBackupPlan
+      BackupSelection:
+        SelectionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-selection]]
+        IamRoleArn: !GetAtt BackupRole.Arn
+        ListOfTags:
+         -
+           ConditionType: "STRINGEQUALS"
+           ConditionKey: Name
+           ConditionValue: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
 
 Outputs:
 
