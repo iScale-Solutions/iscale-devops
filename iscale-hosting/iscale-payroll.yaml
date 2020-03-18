@@ -17,6 +17,7 @@ Metadata:
         Parameters:
           - NetworkStackName
           - SNSStackName
+          - DatabaseStackName
       -
         Label:
           default: "EC2/Auto-Scaling Group Configuration"
@@ -44,6 +45,8 @@ Metadata:
         default: "Network Stack Name"
       SNSStackName:
         default: "SNS Topic Stack Name"
+      DatabaseStackName:
+        default: "Database Stack Name"
       AssociatePublicIp:
         default: "Associate Public IP"
       AssociateEIP:
@@ -91,6 +94,10 @@ Parameters:
     Description: the name of the SNS stack.
     Type: String
     Default: iscale-hosting-prd-uw2-sns
+  DatabaseStackName:
+    Description: the name of the database stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-payroll-db
   AssociatePublicIp:
     Description: Set to true if associating public ip address to instance is enabled. Enable only if AssociateEIP is false. Otherwise, disabled.
     Type: String
@@ -307,7 +314,9 @@ Resources:
                   CLIENT_NAME=${CLIENT_NAME}
                   APPLICATION_SITE=${APPLICATION_SITE}
                   INSTANCE_ROLE=${INSTANCE_ROLE}
+                  SECRET_ID=${SECRET_ID}
                   EFS_NAME=${EFS_NAME}
+                  DB_HOST=${DB_HOST}
                   BASE_URL=https://${DOMAIN}/
           - DOMAIN: !Join [".", ["payroll", !Ref ClientDomainName]]
             ENVIRONMENT: !Ref EnvName
@@ -315,6 +324,10 @@ Resources:
             APPLICATION_SITE: !Ref OrgName
             INSTANCE_ROLE: !Ref DefaultIamRole
             EFS_NAME: !Join ['.',[!Ref DefaultFileSystem, efs, !Ref 'AWS::Region', amazonaws.com]]
+            SECRET_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+            DB_HOST:
+              Fn::ImportValue:
+                !Sub "${DatabaseStackName}-EndpointAddress"
       Tags:
         - 
           Key: Name
@@ -476,6 +489,17 @@ Resources:
               Service: "ec2.amazonaws.com"
       ManagedPolicyArns:
         - !Ref PolicyArns
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - secretsmanager:GetSecretValue
+                Resource: '*'
 
 ####
 # Cloudwatch Section
