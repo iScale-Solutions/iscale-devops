@@ -1,0 +1,608 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions resources for odoo
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      -
+        Label:
+          default: "DNS Record Configuration"
+        Parameters:
+          - InstanceIds
+          - RecordNames
+          - HostedZoneId
+          - Type
+          - ResourceRecords
+          - TTL
+      -
+        Label:
+          default: "Scheduler Configuration"
+        Parameters:
+          - DBClusterIdentifier
+          - TagKey
+          - TagValue
+          - EnableAutoscalingGroup
+          - EnableRds
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: "Resource Name"
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+      InstanceIds:
+        default: "Instance ID(s)"
+      RecordNames:
+        default: "Record Name(s)"
+      HostedZoneId:
+        default: "Hosted Zone ID"
+      Type:
+        default: "Type"
+      ResourceRecords:
+        default: "Resource Records"
+      TTL:
+        default: "TTL"
+      DBClusterIdentifier:
+        default: "Database Cluster Identifier"
+      TagKey:
+        default: "Tag Key"
+      TagValue:
+        default: "Tag Value"
+      EnableAutoscalingGroup:
+        default: "Enable Autoscaling Group"
+      EnableRds:
+        default: "Enable RDS"
+      StartScheduleExpression:
+        default: "Scheduled Expression (Start)"
+      StopScheduleExpression:
+        default: "Scheduled Expression (Stop)"
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: odoo
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  InstanceIds:
+    Description: The Id of the target resource(s). Set this if DynamicPublicIp parameter is true.
+    Type: String
+    Default: i-03ae5a234cf28ece9
+  RecordNames:
+    Description: The name of the record(s) you want to create (www.example.com).
+    Type: String
+    Default: erptest.iscale-software.com,doc.iscale-software.com,payroll.iscale-software.com
+  HostedZoneId:
+    Description: The ID of the hosted zone that you want to create the record in.
+    Type: String
+    Default: Z3IVOZ67OCE9RL
+  Type:
+    Description: The ID of the VPC
+    Type: String
+    Default: A
+    AllowedValues: [A, AAAA, CAA, CNAME, MX, NAPTR, NS, PTR, SOA, SPF, SRV, TXT]
+  ResourceRecords:
+    Description: The list of value of the resource record.
+    Type: String
+    Default: 34.222.148.204
+  TTL:
+    Description: The time-to-lease value
+    Type: Number
+    Default: 60
+  DBClusterIdentifier:
+    Description: The target aurora db instance identifier. Set this if EnableRds parameter is true.
+    Type: String
+    Default: ""
+  TagKey:
+    Description: Tag key of the target asg/instance
+    Type: String
+    Default: Environment
+  TagValue:
+    Description: The value of the tag key
+    Type: String
+    Default: Staging
+  EnableAutoscalingGroup:
+    Description: Set to true if scheduler is enabled for instance under auto scaling group. Otherwise, scheduler is enabled for ec2 instance.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  EnableRds:
+    Description: Set to true if scheduler is enabled for rds instance. Otherwise, set to false.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  StartScheduleExpression:
+    Description: Schedule expression when to start the the ec2/rds instance.
+    Type: String
+    Default: cron(0 22 ? * SUN-THU *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the the ec2/rds instance.
+    Type: String
+    Default: cron(0 9 ? * MON-FRI *)
+
+Mappings: 
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
+  RegionShort:
+    us-east-2:
+      Name: ue2
+    us-east-1:
+      Name: ue1
+    us-west-1:
+      Name: uw1
+    us-west-2:
+      Name: uw2
+    ap-east-1:
+      Name: ae1
+    ap-south-1:
+      Name: as1
+    ap-northeast-1:
+      Name: ane1
+    ap-northeast-2:
+      Name: ane2
+    ap-northeast-3:
+      Name: ane3
+    ap-southeast-1:
+      Name: ase1
+    ap-southeast-2:
+      Name: ase2
+    ca-central-1:
+      Name: cc1
+    cn-north-1:
+      Name: cn1
+    cn-northwest-1:
+      Name: cnw1
+    eu-central-1:
+      Name: ec1
+    eu-west-1:
+      Name: ew1
+    eu-west-2:
+      Name: ew2
+    eu-west-3:
+      Name: ew3
+    eu-north-1:
+      Name: en1
+    me-south-1:
+      Name: ms1
+    sa-east-1:
+      Name: se1
+    us-gov-east-1:
+      Name: uge1
+    us-gov-west-1:
+      Name: ugw1 
+
+Resources:
+
+##################################################
+#
+# DNS Record Stack
+#
+##################################################
+
+####
+# Cloudwatch Section
+####
+
+  DefaultLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref DefaultLambdaFunction]]
+
+  DefaultEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Event rule each time the instance start/reboot
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dns-record]]
+      EventPattern: 
+        source: 
+          - "aws.ec2"
+        detail-type: 
+          - "EC2 Instance State-change Notification"
+        detail: 
+          state: 
+            - "running"
+          instance-id: 
+            - !Ref InstanceIds
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt DefaultLambdaFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dns-record]]
+
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DefaultLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt DefaultEventRule.Arn
+
+####
+# IAM Section
+####
+
+  DefaultIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Policies:
+        - 
+          PolicyName: !Join ['-', [!Ref Name, policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action: 
+                  - ec2:DescribeInstances
+                  - route53:ChangeResourceRecordSets
+                Resource: "*"
+              - 
+                Effect: Allow
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+####
+# Lambda Section
+####
+
+  DefaultLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which updates the value of the recordset each time the instance reboot/start"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dns-record]]
+      Handler: index.lambda_handler
+      Role: !GetAtt DefaultIamRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          ZONE_ID: !Ref HostedZoneId
+          NAMES: !Ref RecordNames
+          TYPE: !Ref Type
+          INSTANCE_IDS: !Ref InstanceIds
+          REGION: !Ref 'AWS::Region'
+          TTL: !Ref TTL
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+          import json
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            zone_id=os.environ['ZONE_ID']
+            names=os.environ['NAMES']
+            type=os.environ['TYPE']
+            instance_ids=os.environ['INSTANCE_IDS']
+            region=os.environ['REGION']
+            ttl=int(os.environ['TTL'])
+
+            rt = boto3.client('route53')
+            ec2 = boto3.client('ec2',region_name=region)
+
+            try:
+
+              logger.info('Event:' + json.dumps(event))
+              logger.info("Updating record set")
+
+              # Retrieve the new public ip address
+              record_names=names.split(",")
+              for name in record_names:
+                instance = ec2.describe_instances(InstanceIds=[instance_ids])
+                public_ip = instance['Reservations'][0]['Instances'][0]['PublicIpAddress']
+
+                response = rt.change_resource_record_sets(
+                            HostedZoneId=zone_id,
+                            ChangeBatch={
+                                'Changes': [
+                                    {
+                                      'Action': 'UPSERT',
+                                      'ResourceRecordSet': {
+                                          'Name': name,
+                                          'Type': type,
+                                          'TTL': ttl,
+                                          'ResourceRecords': [
+                                              {
+                                                  'Value': public_ip
+                                              },
+                                            ]
+                                        } 
+                                    },
+                                  ]
+                              }
+                            )
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+##################################################
+#
+# Scheduler Stack
+#
+##################################################
+
+####
+# IAM Section
+####
+
+  SchedulerIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, scheduler]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action: 
+                  - ec2:Start*
+                  - ec2:Stop*
+                  - ec2:DescribeInstances
+                  - ec2:ReportInstanceStatus
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:SuspendProcesses
+                  - autoscaling:ResumeProcesses
+                  - rds:StartDBCluster
+                  - rds:StopDBCluster
+                Resource: "*"
+              - 
+                Effect: Allow
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+####
+# Cloudwatch Section
+####
+
+  SchedulerLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref SchedulerLambdaFunction]]
+
+  ScheduledEventRuleStop:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Stops the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, scheduler-stop]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt SchedulerLambdaFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, scheduler-stop]]
+
+  PermissionForEventsToInvokeLambdaStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SchedulerLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt ScheduledEventRuleStop.Arn
+
+  ScheduledEventRuleStart:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Starts the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, scheduler-start]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt SchedulerLambdaFunction.Arn 
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, scheduler-start]]
+
+  PermissionForEventsToInvokeLambdaStart:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SchedulerLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt ScheduledEventRuleStart.Arn
+
+####
+# Lambda Section
+####
+
+  SchedulerLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which starts/stops the instance on a given schedule"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, scheduler]]
+      Handler: index.lambda_handler
+      Role: !GetAtt SchedulerIamRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          KEY: !Ref TagKey
+          VALUE: !Ref TagValue
+          IS_ASG: !Ref EnableAutoscalingGroup
+          IS_RDS: !Ref EnableRds
+          INSTANCE_IDS: !Ref InstanceIds
+          DB_CLUSTER_IDENTIFIER: !Ref DBClusterIdentifier
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          asg = boto3.client('autoscaling')
+
+          def get_auto_scaling_group_name(region,key,value):
+            names=[]
+            client = boto3.client('autoscaling', region_name=region)
+            paginator = client.get_paginator('describe_auto_scaling_groups')
+            page_iterator = paginator.paginate()
+            
+            filter='AutoScalingGroups[] | [?contains(Tags[?Key==`{}`].Value, `{}`)]'
+            asgs = page_iterator.search(filter.format(key, value))
+            
+            for asg in asgs:
+              names.append(asg["AutoScalingGroupName"])
+
+            return names[0]
+
+          def get_instance_ids(AutoScalingGroupName):
+            instance_ids=[]
+            instances = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[AutoScalingGroupName])['AutoScalingGroups'][0]['Instances']
+            for inst in instances:
+              instance_ids.append(inst['InstanceId'])
+
+            return instance_ids
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            key=os.environ['KEY']
+            value=os.environ['VALUE']
+            isAsg=os.environ['IS_ASG']
+            isRds=os.environ['IS_RDS']
+            instanceIds=os.environ['INSTANCE_IDS']
+            dbClusterIdentifier=os.environ['DB_CLUSTER_IDENTIFIER']
+            
+            # Get the event details
+            resources=', '.join(event["resources"])
+            stop=resources.find("stop")
+            start=resources.find("start")
+
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+              rds = boto3.client('rds')
+
+              # Checks if event is start or shutdown
+              if stop >= 0:
+
+                if isAsg == 'true':
+                  autoScalingGroupName = get_auto_scaling_group_name(region,key,value)
+                  instanceIds=get_instance_ids(autoScalingGroupName)
+
+                  logger.info('Suspending HealthCheck and ReplaceUnhealthy')
+                  asg.suspend_processes(
+                                      AutoScalingGroupName=autoScalingGroupName,
+                                      ScalingProcesses=[
+                                          'HealthCheck',
+                                          'ReplaceUnhealthy'
+                                      ]
+                                      )
+
+                  logger.info('Stopping Instance: ' + str(instanceIds))
+                  ec2.stop_instances(InstanceIds=instanceIds,DryRun=False)
+
+                else:
+                  logger.info('Stopping Instance: ' + str(instanceIds))
+                  ec2.stop_instances(InstanceIds=[instanceIds],DryRun=False)
+
+                if isRds == 'true':
+                  logger.info('Stopping DB Cluster: ' + str(dbClusterIdentifier))
+                  rds.stop_db_cluster(DBClusterIdentifier=dbClusterIdentifier)
+                
+              elif start >= 0:
+
+                if isAsg == 'true':
+                  autoScalingGroupName = get_auto_scaling_group_name(region,key,value)
+                  instanceIds=get_instance_ids(autoScalingGroupName)
+
+                  logger.info('Starting Instance: ' + str(instanceIds))
+                  ec2.start_instances(InstanceIds=instanceIds,DryRun=False)
+
+                  logger.info('Waiting for instance to start: ' + str(instanceIds))
+                  waiter = ec2.get_waiter('instance_running')
+                  waiter.wait(InstanceIds=instanceIds)
+                  logger.info('Instance started: ' + str(instanceIds))
+
+                  logger.info('Resuming HealthCheck and ReplaceUnhealthy')
+                  asg.resume_processes(
+                                      AutoScalingGroupName=autoScalingGroupName,
+                                      ScalingProcesses=[
+                                          'HealthCheck',
+                                          'ReplaceUnhealthy'
+                                      ]
+                                    )
+                else:
+                  logger.info('Starting Instance: ' + str(instanceIds))
+                  ec2.start_instances(InstanceIds=[instanceIds],DryRun=False)
+
+                if isRds == 'true':
+                  logger.info('Starting DB Cluster: ' + str(dbClusterIdentifier))
+                  rds.start_db_cluster(DBClusterIdentifier=dbClusterIdentifier)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+Outputs:
+
+  Name:
+    Description: Unique name/identifier
+    Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+    Export: 
+      Name: !Sub ${AWS::StackName}-Name
