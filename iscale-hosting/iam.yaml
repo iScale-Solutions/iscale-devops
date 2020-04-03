@@ -1,0 +1,242 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions an IAM Group
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - OrgName
+          - EnvName
+
+    ParameterLabels:
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-hosting
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+
+Mappings: 
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
+  RegionShort:
+    us-east-2:
+      Name: ue2
+    us-east-1:
+      Name: ue1
+    us-west-1:
+      Name: uw1
+    us-west-2:
+      Name: uw2
+    ap-east-1:
+      Name: ae1
+    ap-south-1:
+      Name: as1
+    ap-northeast-1:
+      Name: ane1
+    ap-northeast-2:
+      Name: ane2
+    ap-northeast-3:
+      Name: ane3
+    ap-southeast-1:
+      Name: ase1
+    ap-southeast-2:
+      Name: ase2
+    ca-central-1:
+      Name: cc1
+    cn-north-1:
+      Name: cn1
+    cn-northwest-1:
+      Name: cnw1
+    eu-central-1:
+      Name: ec1
+    eu-west-1:
+      Name: ew1
+    eu-west-2:
+      Name: ew2
+    eu-west-3:
+      Name: ew3
+    eu-north-1:
+      Name: en1
+    me-south-1:
+      Name: ms1
+    sa-east-1:
+      Name: se1
+    us-gov-east-1:
+      Name: uge1
+    us-gov-west-1:
+      Name: ugw1 
+
+Resources:
+  
+  OdooAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], odoo-admin-role]]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Sid: "1"
+            Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Principal:
+              AWS: "arn:aws:iam::338284463834:root"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AWSLambdaReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonRDSReadOnlyAccess
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], payroll-odoo-admin-policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Sid: "StartSSMSessionPolicy"
+                Effect: "Allow"
+                Action: 
+                  - ssm:StartSession
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/Name: iscale-hosting-prd-uw2-payrollv2
+              -
+                Sid: "TerminateSSMSession"
+                Effect: "Allow"
+                Action:
+                  - ssm:TerminateSession
+                Resource:
+                  - arn:aws:ssm:*:*:session/${aws:username}-*
+              - 
+                Sid: "ManageEC2InstancePolicy"
+                Effect: "Allow"
+                Action: 
+                  - ec2:*
+                  - autoscaling:*
+                  - elasticloadbalancing:*
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ec2:resourceTag/Name: iscale-hosting-prd-uw2-payrollv2
+              - 
+                Sid: "ManageASGPolicy"
+                Effect: "Allow"
+                Action: 
+                  - autoscaling:*
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    autoscaling:resourceTag/Name: iscale-hosting-prd-uw2-payrollv2
+              - 
+                Sid: "ManageLBInstancePolicy"
+                Effect: "Allow"
+                Action: 
+                  - elasticloadbalancing:*
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    elasticloadbalancing:resourceTag/Name: iscale-hosting-prd-uw2-payrollv2
+              - 
+                Sid: "ManageRDSPolicy"
+                Effect: "Allow"
+                Action: 
+                  - rds:*
+                Resource: arn:aws:rds:us-west-2:178070162686:db:iscale-hosting-prd-uw2-payroll
+              - 
+                Sid: "InvokePayrollV2Functions"
+                Effect: "Allow"
+                Action: 
+                  - lambda:InvokeFunction
+                Resource: 
+                  - arn:aws:lambda:us-west-2:178070162686:function:iscale-hosting-prd-uw2-payrollv2-blur
+                  - arn:aws:lambda:us-west-2:178070162686:function:iscale-hosting-prd-uw2-payrollv2-start
+                  - arn:aws:lambda:us-west-2:178070162686:function:iscale-hosting-prd-uw2-payrollv2-stop
+              - 
+                Sid: "ExplicityDeny"
+                Effect: "Deny"
+                Action: 
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - autoscaling:CreateTags
+                  - autoscaling:DeleteTags
+                  - elasticloadbalancing:CreateTags
+                  - elasticloadbalancing:DeleteTags
+                Resource: '*'
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], payroll-odoo-admin-role]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+        
+  OdooUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], odoo-user-role]]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Sid: "1"
+            Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Principal:
+              AWS: arn:aws:iam::338284463834:root
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaReadOnlyAccess
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], payroll-odoo-user-policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Sid: "InvokePayrollV2Functions"
+                Effect: "Allow"
+                Action: 
+                  - lambda:InvokeFunction
+                Resource: 
+                  - arn:aws:lambda:us-west-2:178070162686:function:iscale-hosting-prd-uw2-payrollv2-blur
+                  - arn:aws:lambda:us-west-2:178070162686:function:iscale-hosting-prd-uw2-payrollv2-start
+                  - arn:aws:lambda:us-west-2:178070162686:function:iscale-hosting-prd-uw2-payrollv2-stop
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], payroll-odoo-user-role]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName

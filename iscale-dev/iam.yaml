@@ -1,0 +1,331 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions an IAM Group
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - OrgName
+          - EnvName
+
+    ParameterLabels:
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+
+Mappings: 
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
+  RegionShort:
+    us-east-2:
+      Name: ue2
+    us-east-1:
+      Name: ue1
+    us-west-1:
+      Name: uw1
+    us-west-2:
+      Name: uw2
+    ap-east-1:
+      Name: ae1
+    ap-south-1:
+      Name: as1
+    ap-northeast-1:
+      Name: ane1
+    ap-northeast-2:
+      Name: ane2
+    ap-northeast-3:
+      Name: ane3
+    ap-southeast-1:
+      Name: ase1
+    ap-southeast-2:
+      Name: ase2
+    ca-central-1:
+      Name: cc1
+    cn-north-1:
+      Name: cn1
+    cn-northwest-1:
+      Name: cnw1
+    eu-central-1:
+      Name: ec1
+    eu-west-1:
+      Name: ew1
+    eu-west-2:
+      Name: ew2
+    eu-west-3:
+      Name: ew3
+    eu-north-1:
+      Name: en1
+    me-south-1:
+      Name: ms1
+    sa-east-1:
+      Name: se1
+    us-gov-east-1:
+      Name: uge1
+    us-gov-west-1:
+      Name: ugw1 
+
+Resources:
+
+####
+# Users
+####
+
+  OdooTestUser:
+    Type: "AWS::IAM::User"
+    Properties:
+      UserName: odootest
+      Tags:
+        - 
+          Key: Name
+          Value: Odoo Test
+        - 
+          Key: Email
+          Value: odootest@gmail.com
+  
+####
+# Groups
+####
+
+  # All users must be associated in MFA Group
+  MFAUserGroupAddition:
+    Type: AWS::IAM::UserToGroupAddition
+    Properties: 
+      GroupName: !Ref MFAUserGroup
+      Users: 
+        - !Ref OdooTestUser
+
+  OdooAdminGroupAddition:
+    Type: AWS::IAM::UserToGroupAddition
+    Properties: 
+      GroupName: !Ref OdooAdminGroup
+      Users: 
+        - !Ref OdooTestUser
+
+  # OdooUserGroupAddition:
+  #   Type: AWS::IAM::UserToGroupAddition
+  #   Properties: 
+  #     GroupName: !Ref OdooUserGroup
+  #     Users: 
+  #       - !Ref OdooTestUser
+
+  OdooAdminGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: OdooAdminGroup
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaReadOnlyAccess
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], odoo-admin-policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Sid: "AssumeRole"
+                Effect: "Allow"
+                Action: 
+                  - sts:AssumeRole
+                Resource: "arn:aws:iam::178070162686:role/iscale-hosting-prd-uw2-odoo-admin-role"
+              - 
+                Sid: "InvokeOdooFunctions"
+                Effect: "Allow"
+                Action: 
+                  - lambda:InvokeFunction
+                Resource: 
+                  - arn:aws:lambda:us-west-2:338284463834:function:iscale-dev-dev-uw2-odoo-scheduler
+
+  OdooUserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: OdooUserGroup
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaReadOnlyAccess
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], odoo-admin-policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Sid: "AssumeRole"
+                Effect: "Allow"
+                Action: 
+                  - sts:AssumeRole
+                Resource: "arn:aws:iam::178070162686:role/iscale-hosting-prd-uw2-odoo-user-role"
+              - 
+                Sid: "InvokeOdooFunctions"
+                Effect: "Allow"
+                Action: 
+                  - lambda:InvokeFunction
+                Resource: 
+                  - arn:aws:lambda:us-west-2:338284463834:function:iscale-dev-dev-uw2-odoo-scheduler
+
+  MFAUserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: MFAUserGroup
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], mfa-user-policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Sid: "AllowAllUsersToListAccounts"
+                Effect: "Allow"
+                Action: 
+                  - iam:ListAccountAliases
+                  - iam:ListVirtualMFADevices
+                  - iam:GetAccountPasswordPolicy
+                Resource: "*"
+              - 
+                Sid: "AllowIndividualUserToSeeAndManageOnlyTheirOwnAccountInformation"
+                Effect: "Allow"
+                Action: 
+                  - iam:ChangePassword
+                  - iam:CreateAccessKey
+                  - iam:CreateLoginProfile
+                  - iam:DeleteAccessKey
+                  - iam:DeleteLoginProfile
+                  - iam:GetLoginProfile
+                  - iam:ListAccessKeys
+                  - iam:UpdateAccessKey
+                  - iam:UpdateLoginProfile
+                  - iam:ListServiceSpecificCredentials
+                  - iam:ListSigningCertificates
+                  - iam:DeleteSigningCertificate
+                  - iam:UpdateSigningCertificate
+                  - iam:UploadSigningCertificate
+                  - iam:ListSSHPublicKeys
+                  - iam:GetSSHPublicKey
+                  - iam:DeleteSSHPublicKey
+                  - iam:UpdateSSHPublicKey
+                  - iam:UploadSSHPublicKey
+                  - iam:GetUser
+                Resource: 
+                  - "arn:aws:iam::*:user/${aws:username}"
+              - 
+                Sid: "AllowIndividualUserToViewAndManageTheirOwnMFA"
+                Effect: "Allow"
+                Action: 
+                  - iam:CreateVirtualMFADevice
+                  - iam:DeleteVirtualMFADevice
+                  - iam:EnableMFADevice
+                  - iam:ListMFADevices
+                  - iam:ResyncMFADevice
+                Resource: 
+                  - "arn:aws:iam::*:user/${aws:username}"
+                  - "arn:aws:iam::*:mfa/${aws:username}"
+              - 
+                Sid: "AllowIndividualUserToDeactivateOnlyTheirOwnMFAOnlyWhenUsingMFA"
+                Effect: "Allow"
+                Action: 
+                  - iam:DeactivateMFADevice
+                Resource: 
+                  - "arn:aws:iam::*:user/${aws:username}"
+                  - "arn:aws:iam::*:mfa/${aws:username}"
+                Condition:
+                  Bool:
+                    aws:MultiFactorAuthPresent: true
+              - 
+                Sid: "BlockMostAccessUnlessSignedInWithMFA"
+                Effect: "Deny"
+                NotAction: 
+                  - iam:CreateVirtualMFADevice
+                  - iam:DeleteVirtualMFADevice
+                  - iam:ListVirtualMFADevices
+                  - iam:EnableMFADevice
+                  - iam:ResyncMFADevice
+                  - iam:ListAccountAliases
+                  - iam:ListSSHPublicKeys
+                  - iam:ListAccessKeys
+                  - iam:ListServiceSpecificCredentials
+                  - iam:ListMFADevices
+                  - iam:GetAccountSummary
+                  - sts:GetSessionToken
+                  - iam:GetUser
+                  - lambda:Get*
+                  - lambda:List*
+                Resource: '*'
+                Condition:
+                  BoolIfExists:
+                    aws:MultiFactorAuthPresent: false
+####
+# Roles
+####
+
+  # OdooAdminRole:
+  #   DependsOn: OdooAdminGroup
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - 
+  #           Sid: "1"
+  #           Effect: "Allow"
+  #           Action: "sts:AssumeRole"
+  #           Principal:
+  #             AWS: !Join ['',['arn:aws:iam::',!Ref 'AWS::AccountId', ':group/', !Ref OdooAdminGroup]]
+  #     Tags:
+  #       - 
+  #         Key: Name
+  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], payroll-odoo-admin-policy]]
+  #       - 
+  #         Key: Environment
+  #         Value: !Ref EnvName
+  #       - 
+  #         Key: Organization
+  #         Value: !Ref OrgName
+        
+  # OdooUserRole:
+  #   DependsOn: OdooUserGroup
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - 
+  #           Sid: "1"
+  #           Effect: "Allow"
+  #           Action: "sts:AssumeRole"
+  #           Principal:
+  #             AWS: !Join ['',['arn:aws:iam::',!Ref 'AWS::AccountId', ':group/', !Ref OdooUserGroup]]
+  #     Tags:
+  #       - 
+  #         Key: Name
+  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], payroll-odoo-user-policy]]
+  #       - 
+  #         Key: Environment
+  #         Value: !Ref EnvName
+  #       - 
+  #         Key: Organization
+  #         Value: !Ref OrgName
