@@ -31,6 +31,12 @@ Metadata:
           - TopicArn
           - EnableCPUCreditAlarm
           - ClientDomainName
+      -
+        Label:
+          default: "Scheduler Configuration"
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
 
 
     ParameterLabels:
@@ -62,6 +68,10 @@ Metadata:
         default: "Enable CPU Credit Alarm"
       ClientDomainName:
         default: "Domain Name"
+      StartScheduleExpression:
+        default: "Scheduled Expression (Start)"
+      StopScheduleExpression:
+        default: "Scheduled Expression (Stop)"
 
 Parameters:
   Name:
@@ -135,6 +145,14 @@ Parameters:
     AllowedValues:
       - true
       - false
+  StartScheduleExpression:
+    Description: Schedule expression when to start the the ec2 instance.
+    Type: String
+    Default: cron(0 1 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the the ec2 instance.
+    Type: String
+    Default: cron(0 9 ? * MON-FRI *)
 
 Mappings: 
   EnvShort:
@@ -388,6 +406,178 @@ Resources:
       OKActions: 
         - Fn::ImportValue: 
             !Sub "${SNSStackName}-TopicArn"
+
+
+##################################################
+#
+# Scheduler Stack
+#
+##################################################
+
+####
+# IAM Section
+####
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, lambda-execution-policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action: 
+                  - ec2:Start*
+                  - ec2:Stop*
+                  - ec2:DescribeInstances
+                  - ec2:ReportInstanceStatus
+                Resource: "*"
+              - 
+                Effect: Allow
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+####
+# Cloudwatch Section
+####
+
+  StartLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StartLambdaFunction]]
+
+  StopLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StopLambdaFunction]]
+
+  StopEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Stops the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StopLambdaFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+
+  PermissionForEventsToInvokeLambdaStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StopEventRule.Arn
+
+  StartEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Starts the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  "DISABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StartLambdaFunction.Arn 
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+
+  PermissionForEventsToInvokeLambdaStart:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StartEventRule.Arn
+
+  StartLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which starts the bastion instance"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_ID: !Ref DefaultInstance
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            instanceId=os.environ['INSTANCE_ID']
+
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+
+              logger.info('Stopping Instance: ' + str(instanceId))
+              ec2.start_instances(InstanceIds=[instanceId],DryRun=False)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which stops the bastion instance"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_ID: !Ref DefaultInstance
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            instanceId=os.environ['INSTANCE_ID']
+
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+              
+              logger.info('Stopping Instance: ' + str(instanceId))
+              ec2.stop_instances(InstanceIds=[instanceId],DryRun=False)
+
+            except Exception:
+              logger.exception('Error Encountered')
 
 Outputs:
 
