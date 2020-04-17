@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: This cloudformation template provisions resources for France Philippines United Action
+Description: This cloudformation template provisions resources for iScale Solutions
 Metadata: 
 
 Metadata:
@@ -24,7 +24,7 @@ Metadata:
           default: "EC2/Auto-Scaling Group Configuration"
         Parameters:
           - AssociatePublicIp
-          - InstanceAMI2
+          - InstanceAMI
           - InstanceType
           - PolicyArns
           - EnableMonitoring
@@ -64,7 +64,7 @@ Metadata:
         default: "SNS Topic Stack Name"
       AssociatePublicIp:
         default: "Associate Public IP"
-      InstanceAMI2:
+      InstanceAMI:
         default: "Instance AMI ID"
       InstanceType:
         default: "Instance Type"
@@ -107,7 +107,7 @@ Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
-    Default: fpua
+    Default: iscalesolutions
     MaxLength: 32 # Max length for target group name is only 32 characters.
   OrgName:
     Description: The name of the organization.
@@ -143,7 +143,7 @@ Parameters:
     AllowedValues:
       - true
       - false
-  InstanceAMI2:
+  InstanceAMI:
     Description: AMI image used by the EC2 instance.
     Type: String
     Default: ami-0cdfde001e26fba6e
@@ -207,7 +207,7 @@ Parameters:
     Default: 3
   HttpCodes:
     Description: The HTTP codes to use when checking for a successful response from a target.
-    Type: String
+    Type: Number
     Default: 200
   InstancePort:
     Description: The port on which the targets receive traffic.
@@ -216,17 +216,17 @@ Parameters:
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-solutions.com).
     Type: String
-    Default: fpua.org.ph
+    Default: iscale-solutions.com
   Priority1:
     Description: The priority for listener rule 1.
     Type: Number
-    Default: 255
+    Default: 257
     MinValue: 1
     MaxValue: 50000
   Priority2:
     Description: The priority for listener rule 2.
     Type: Number
-    Default: 256
+    Default: 258
     MinValue: 1
     MaxValue: 50000
 
@@ -306,6 +306,8 @@ Resources:
   #   Properties:
   #     DomainName: !Join [".", ["*", !Ref ClientDomainName]]
   #     ValidationMethod: DNS
+  #     SubjectAlternativeNames:
+  #       - !Ref ClientDomainName
   #     Tags:
   #       - 
   #         Key: Name
@@ -324,7 +326,7 @@ Resources:
         - CertificateArn: arn:aws:acm:us-west-2:178070162686:certificate/d0414384-241b-454b-b01d-7a9f9d3c0cd5
       ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
         Fn::ImportValue:
-          !Sub "${LoadBalancerStackName}-SSLListener" 
+          !Sub "${LoadBalancerStackName}-SSLListener"
 
 ####
 # EFS Section
@@ -446,7 +448,7 @@ Resources:
   # These listeners are for SSL
   DefaultListenerRule1:
     DependsOn: 
-      - DefaultAutoScalingGroup2
+      - DefaultAutoScalingGroup
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
       Actions: 
@@ -455,15 +457,15 @@ Resources:
       Conditions: 
         - Field: host-header
           Values: 
-            - !Join ['.', ['*', !Ref ClientDomainName]]
+            - !Join ['.', ['www', !Ref ClientDomainName]]
       ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-ApplicationListenerArn" 
       Priority: !Ref Priority1
 
   DefaultListenerRule2:
-    DependsOn:
-      - DefaultAutoScalingGroup2
+    DependsOn: 
+      - DefaultAutoScalingGroup
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
       Actions: 
@@ -480,8 +482,8 @@ Resources:
 
   # These listeners are for HTTP
   DefaultListenerRule3:
-    DependsOn:
-      - DefaultAutoScalingGroup2
+    DependsOn: 
+      - DefaultAutoScalingGroup
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
       Actions: 
@@ -490,15 +492,15 @@ Resources:
       Conditions: 
         - Field: host-header
           Values: 
-            - !Join ['.', ['*', !Ref ClientDomainName]]
+            - !Join ['.', ['www', !Ref ClientDomainName]]
       ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/4a01c6efc69d9d60
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-HttpListenerArn"
       Priority: !Ref Priority1
 
   DefaultListenerRule4:
-    DependsOn:
-      - DefaultAutoScalingGroup2
+    DependsOn: 
+      - DefaultAutoScalingGroup
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
       Actions: 
@@ -513,15 +515,16 @@ Resources:
           !Sub "${LoadBalancerStackName}-HttpListenerArn"
       Priority: !Ref Priority2
 
+
 ####
 # AutoScaling Group Section
 ####
 
-  DefaultLaunchConfig2: 
+  DefaultLaunchConfig: 
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties:
       KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
-      ImageId: !Ref InstanceAMI2
+      ImageId: !Ref InstanceAMI
       SecurityGroups: [!GetAtt DefaultSecurityGroup.GroupId]
       InstanceType: !Ref InstanceType
       AssociatePublicIpAddress: !Ref AssociatePublicIp
@@ -549,16 +552,16 @@ Resources:
                   INSTANCE_ROLE=${INSTANCE_ROLE}
                   EFS_NAME=${EFS_NAME}
                   IS_ASG=${IS_ASG}
-          - DOMAIN: !Join [".", ["www", !Ref ClientDomainName]]
+          - DOMAIN: !Join [".", ["wwwv", !Ref ClientDomainName]]
             ENVIRONMENT: !Ref EnvName
             CLIENT_NAME: !Ref Name
             APPLICATION_SITE: !Ref OrgName
             INSTANCE_ROLE: !Ref DefaultIamRole
             EFS_NAME: !Join ['.',[!Ref DefaultFileSystem, efs, !Ref 'AWS::Region', amazonaws.com]]
-            ASG_LOGICAL_ID: DefaultAutoScalingGroup2
+            ASG_LOGICAL_ID: DefaultAutoScalingGroup
             IS_ASG: true
 
-  DefaultAutoScalingGroup2:
+  DefaultAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     UpdatePolicy:
       AutoScalingReplacingUpdate:
@@ -578,7 +581,7 @@ Resources:
           Fn::ImportValue:
             !Sub "${NetworkStackName}-PublicSubnetId1"
       TargetGroupARNs: [!Ref DefaultTargetGroup]
-      LaunchConfigurationName: !Ref DefaultLaunchConfig2
+      LaunchConfigurationName: !Ref DefaultLaunchConfig
       Tags:
         - 
           Key: Name
@@ -693,9 +696,9 @@ Resources:
                   - autoscaling:DescribeTags
                 Resource: "*"
 
-  ####
-  # Cloudwatch Section
-  ####
+####
+# CloudWatch Section
+####
 
   CPUUtilizationCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -718,7 +721,7 @@ Resources:
             !Sub "${SNSStackName}-TopicArn"
       Dimensions:
         - Name: AutoScalingGroupName
-          Value: !Ref DefaultAutoScalingGroup2
+          Value: !Ref DefaultAutoScalingGroup
 
   StatusChecksCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -741,7 +744,7 @@ Resources:
             !Sub "${SNSStackName}-TopicArn"
       Dimensions:
         - Name: AutoScalingGroupName
-          Value: !Ref DefaultAutoScalingGroup2
+          Value: !Ref DefaultAutoScalingGroup
 
   CPUCreditBalanceCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -765,7 +768,7 @@ Resources:
             !Sub "${SNSStackName}-TopicArn"
       Dimensions:
         - Name: AutoScalingGroupName
-          Value: !Ref DefaultAutoScalingGroup2
+          Value: !Ref DefaultAutoScalingGroup
 
   UnhealthyHostCountCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -815,7 +818,7 @@ Resources:
             !Sub "${SNSStackName}-TopicArn"
       Dimensions:
         - Name: AutoScalingGroupName
-          Value: !Ref DefaultAutoScalingGroup2
+          Value: !Ref DefaultAutoScalingGroup
         - Name: Filesystem
           Value: /dev/nvme0n1p1
         - Name: MountPath
