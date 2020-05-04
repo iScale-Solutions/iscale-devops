@@ -38,6 +38,12 @@ Metadata:
           - HostedZoneId
           - Type
           - TTL
+      -
+        Label:
+          default: "Scheduler Configuration"
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
 
     ParameterLabels:
       Name:
@@ -74,6 +80,10 @@ Metadata:
         default: "Record Type"
       TTL:
         default: "TTL"
+      StartScheduleExpression:
+        default: "Scheduled Expression (Start)"
+      StopScheduleExpression:
+        default: "Scheduled Expression (Stop)"
 
 Parameters:
   Name:
@@ -164,6 +174,14 @@ Parameters:
     Description: Time to lease value.
     Type: Number
     Default: 60
+  StartScheduleExpression:
+    Description: Schedule expression when to start the the ec2 instance.
+    Type: String
+    Default: cron(0 22 ? * SUN-THU *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the the ec2 instance.
+    Type: String
+    Default: cron(0 12 ? * MON-FRI *)
 
 Mappings: 
   EnvShort:
@@ -453,6 +471,14 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - 
+                Effect: Allow
+                Action: 
+                  - ec2:DescribeInstances
+                  - route53:ChangeResourceRecordSets
+                  - ec2:Start*
+                  - ec2:Stop*
+                Resource: "*"
+              - 
                 Effect: "Allow"
                 Action: 
                   - logs:CreateLogStream
@@ -536,6 +562,151 @@ Resources:
 
             return password
 
+  DnsLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which updates the value of the recordset each time the instance reboot/start"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dns]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          ZONE_ID: !Ref HostedZoneId
+          NAMES: !Join ['.',[!Ref Name, !Ref ClientDomainName]]
+          TYPE: !Ref Type
+          INSTANCE_IDS: !Ref DefaultInstance
+          REGION: !Ref 'AWS::Region'
+          TTL: !Ref TTL
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+          import json
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            zone_id=os.environ['ZONE_ID']
+            names=os.environ['NAMES']
+            type=os.environ['TYPE']
+            instance_ids=os.environ['INSTANCE_IDS']
+            region=os.environ['REGION']
+            ttl=int(os.environ['TTL'])
+
+            rt = boto3.client('route53')
+            ec2 = boto3.client('ec2',region_name=region)
+
+            try:
+
+              logger.info('Event:' + json.dumps(event))
+              logger.info("Updating record set")
+
+              # Retrieve the new public ip address
+              record_names=names.split(",")
+              for name in record_names:
+                instance = ec2.describe_instances(InstanceIds=[instance_ids])
+                public_ip = instance['Reservations'][0]['Instances'][0]['PublicIpAddress']
+
+                response = rt.change_resource_record_sets(
+                            HostedZoneId=zone_id,
+                            ChangeBatch={
+                                'Changes': [
+                                    {
+                                      'Action': 'UPSERT',
+                                      'ResourceRecordSet': {
+                                          'Name': name,
+                                          'Type': type,
+                                          'TTL': ttl,
+                                          'ResourceRecords': [
+                                              {
+                                                  'Value': public_ip
+                                              },
+                                            ]
+                                        } 
+                                    },
+                                  ]
+                              }
+                            )
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StartLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which starts the instance on a given schedule"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_IDS: !Ref DefaultInstance
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            instanceIds=os.environ['INSTANCE_IDS']
+            
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+
+              logger.info('Starting Instance: ' + str(instanceIds))
+              ec2.start_instances(InstanceIds=[instanceIds],DryRun=False)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which stops the instance on a given schedule"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_IDS: !Ref DefaultInstance
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            instanceIds=os.environ['INSTANCE_IDS']
+            
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+
+              logger.info('Stopping Instance: ' + str(instanceIds))
+              ec2.stop_instances(InstanceIds=[instanceIds],DryRun=False)
+
+            except Exception:
+              logger.exception('Error Encountered')
 
 ####
 # Cloudwatch Section
@@ -545,6 +716,91 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Join ['/', ['/aws/lambda', !Ref DefaultLambdaFunction]]
+
+  DnsLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref DnsLambdaFunction]]
+
+  StartLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StartLambdaFunction]]
+
+  StopLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StopLambdaFunction]]
+
+  StopEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Stops the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StopLambdaFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+
+  PermissionForEventsToInvokeLambdaStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StopEventRule.Arn
+
+  StartEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Starts the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StartLambdaFunction.Arn 
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+
+  PermissionForEventsToInvokeLambdaStart:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StartEventRule.Arn
+
+  DnsEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Event rule each time the instance start/reboot
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dns]]
+      EventPattern: 
+        source: 
+          - "aws.ec2"
+        detail-type: 
+          - "EC2 Instance State-change Notification"
+        detail: 
+          state: 
+            - "running"
+            - "pending"
+          instance-id: 
+            - !Ref DefaultInstance
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt DnsLambdaFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dns]]
+
+  PermissionForEventsToInvokeLambdaDns:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DnsLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt DnsEventRule.Arn
 
   CPUUtilizationCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
