@@ -52,6 +52,15 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
+      -
+        Label:
+          default: "ElastiCache Configuration"
+        Parameters:
+          - NumCacheClusters
+          - CacheMaintenanceWindow
+          - CacheNodeType
+          - CachePort
+          - CachePassword
 
     ParameterLabels:
       Name:
@@ -90,6 +99,16 @@ Metadata:
         default: "Scheduled Expression (Start)"
       StopScheduleExpression:
         default: "Scheduled Expression (Stop)"
+      NumCacheClusters:
+        default: "Number of Cache Clusters"
+      CacheMaintenanceWindow:
+        default: "ElastiCache Maintenance Window"
+      CacheNodeType:
+        default: "ElastiCache Node Type"
+      CachePort:
+        default: "ElastiCache Port"
+      CachePassword:
+        default: "ElastiCache Password"
 
 Parameters:
   Name:
@@ -189,6 +208,26 @@ Parameters:
     Description: Schedule expression when to stop the the ec2 instance.
     Type: String
     Default: cron(0 12 ? * MON-FRI *)
+  NumCacheClusters:
+    Description: The number of clusters this replication group initially has.
+    Type: Number
+    Default: 1
+  CacheMaintenanceWindow:
+    Description: Specifies the weekly time range during which maintenance on the cluster is performed.
+    Type: String
+    Default: ""
+  CacheNodeType:
+    Description: The compute and memory capacity of the nodes in the node group (shard).
+    Type: String
+    Default: cache.t3.micro
+  CachePort:
+    Description: The port number on which each member of the replication group accepts connections.
+    Type: String
+    Default: 6379
+  CachePassword:
+    Description: Reserved parameter. The password used to access a password protected server.
+    Type: String
+    NoEcho: true  
 
 Mappings: 
   EnvShort:
@@ -487,6 +526,80 @@ Resources:
       FromPort: -1
       ToPort: -1
       CidrIp: "0.0.0.0/0"
+
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      VpcId: #vpc-0eeeb47ddc550dcb5
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+
+  CacheSecurityGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt CacheSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 6379
+      ToPort: 6379
+      SourceSecurityGroupId: !GetAtt DefaultSecurityGroup.GroupId
+
+####
+# Redis Section
+####
+
+  DefaultCacheParameterGroup:
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      CacheParameterGroupFamily: redis5.0
+
+  DefaultCacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      SubnetIds:
+        - Fn::ImportValue:
+            !Sub "${NetworkStackName}-InternalSubnetId1"
+        - Fn::ImportValue:
+            !Sub "${NetworkStackName}-InternalSubnetId2"  
+
+  DefaultElasticacheReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      ReplicationGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      NumCacheClusters: !Ref NumCacheClusters
+      AutomaticFailoverEnabled: false
+      PreferredMaintenanceWindow: !Ref CacheMaintenanceWindow
+      CacheNodeType: !Ref CacheNodeType
+      CacheParameterGroupName: !Ref DefaultCacheParameterGroup
+      Port: !Ref CachePort
+      CacheSubnetGroupName: !Ref DefaultCacheSubnetGroup
+      SecurityGroupIds: [!GetAtt CacheSecurityGroup.GroupId]
+      NotificationTopicArn:
+        Fn::ImportValue:
+          !Sub "${SNSStackName}-TopicArn"
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: true
+      AuthToken: !Ref CachePassword
+      Engine: redis
+      EngineVersion: 5.0.6
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
 
 ####
 # Secrets Manager Section
@@ -1112,6 +1225,48 @@ Resources:
         - Name: InstanceId
           Value: !Ref DefaultInstance
 
+  CacheCPUUtilizationCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache-cpu-utilization]]
+      MetricName: CPUUtilization
+      Namespace: "AWS/ElastiCache"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: CacheClusterId
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache-001]]
+
+  CacheFreeableMemoryCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache-freeable-memory]]
+      MetricName: FreeableMemory
+      Namespace: "AWS/ElastiCache"
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 325000
+      AlarmActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: CacheClusterId
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache-001]]
+
 Outputs:
 
   Name:
@@ -1155,3 +1310,10 @@ Outputs:
     Value: !GetAtt SESUserAccessKey.SecretAccessKey
     Export: 
       Name: !Sub ${AWS::StackName}-SESSecretAccessKey
+
+  CachePrimaryEndpoint:
+    Description: The DNS address of the primary read-write cache node.
+    Value: 
+      Fn::GetAtt: [ DefaultElasticacheReplicationGroup, PrimaryEndPoint.Address ]
+    Export: 
+      Name: !Sub ${AWS::StackName}-CachePrimaryEndpoint
