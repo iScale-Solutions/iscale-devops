@@ -747,229 +747,299 @@ Resources:
 # Lambda Section
 ####
 
-  # StartLambdaFunction:
-  #   Type: AWS::Lambda::Function
-  #   Properties:
-  #     Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
-  #     FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
-  #     Handler: index.lambda_handler
-  #     Role: !GetAtt LambdaExecutionRole.Arn 
-  #     Runtime: python3.6
-  #     Timeout: 900
-  #     Environment:
-  #       Variables:
-  #         REGION: !Ref AWS::Region
-  #         KEY: Name
-  #         VALUE: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-  #         DB_INSTANCE_IDENTIFIER: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-  #     Code:
-  #       ZipFile: |
+  StartLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          KEY: Name
+          VALUE: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          DB_INSTANCE_IDENTIFIER: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Code:
+        ZipFile: |
 
-  #         import boto3
-  #         import logging
-  #         import os
+          import boto3
+          import logging
+          import os
 
-  #         logger = logging.getLogger()
-  #         logger.setLevel(logging.INFO)
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
 
-  #         asg = boto3.client('autoscaling')
+          asg = boto3.client('autoscaling')
 
-  #         def get_auto_scaling_group_name(region,key,value):
-  #           names=[]
-  #           client = boto3.client('autoscaling', region_name=region)
-  #           paginator = client.get_paginator('describe_auto_scaling_groups')
-  #           page_iterator = paginator.paginate()
+          def get_auto_scaling_group_name(region,key,value):
+            names=[]
+            client = boto3.client('autoscaling', region_name=region)
+            paginator = client.get_paginator('describe_auto_scaling_groups')
+            page_iterator = paginator.paginate()
             
-  #           filter='AutoScalingGroups[] | [?contains(Tags[?Key==`{}`].Value, `{}`)]'
-  #           asgs = page_iterator.search(filter.format(key, value))
+            filter='AutoScalingGroups[] | [?contains(Tags[?Key==`{}`].Value, `{}`)]'
+            asgs = page_iterator.search(filter.format(key, value))
             
-  #           for asg in asgs:
-  #             names.append(asg["AutoScalingGroupName"])
+            for asg in asgs:
+              names.append(asg["AutoScalingGroupName"])
 
-  #           return names[0]
+            return names[0]
 
-  #         def get_instance_ids(AutoScalingGroupName):
-  #           instance_ids=[]
-  #           instances = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[AutoScalingGroupName])['AutoScalingGroups'][0]['Instances']
-  #           for inst in instances:
-  #             instance_ids.append(inst['InstanceId'])
+          def get_instance_ids(AutoScalingGroupName):
+            instance_ids=[]
+            instances = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[AutoScalingGroupName])['AutoScalingGroups'][0]['Instances']
+            for inst in instances:
+              instance_ids.append(inst['InstanceId'])
 
-  #           return instance_ids
+            return instance_ids
               
-  #         def lambda_handler(event, context):
-  #           region=os.environ['REGION']
-  #           key=os.environ['KEY']
-  #           value=os.environ['VALUE']
-  #           dbInstanceIdentifier=os.environ['DB_INSTANCE_IDENTIFIER']
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            key=os.environ['KEY']
+            value=os.environ['VALUE']
+            dbInstanceIdentifier=os.environ['DB_INSTANCE_IDENTIFIER']
 
-  #           try:
-  #             ec2 = boto3.client('ec2',region_name=region)
-  #             rds = boto3.client('rds')
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+              rds = boto3.client('rds')
 
-  #             autoScalingGroupName = get_auto_scaling_group_name(region,key,value)
-  #             instanceIds=get_instance_ids(autoScalingGroupName)
+              autoScalingGroupName = get_auto_scaling_group_name(region,key,value)
+              instanceIds=get_instance_ids(autoScalingGroupName)
 
-  #             logger.info('Starting DB Instance: ' + str(dbInstanceIdentifier))
-  #             rds.start_db_instance(DBInstanceIdentifier=dbInstanceIdentifier)
+              logger.info('Starting DB Instance: ' + str(dbInstanceIdentifier))
+              rds.start_db_instance(DBInstanceIdentifier=dbInstanceIdentifier)
 
-  #             logger.info('Waiting for database to start: ' + str(dbInstanceIdentifier))
-  #             rds_waiter = rds.get_waiter('db_instance_available')
-  #             rds_waiter.wait(DBInstanceIdentifier=dbInstanceIdentifier)
-  #             logger.info('database started: ' + str(dbInstanceIdentifier))
+              logger.info('Waiting for database to start: ' + str(dbInstanceIdentifier))
+              rds_waiter = rds.get_waiter('db_instance_available')
+              rds_waiter.wait(DBInstanceIdentifier=dbInstanceIdentifier)
+              logger.info('database started: ' + str(dbInstanceIdentifier))
 
-  #             logger.info('Starting Instance: ' + str(instanceIds))
-  #             ec2.start_instances(InstanceIds=instanceIds,DryRun=False)
+              logger.info('Starting Instance: ' + str(instanceIds))
+              ec2.start_instances(InstanceIds=instanceIds,DryRun=False)
 
-  #             logger.info('Waiting for instance to start: ' + str(instanceIds))
-  #             waiter = ec2.get_waiter('instance_running')
-  #             waiter.wait(InstanceIds=instanceIds)
-  #             logger.info('Instance started: ' + str(instanceIds))
+              logger.info('Waiting for instance to start: ' + str(instanceIds))
+              waiter = ec2.get_waiter('instance_running')
+              waiter.wait(InstanceIds=instanceIds)
+              logger.info('Instance started: ' + str(instanceIds))
 
-  #             logger.info('Resuming HealthCheck and ReplaceUnhealthy')
-  #             asg.resume_processes(
-  #                                 AutoScalingGroupName=autoScalingGroupName,
-  #                                 ScalingProcesses=[
-  #                                     'HealthCheck',
-  #                                     'ReplaceUnhealthy'
-  #                                 ]
-  #                               )
+              logger.info('Resuming HealthCheck and ReplaceUnhealthy')
+              asg.resume_processes(
+                                  AutoScalingGroupName=autoScalingGroupName,
+                                  ScalingProcesses=[
+                                      'HealthCheck',
+                                      'ReplaceUnhealthy'
+                                  ]
+                                )
 
-  #           except Exception:
-  #             logger.exception('Error Encountered')
+            except Exception:
+              logger.exception('Error Encountered')
 
-  # StopLambdaFunction:
-  #   Type: AWS::Lambda::Function
-  #   Properties:
-  #     Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
-  #     FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
-  #     Handler: index.lambda_handler
-  #     Role: !GetAtt LambdaExecutionRole.Arn 
-  #     Runtime: python3.6
-  #     Timeout: 900
-  #     Environment:
-  #       Variables:
-  #         REGION: !Ref AWS::Region
-  #         KEY: Name
-  #         VALUE: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-  #         DB_INSTANCE_IDENTIFIER: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-  #     Code:
-  #       ZipFile: |
+  StopLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          KEY: Name
+          VALUE: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          DB_INSTANCE_IDENTIFIER: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Code:
+        ZipFile: |
 
-  #         import boto3
-  #         import logging
-  #         import os
+          import boto3
+          import logging
+          import os
 
-  #         logger = logging.getLogger()
-  #         logger.setLevel(logging.INFO)
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
 
-  #         asg = boto3.client('autoscaling')
+          asg = boto3.client('autoscaling')
 
-  #         def get_auto_scaling_group_name(region,key,value):
-  #           names=[]
-  #           client = boto3.client('autoscaling', region_name=region)
-  #           paginator = client.get_paginator('describe_auto_scaling_groups')
-  #           page_iterator = paginator.paginate()
+          def get_auto_scaling_group_name(region,key,value):
+            names=[]
+            client = boto3.client('autoscaling', region_name=region)
+            paginator = client.get_paginator('describe_auto_scaling_groups')
+            page_iterator = paginator.paginate()
             
-  #           filter='AutoScalingGroups[] | [?contains(Tags[?Key==`{}`].Value, `{}`)]'
-  #           asgs = page_iterator.search(filter.format(key, value))
+            filter='AutoScalingGroups[] | [?contains(Tags[?Key==`{}`].Value, `{}`)]'
+            asgs = page_iterator.search(filter.format(key, value))
             
-  #           for asg in asgs:
-  #             names.append(asg["AutoScalingGroupName"])
+            for asg in asgs:
+              names.append(asg["AutoScalingGroupName"])
 
-  #           return names[0]
+            return names[0]
 
-  #         def get_instance_ids(AutoScalingGroupName):
-  #           instance_ids=[]
-  #           instances = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[AutoScalingGroupName])['AutoScalingGroups'][0]['Instances']
-  #           for inst in instances:
-  #             instance_ids.append(inst['InstanceId'])
+          def get_instance_ids(AutoScalingGroupName):
+            instance_ids=[]
+            instances = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[AutoScalingGroupName])['AutoScalingGroups'][0]['Instances']
+            for inst in instances:
+              instance_ids.append(inst['InstanceId'])
 
-  #           return instance_ids
+            return instance_ids
               
-  #         def lambda_handler(event, context):
-  #           region=os.environ['REGION']
-  #           key=os.environ['KEY']
-  #           value=os.environ['VALUE']
-  #           dbInstanceIdentifier=os.environ['DB_INSTANCE_IDENTIFIER']
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            key=os.environ['KEY']
+            value=os.environ['VALUE']
+            dbInstanceIdentifier=os.environ['DB_INSTANCE_IDENTIFIER']
 
-  #           try:
-  #             ec2 = boto3.client('ec2',region_name=region)
-  #             rds = boto3.client('rds')
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+              rds = boto3.client('rds')
 
-  #             autoScalingGroupName = get_auto_scaling_group_name(region,key,value)
-  #             instanceIds=get_instance_ids(autoScalingGroupName)
+              autoScalingGroupName = get_auto_scaling_group_name(region,key,value)
+              instanceIds=get_instance_ids(autoScalingGroupName)
 
-  #             logger.info('Suspending HealthCheck and ReplaceUnhealthy')
-  #             asg.suspend_processes(
-  #                                 AutoScalingGroupName=autoScalingGroupName,
-  #                                 ScalingProcesses=[
-  #                                     'HealthCheck',
-  #                                     'ReplaceUnhealthy'
-  #                                 ]
-  #                                 )
+              logger.info('Suspending HealthCheck and ReplaceUnhealthy')
+              asg.suspend_processes(
+                                  AutoScalingGroupName=autoScalingGroupName,
+                                  ScalingProcesses=[
+                                      'HealthCheck',
+                                      'ReplaceUnhealthy'
+                                  ]
+                                  )
 
-  #             logger.info('Stopping Instance: ' + str(instanceIds))
-  #             ec2.stop_instances(InstanceIds=instanceIds,DryRun=False)
+              logger.info('Stopping Instance: ' + str(instanceIds))
+              ec2.stop_instances(InstanceIds=instanceIds,DryRun=False)
 
-  #             logger.info('Stopping DB Instance: ' + str(dbInstanceIdentifier))
-  #             rds.stop_db_instance(DBInstanceIdentifier=dbInstanceIdentifier)
+              logger.info('Stopping DB Instance: ' + str(dbInstanceIdentifier))
+              rds.stop_db_instance(DBInstanceIdentifier=dbInstanceIdentifier)
 
-  #           except Exception:
-  #             logger.exception('Error Encountered')
+            except Exception:
+              logger.exception('Error Encountered')
 
 ####
 # Cloudwatch Section
 ####
 
-  # StartLambdaLogGroup:
-  #   Type: AWS::Logs::LogGroup
-  #   Properties:
-  #     LogGroupName: !Join ['/', ['/aws/lambda', !Ref StartLambdaFunction]]
+  StartLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StartLambdaFunction]]
 
-  # StopLambdaLogGroup:
-  #   Type: AWS::Logs::LogGroup
-  #   Properties:
-  #     LogGroupName: !Join ['/', ['/aws/lambda', !Ref StopLambdaFunction]]
+  StopLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StopLambdaFunction]]
 
-  # StopEventRule:
-  #   Type: AWS::Events::Rule
-  #   Properties:
-  #     Description: Stops the instance at a specific time
-  #     Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
-  #     ScheduleExpression: !Ref StopScheduleExpression
-  #     State:  "ENABLED"
-  #     Targets:
-  #     - 
-  #       Arn: !GetAtt StopLambdaFunction.Arn
-  #       Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+  StopEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Stops the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StopLambdaFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
 
-  # PermissionForEventsToInvokeLambdaStop:
-  #   Type: AWS::Lambda::Permission
-  #   Properties:
-  #     FunctionName: !Ref StopLambdaFunction
-  #     Action:  "lambda:InvokeFunction"
-  #     Principal:  "events.amazonaws.com"
-  #     SourceArn: !GetAtt StopEventRule.Arn
+  PermissionForEventsToInvokeLambdaStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StopEventRule.Arn
 
-  # StartEventRule:
-  #   Type: AWS::Events::Rule
-  #   Properties:
-  #     Description: Starts the instance at a specific time
-  #     Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
-  #     ScheduleExpression: !Ref StartScheduleExpression
-  #     State:  "ENABLED"
-  #     Targets:
-  #     - 
-  #       Arn: !GetAtt StartLambdaFunction.Arn 
-  #       Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+  StartEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Starts the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StartLambdaFunction.Arn 
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
 
-  # PermissionForEventsToInvokeLambdaStart:
-  #   Type: AWS::Lambda::Permission
-  #   Properties:
-  #     FunctionName: !Ref StartLambdaFunction
-  #     Action:  "lambda:InvokeFunction"
-  #     Principal:  "events.amazonaws.com"
-  #     SourceArn: !GetAtt StartEventRule.Arn
+  PermissionForEventsToInvokeLambdaStart:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StartEventRule.Arn
+
+  CPUUtilizationCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], cpu-utilization]]
+      MetricName: CPUUtilization
+      Namespace: "AWS/EC2"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - 
+          Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - 
+          Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref DefaultAutoScalingGroup
+
+  StatusChecksCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], status-checks] ]
+      MetricName: StatusCheckFailed
+      Namespace: "AWS/EC2"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Minimum
+      Threshold: 1
+      AlarmActions:
+        - 
+          Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - 
+          Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref DefaultAutoScalingGroup
+
+  CPUCreditBalanceCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsEnableCPUCreditAlarm
+    Properties:
+      AlarmName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], cpu-credit-balance] ]
+      MetricName: CPUCreditBalance
+      Namespace: "AWS/EC2"
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Minimum
+      Threshold: 24
+      AlarmActions:
+        - 
+          Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - 
+          Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref DefaultAutoScalingGroup
 
   UnhealthyHostCountCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
