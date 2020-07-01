@@ -1,0 +1,730 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+    This cloudformation template provisions a code deploy application and group.
+    The Autoscaling group must be created manually to avoid issues with code deploy.
+    This also provisions cloudwatch alarms that updates the asg name every deployment.
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: fishingkaki
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  BackendStackName:
+    Description: name of the Esport Stack
+    Type: String
+    Default: fishingkaki-prd-ase1-backendv2
+  SNSStackName:
+    Description: name of the SNS Stack
+    Type: String
+    Default: fishingkaki-prd-ase1-sns
+  LoadBalancerStackName:
+    Description: name of the SNS Stack
+    Type: String
+    Default: fishingkaki-prd-ase1-loadbalancer
+  EnableCPUCreditAlarm:
+    Description: Set to true if CPU credit alarm is enabled (Applicable only for t* instance types. E.g. t2.small, t3.small). Otherwise, disabled.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  CPUTargetValue:
+    Description: Target value for the CPU Utilization metric
+    Type: Number
+    Default: 80
+  AutoscalingGroupName:
+    Description: Name of the manually created autoscaling group
+    Type: String
+  GitHubOAuthToken:
+    Description: GitHub authentication token.
+    Type: String
+    NoEcho: true
+    MinLength: 40
+    MaxLength: 40
+    AllowedPattern: '[a-z0-9]*'
+  GitHubOwner:
+    Description: Owner of the Github repository.
+    Type: String
+    Default: Green-Earth-Lifestyle-Pte-Ltd
+  GitHubRepo:
+    Description: The Github repository name.
+    Type: String
+    Default: fkv2_admin
+  GitHubBranch:
+    Description: The Github branch name.
+    Type: String
+    Default: master
+
+Mappings: 
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
+  RegionShort:
+    us-east-2:
+      Name: ue2
+    us-east-1:
+      Name: ue1
+    us-west-1:
+      Name: uw1
+    us-west-2:
+      Name: uw2
+    ap-east-1:
+      Name: ae1
+    ap-south-1:
+      Name: as1
+    ap-northeast-1:
+      Name: ane1
+    ap-northeast-2:
+      Name: ane2
+    ap-northeast-3:
+      Name: ane3
+    ap-southeast-1:
+      Name: ase1
+    ap-southeast-2:
+      Name: ase2
+    ca-central-1:
+      Name: cc1
+    cn-north-1:
+      Name: cn1
+    cn-northwest-1:
+      Name: cnw1
+    eu-central-1:
+      Name: ec1
+    eu-west-1:
+      Name: ew1
+    eu-west-2:
+      Name: ew2
+    eu-west-3:
+      Name: ew3
+    eu-north-1:
+      Name: en1
+    me-south-1:
+      Name: ms1
+    sa-east-1:
+      Name: se1
+    us-gov-east-1:
+      Name: uge1
+    us-gov-west-1:
+      Name: ugw1
+      
+Conditions: 
+  IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
+
+Resources:
+
+####
+# S3 Section
+####
+
+  DefaultS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: PublicRead
+      BucketName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - codepipeline
+      Tags:
+        - 
+          Key: Name
+          Value: !Join
+          - '-'
+          - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+            - codepipeline
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+####
+# Code Pipeline Section
+####
+
+  DefaultCodePipeline:
+    Type: AWS::CodePipeline::Pipeline 
+    Properties: 
+      Name: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - code-pipeline
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore: 
+        Location: !Ref DefaultS3Bucket
+        Type: S3
+      Stages: 
+        - 
+          Name: Source 
+          Actions: 
+            - 
+              Name: SourceAction
+              ActionTypeId: 
+                Category: Source 
+                Owner: ThirdParty 
+                Version: 1 
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                PollForSourceChanges: false
+                OAuthToken: !Ref GitHubOAuthToken
+              OutputArtifacts: 
+                - 
+                  Name: !Join
+                  - '-'
+                  - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+                    - artifact
+              RunOrder: 1
+        - 
+          Name: Release 
+          Actions: 
+            - 
+              Name: ReleaseAction
+              InputArtifacts: 
+                - 
+                  Name: !Join
+                  - '-'
+                  - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+                    - artifact
+              ActionTypeId: 
+                Category: Deploy 
+                Owner: AWS
+                Version: 1
+                Provider: CodeDeploy 
+              Configuration: 
+                ApplicationName: !Ref DefaultCodeDeployApplication
+                DeploymentGroupName: !Ref DefaultCodeDeployDeploymentGroup
+              RunOrder: 1 
+      Tags:
+        - 
+          Key: Name
+          Value: !Join
+          - '-'
+          - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+            - code-pipeline
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  DefaultPipelineWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Name: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - code-pipeline-webhook
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !Ref GitHubOAuthToken
+      Filters:
+        - 
+          JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+      TargetPipeline: !Ref DefaultCodePipeline
+      TargetAction: SourceAction
+      TargetPipelineVersion: !GetAtt DefaultCodePipeline.Version
+      RegisterWithThirdParty: true
+
+####
+# Code Deploy Section
+####
+
+  DefaultCodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties: 
+      ApplicationName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - application
+      ComputePlatform: Server
+
+  DefaultCodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref DefaultCodeDeployApplication
+      DeploymentConfigName: CodeDeployDefault.OneAtATime
+      DeploymentGroupName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - deployment-group
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      TriggerConfigurations:
+        -
+          TriggerEvents:
+            - DeploymentSuccess
+            - DeploymentFailure
+          TriggerName: Deployment
+          TriggerTargetArn: !Ref CodeDeploySnsTopic
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+      LoadBalancerInfo:
+        TargetGroupInfoList:
+          - 
+            Name: 
+              Fn::ImportValue: 
+                !Sub "${BackendStackName}-TargetGroupName"
+
+####
+# IAM Section
+####
+
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - !Join [".", [codedeploy, !Ref 'AWS::Region', amazonaws, com]]
+            Action: 
+              - "sts:AssumeRole"
+      ManagedPolicyArns: ["arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole"]
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], codedeploy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:GetBucketLocation
+                  - s3:ListAllMyBuckets
+                Resource: arn:aws:s3:::*
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:ListBucket
+                Resource: !GetAtt DefaultS3Bucket.Arn
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:*
+                Resource: !Join ["/",[!GetAtt DefaultS3Bucket.Arn,"*"]]
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Sid: "1"
+            Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Principal:
+              Service: 
+                - codepipeline.amazonaws.com
+      ManagedPolicyArns: ["arn:aws:iam::aws:policy/AWSCodePipelineFullAccess"]
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], codepipeline]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:GetBucketLocation
+                  - s3:ListAllMyBuckets
+                Resource: arn:aws:s3:::*
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:ListBucket
+                Resource: !GetAtt DefaultS3Bucket.Arn
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:*
+                Resource: !Join ["/",[!GetAtt DefaultS3Bucket.Arn,"*"]]
+              - 
+                Effect: "Allow"
+                Action: 
+                  - codedeploy:*
+                Resource: "*"
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com" 
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - 
+          PolicyName: "LambdaExecutionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DescribeAlarms
+                Resource: "*"
+              - 
+                Effect: "Allow"
+                Action: 
+                  - codedeploy:GetDeploymentGroup
+                  - codedeploy:UpdateDeploymentGroup
+                  - codedeploy:GetDeployment
+                  - autoscaling:DeleteAutoScalingGroup
+                Resource: "*"
+              - 
+                Effect: "Allow"
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+####
+# SNS Topic Section
+####
+
+  CodeDeploySnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - code-deploy-topic
+      TopicName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - code-deploy-topic
+
+  LambdaSubscription:
+    Type: "AWS::SNS::Subscription"
+    Properties:
+      Endpoint: !GetAtt CodeDeployLambdaFunction.Arn
+      Protocol: lambda
+      TopicArn: !Ref CodeDeploySnsTopic 
+
+####
+# Custom Section
+####
+
+  UpdateDeploymentConfiguration:
+    DependsOn: DefaultCodeDeployDeploymentGroup
+    Type: "Custom::UpdateDeploymentConfiguration"
+    Properties:
+      ServiceToken: !GetAtt DeploymentGroupLambdaFunction.Arn
+      AutoscalingGroupName: !Ref AutoscalingGroupName
+
+####
+# Lambda Section
+####
+
+  CodeDeployLambdaResourcePolicy:
+    DependsOn: CodeDeployLambdaFunction
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CodeDeployLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "sns.amazonaws.com"
+      SourceArn: !Ref CodeDeploySnsTopic
+
+  CodeDeployLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - code-deploy
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          ALARMS: !If
+          - IsEnableCPUCreditAlarm
+          - !Join [',',[!Ref CPUUtilizationCloudWatchAlarm, !Ref StatusChecksCloudWatchAlarm, !Ref CPUCreditBalanceCloudWatchAlarm]]
+          - !Join [',',[!Ref CPUUtilizationCloudWatchAlarm, !Ref StatusChecksCloudWatchAlarm]]
+          APPLICATION_NAME: !Ref DefaultCodeDeployApplication
+          DEPLOYMENT_GROUP_NAME: !Ref DefaultCodeDeployDeploymentGroup
+      Code:
+        ZipFile: |
+
+          import boto3
+          import os
+          import json
+          import time
+
+          def lambda_handler(event, context):
+
+              cd = boto3.client('codedeploy')
+              cw = boto3.client('cloudwatch')
+              cloudwatch = boto3.resource('cloudwatch')
+              ec2 = boto3.client('autoscaling')
+              
+              SNS_MSG=event['Records'][0]['Sns']['Message']
+              MSG=json.loads(SNS_MSG)
+
+              STATUS=MSG['status']
+              DEPLOYMENT_ID=MSG['deploymentId']
+              # Get the new asg from the last successful deployment
+              # response = cd.get_deployment_group(applicationName=os.environ['APPLICATION_NAME'],
+              #                                   deploymentGroupName=os.environ['DEPLOYMENT_GROUP_NAME'])
+              response=cd.get_deployment(deploymentId=DEPLOYMENT_ID)
+              ASG=response['deploymentInfo']['targetInstances']['autoScalingGroups'][0]
+
+              #ASG=response['deploymentGroupInfo']['autoScalingGroups'][0]['name']
+              print("SNS Message:= " + SNS_MSG)
+              print("Deployment Status:= " + STATUS)
+              print("Deployment ID:= " + DEPLOYMENT_ID)
+              print("AutoScaling Group:= " + ASG)
+
+              if STATUS == 'SUCCEEDED':
+
+                print("Updating cloudwatch alarms")
+                # Update cloudwatch alarm with the new ASG
+                for ALARM in os.environ['ALARMS'].split(","):
+                    
+                    # Get the existing parameters
+                    # This will be used to update the new alarm
+                    params = cw.describe_alarms(AlarmNames=[ALARM])
+
+                    # Update the alarm with dimensions
+                    metric = cloudwatch.Metric(params['MetricAlarms'][0]['Namespace'],
+                                              params['MetricAlarms'][0]['MetricName'])
+                    metric.put_alarm(
+                        AlarmName=params['MetricAlarms'][0]['AlarmName'],
+                        MetricName=params['MetricAlarms'][0]['MetricName'],
+                        Namespace=params['MetricAlarms'][0]['Namespace'],
+                        ComparisonOperator=params['MetricAlarms'][0]['ComparisonOperator'],
+                        EvaluationPeriods=params['MetricAlarms'][0]['EvaluationPeriods'],
+                        Period=params['MetricAlarms'][0]['Period'],
+                        Statistic=params['MetricAlarms'][0]['Statistic'],
+                        Threshold=params['MetricAlarms'][0]['Threshold'],
+                        AlarmActions=params['MetricAlarms'][0]['AlarmActions'],
+                        OKActions=params['MetricAlarms'][0]['OKActions'],
+                        Dimensions=[
+                            {
+                                'Name': 'AutoScalingGroupName',
+                                'Value': ASG
+                            },]
+                        )
+
+              elif STATUS == 'FAILED':
+
+                # wait for 10 minutes before actually deleting the asg
+                time.sleep(600)
+                print("deleting autoscaling group:= " + ASG)
+                # Remove ASG after deployment
+                ec2.delete_auto_scaling_group(AutoScalingGroupName=ASG,ForceDelete=True)
+
+  DeploymentGroupLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - update-deployment-group
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.6
+      Environment:
+        Variables:
+          APPLICATION_NAME: !Ref DefaultCodeDeployApplication
+          DEPLOYMENT_GROUP_NAME: !Ref DefaultCodeDeployDeploymentGroup
+          ASG_NAME: !Ref AutoscalingGroupName
+      Code:
+        ZipFile: |
+
+          import boto3
+          import os
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              
+              cd = boto3.client('codedeploy')
+              responseData = {}
+              physicalResourceId = {}
+              
+              # Update deployment group
+              try: 
+                response = cd.update_deployment_group(
+                  applicationName=os.environ['APPLICATION_NAME'],
+                  currentDeploymentGroupName=os.environ['DEPLOYMENT_GROUP_NAME'],
+                  autoScalingGroups=[os.environ['ASG_NAME']],
+                  deploymentStyle={
+                    'deploymentType': 'BLUE_GREEN',
+                    'deploymentOption': 'WITH_TRAFFIC_CONTROL'
+                  },
+                  blueGreenDeploymentConfiguration={
+                    'terminateBlueInstancesOnDeploymentSuccess': {
+                        'action': 'TERMINATE',
+                        'terminationWaitTimeInMinutes': 0
+                    },
+                    'deploymentReadyOption': {
+                        'actionOnTimeout': 'CONTINUE_DEPLOYMENT'
+                    },
+                    'greenFleetProvisioningOption': {
+                        'action': 'COPY_AUTO_SCALING_GROUP'
+                    }
+                  }
+                )
+
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
+                return
+              except Exception as error:
+                print(error)
+                cfnresponse.send(event, context, cfnresponse.FAILED, responseData, physicalResourceId)
+                return
+
+
+####
+# CloudWatch Section
+####
+
+  CodeDeployEventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Name: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - codedeploy-event
+      Description: Push code deploy states to SNS topic
+      EventPattern: 
+        source: 
+          - "aws.codedeploy"
+        detail-type: 
+          - "CodeDeploy Deployment State-change Notification"
+        detail: 
+          application: 
+            - !Ref DefaultCodeDeployApplication
+          deploymentGroup:
+            - !Ref DefaultCodeDeployDeploymentGroup
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn:
+            Fn::ImportValue:
+              !Sub "${SNSStackName}-TopicArn"
+          Id: !Join
+          - '-'
+          - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+            - codedeploy-event
+
+  CPUUtilizationCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - cpu-utilization-v2
+      MetricName: CPUUtilization
+      Namespace: "AWS/EC2"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+
+  StatusChecksCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - status-checks
+      MetricName: StatusCheckFailed
+      Namespace: "AWS/EC2"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Minimum
+      Threshold: 1
+      AlarmActions: 
+        - Fn::ImportValue: 
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+
+  CPUCreditBalanceCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsEnableCPUCreditAlarm
+    Properties:
+      AlarmName: !Join
+      - '-'
+      - - Fn::ImportValue: !Sub "${BackendStackName}-Name"
+        - cpu-credit-balance
+      MetricName: CPUCreditBalance
+      Namespace: "AWS/EC2"
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Minimum
+      Threshold: 24
+      AlarmActions: 
+        - Fn::ImportValue: 
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions: 
+        - Fn::ImportValue: 
+            !Sub "${SNSStackName}-TopicArn"
+
+Outputs:
+
+  CodeDeployApplicationName:
+    Description: The code deploy application name
+    Value: !Ref DefaultCodeDeployApplication
+    Export: 
+      Name: !Sub ${AWS::StackName}-CodeDeployApplicationName
+  
+  CodeDeployDeploymentGroupName:
+    Description: The code deploy deployment group name
+    Value: !Ref DefaultCodeDeployDeploymentGroup
+    Export: 
+      Name: !Sub ${AWS::StackName}-CodeDeployDeploymentGroupName
+
+  BucketName:
+    Description: The code deploy s3 bucket name
+    Value: !Ref DefaultS3Bucket
+    Export: 
+      Name: !Sub ${AWS::StackName}-BucketName
