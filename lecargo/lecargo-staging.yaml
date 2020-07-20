@@ -1,0 +1,414 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions resources for LeCargo Staging
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      -
+        Label:
+          default: "Scheduler Configuration"
+        Parameters:
+          - InstanceName
+          - DbInstanceIdentifier
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: "Resource Name"
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+      InstanceName:
+        default: "EC2 Instance Name"
+      DbInstanceIdentifier:
+        default: "Database Instance Identifier"
+      StartScheduleExpression:
+        default: "Scheduled Expression (Start)"
+      StopScheduleExpression:
+        default: "Scheduled Expression (Stop)"
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: web-server
+    MaxLength: 32 # Max length for target group name is only 32 characters.
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: lecargo
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  InstanceName:
+    Description: Name of the EC2 Instance
+    Type: String
+    Default: LeCargo Staging Web Server
+  DbInstanceIdentifier:
+    Description: The target db instance identifier.
+    Type: String
+    Default: lecargo-staging-cluster
+  StartScheduleExpression:
+    Description: Schedule expression when to start the the ec2 instance.
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the the ec2 instance.
+    Type: String
+    Default: cron(0 15 ? * MON-FRI *)
+
+Mappings: 
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
+  RegionShort:
+    us-east-2:
+      Name: ue2
+    us-east-1:
+      Name: ue1
+    us-west-1:
+      Name: uw1
+    us-west-2:
+      Name: uw2
+    ap-east-1:
+      Name: ae1
+    ap-south-1:
+      Name: as1
+    ap-northeast-1:
+      Name: ane1
+    ap-northeast-2:
+      Name: ane2
+    ap-northeast-3:
+      Name: ane3
+    ap-southeast-1:
+      Name: ase1
+    ap-southeast-2:
+      Name: ase2
+    ca-central-1:
+      Name: cc1
+    cn-north-1:
+      Name: cn1
+    cn-northwest-1:
+      Name: cnw1
+    eu-central-1:
+      Name: ec1
+    eu-west-1:
+      Name: ew1
+    eu-west-2:
+      Name: ew2
+    eu-west-3:
+      Name: ew3
+    eu-north-1:
+      Name: en1
+    me-south-1:
+      Name: ms1
+    sa-east-1:
+      Name: se1
+    us-gov-east-1:
+      Name: uge1
+    us-gov-west-1:
+      Name: ugw1 
+
+Resources:
+
+
+####
+# IAM Section
+####
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com" 
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - 
+          PolicyName: "LambdaDefaultFunctionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - 
+                Effect: Allow
+                Action: 
+                  - ec2:DescribeInstances
+                  - route53:ChangeResourceRecordSets
+                  - ec2:Start*
+                  - ec2:Stop*
+                  - rds:StartDBCluster
+                  - rds:StopDBCluster
+                  - rds:Describe*
+                Resource: "*"
+              - 
+                Effect: "Allow"
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+####
+# Lambda Section
+####
+
+  StartLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          KEY: Name
+          VALUE: !Ref InstanceName
+          DB_INSTANCE_IDENTIFIER: !Ref DbInstanceIdentifier
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          asg = boto3.client('autoscaling')
+
+          def get_auto_scaling_group_name(region,key,value):
+            names=[]
+            client = boto3.client('autoscaling', region_name=region)
+            paginator = client.get_paginator('describe_auto_scaling_groups')
+            page_iterator = paginator.paginate()
+            
+            filter='AutoScalingGroups[] | [?contains(Tags[?Key==`{}`].Value, `{}`)]'
+            asgs = page_iterator.search(filter.format(key, value))
+            
+            for asg in asgs:
+              names.append(asg["AutoScalingGroupName"])
+
+            return names[0]
+
+          def get_instance_ids(AutoScalingGroupName):
+            instance_ids=[]
+            instances = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[AutoScalingGroupName])['AutoScalingGroups'][0]['Instances']
+            for inst in instances:
+              instance_ids.append(inst['InstanceId'])
+
+            return instance_ids
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            key=os.environ['KEY']
+            value=os.environ['VALUE']
+            dbInstanceIdentifier=os.environ['DB_INSTANCE_IDENTIFIER']
+
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+              rds = boto3.client('rds')
+
+              autoScalingGroupName = get_auto_scaling_group_name(region,key,value)
+              instanceIds=get_instance_ids(autoScalingGroupName)
+
+              logger.info('Starting DB Instance: ' + str(dbInstanceIdentifier))
+              rds.start_db_instance(DBInstanceIdentifier=dbInstanceIdentifier)
+
+              logger.info('Waiting for database to start: ' + str(dbInstanceIdentifier))
+              rds_waiter = rds.get_waiter('db_instance_available')
+              rds_waiter.wait(DBInstanceIdentifier=dbInstanceIdentifier)
+              logger.info('database started: ' + str(dbInstanceIdentifier))
+
+              logger.info('Starting Instance: ' + str(instanceIds))
+              ec2.start_instances(InstanceIds=instanceIds,DryRun=False)
+
+              logger.info('Waiting for instance to start: ' + str(instanceIds))
+              waiter = ec2.get_waiter('instance_running')
+              waiter.wait(InstanceIds=instanceIds)
+              logger.info('Instance started: ' + str(instanceIds))
+
+              logger.info('Resuming HealthCheck and ReplaceUnhealthy')
+              asg.resume_processes(
+                                  AutoScalingGroupName=autoScalingGroupName,
+                                  ScalingProcesses=[
+                                      'HealthCheck',
+                                      'ReplaceUnhealthy'
+                                  ]
+                                )
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          KEY: Name
+          VALUE: !Ref InstanceName
+          DB_INSTANCE_IDENTIFIER: !Ref DbInstanceIdentifier
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          asg = boto3.client('autoscaling')
+
+          def get_auto_scaling_group_name(region,key,value):
+            names=[]
+            client = boto3.client('autoscaling', region_name=region)
+            paginator = client.get_paginator('describe_auto_scaling_groups')
+            page_iterator = paginator.paginate()
+            
+            filter='AutoScalingGroups[] | [?contains(Tags[?Key==`{}`].Value, `{}`)]'
+            asgs = page_iterator.search(filter.format(key, value))
+            
+            for asg in asgs:
+              names.append(asg["AutoScalingGroupName"])
+
+            return names[0]
+
+          def get_instance_ids(AutoScalingGroupName):
+            instance_ids=[]
+            instances = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[AutoScalingGroupName])['AutoScalingGroups'][0]['Instances']
+            for inst in instances:
+              instance_ids.append(inst['InstanceId'])
+
+            return instance_ids
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            key=os.environ['KEY']
+            value=os.environ['VALUE']
+            dbInstanceIdentifier=os.environ['DB_INSTANCE_IDENTIFIER']
+
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+              rds = boto3.client('rds')
+
+              autoScalingGroupName = get_auto_scaling_group_name(region,key,value)
+              instanceIds=get_instance_ids(autoScalingGroupName)
+
+              logger.info('Suspending HealthCheck and ReplaceUnhealthy')
+              asg.suspend_processes(
+                                  AutoScalingGroupName=autoScalingGroupName,
+                                  ScalingProcesses=[
+                                      'HealthCheck',
+                                      'ReplaceUnhealthy'
+                                  ]
+                                  )
+
+              logger.info('Stopping Instance: ' + str(instanceIds))
+              ec2.stop_instances(InstanceIds=instanceIds,DryRun=False)
+
+              logger.info('Stopping DB Instance: ' + str(dbInstanceIdentifier))
+              rds.stop_db_instance(DBInstanceIdentifier=dbInstanceIdentifier)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+####
+# Cloudwatch Section
+####
+
+  StartLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StartLambdaFunction]]
+
+  StopLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StopLambdaFunction]]
+
+  StopEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Stops the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StopLambdaFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+
+  PermissionForEventsToInvokeLambdaStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StopEventRule.Arn
+
+  StartEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Starts the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StartLambdaFunction.Arn 
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+
+  PermissionForEventsToInvokeLambdaStart:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StartEventRule.Arn
+
+Outputs:
+
+  Name:
+    Description: Unique name/identifier
+    Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+    Export: 
+      Name: !Sub ${AWS::StackName}-Name

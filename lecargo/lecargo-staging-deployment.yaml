@@ -1,0 +1,483 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+    This cloudformation template provisions a code deploy application and group.
+    The Autoscaling group must be created manually to avoid issues with code deploy.
+    This also provisions cloudwatch alarms that updates the asg name every deployment.
+
+Parameters: 
+  Name:
+    Description: The unique name of the resource
+    Type: String
+    Default: iscale-stg-ec1-lecargo
+  TargetGroupFullName:
+    Description: The target group full name
+    Type: String
+  SNSStack:
+    Description: name of the SNS Stack
+    Type: String
+  LoadBalancerFullName:
+    Description: The load balancer full name
+    Type: String
+  EnableCPUCreditAlarm:
+    Description: Set to true if CPU credit alarm is enabled (Applicable only for t* instance types. E.g. t2.small, t3.small). Otherwise, disabled.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  CPUTargetValue:
+    Description: Target value for the CPU Utilization metric
+    Type: Number
+    Default: 80
+  AutoscalingGroupName:
+    Description: Name of the manually created autoscaling group
+    Type: String
+  CodeDeployApplicationName:
+    Description: Name of the code application
+    Type: String
+  CodeDeployDeploymentGroupName:
+    Description: Name of the code deployment group
+    Type: String
+
+Conditions: 
+  IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
+
+Resources:
+
+####
+# S3 Section
+####
+
+  # DefaultS3Bucket:
+  #   Type: AWS::S3::Bucket
+  #   Properties: 
+  #     AccessControl: PublicRead
+  #     BucketName: !Join ['-',[!Ref Name, code-deploy]]
+
+# ####
+# # Code Deploy Section
+# ####
+
+#   DefaultCodeDeployApplication:
+#     Type: AWS::CodeDeploy::Application
+#     Properties: 
+#       ApplicationName: !Join
+#       - '-'
+#       - - Fn::ImportValue: !Sub "${EsportStack}-Name"
+#         - application
+#       ComputePlatform: Server
+
+#   DefaultCodeDeployDeploymentGroup:
+#     Type: AWS::CodeDeploy::DeploymentGroup
+#     Properties:
+#       ApplicationName: !Ref DefaultCodeDeployApplication
+#       DeploymentConfigName: CodeDeployDefault.OneAtATime
+#       DeploymentGroupName: !Join
+#       - '-'
+#       - - Fn::ImportValue: !Sub "${EsportStack}-Name"
+#         - deployment-group
+#       ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+#       TriggerConfigurations:
+#         -
+#           TriggerEvents:
+#             - DeploymentSuccess
+#             - DeploymentFailure
+#           TriggerName: Deployment
+#           TriggerTargetArn: !Ref CodeDeploySnsTopic
+#       AutoRollbackConfiguration:
+#         Enabled: true
+#         Events:
+#           - DEPLOYMENT_FAILURE
+#       LoadBalancerInfo:
+#         TargetGroupInfoList:
+#           - 
+#             Name: 
+#               Fn::ImportValue: 
+#                 !Sub "${EsportStack}-TargetGroupName"
+
+####
+# IAM Section
+####
+
+  # CodeDeployServiceRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     Path: "/"
+  #     AssumeRolePolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         -
+  #           Effect: "Allow"
+  #           Principal:
+  #             Service:
+  #               - !Join [".", [codedeploy, !Ref 'AWS::Region', amazonaws, com]]
+  #           Action: 
+  #             - "sts:AssumeRole"
+  #     ManagedPolicyArns: ["arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole"]
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com" 
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - 
+          PolicyName: "LambdaExecutionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DescribeAlarms
+                Resource: "*"
+              - 
+                Effect: "Allow"
+                Action: 
+                  - codedeploy:GetDeploymentGroup
+                  - codedeploy:UpdateDeploymentGroup
+                  - codedeploy:GetDeployment
+                  - autoscaling:DeleteAutoScalingGroup
+                Resource: "*"
+              - 
+                Effect: "Allow"
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+####
+# SNS Topic Section
+####
+
+  CodeDeploySnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Join ['-',[!Ref Name, code-deploy-topic]]
+      TopicName: !Join ['-',[!Ref Name, code-deploy-topic]]
+
+  LambdaSubscription:
+    Type: "AWS::SNS::Subscription"
+    Properties:
+      Endpoint: !GetAtt CodeDeployLambdaFunction.Arn
+      Protocol: lambda
+      TopicArn: !Ref CodeDeploySnsTopic
+
+  
+
+####
+# Custom Section
+####
+
+  UpdateDeploymentConfiguration:
+    Type: "Custom::UpdateDeploymentConfiguration"
+    Properties:
+      ServiceToken: !GetAtt DeploymentGroupLambdaFunction.Arn
+      AutoscalingGroupName: !Ref AutoscalingGroupName
+
+####
+# Lambda Section
+####
+
+  CodeDeployLambdaResourcePolicy:
+    DependsOn: CodeDeployLambdaFunction
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CodeDeployLambdaFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "sns.amazonaws.com"
+      SourceArn: !Ref CodeDeploySnsTopic
+
+  CodeDeployLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-',[!Ref Name, code-deploy]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      Environment:
+        Variables:
+          ALARMS: !If
+          - IsEnableCPUCreditAlarm
+          - !Join [',',[!Ref CPUUtilizationCloudWatchAlarm, !Ref StatusChecksCloudWatchAlarm, !Ref CPUCreditBalanceCloudWatchAlarm]]
+          - !Join [',',[!Ref CPUUtilizationCloudWatchAlarm, !Ref StatusChecksCloudWatchAlarm]]
+          APPLICATION_NAME: !Ref CodeDeployApplicationName
+          DEPLOYMENT_GROUP_NAME: !Ref CodeDeployDeploymentGroupName
+      Code:
+        ZipFile: |
+
+          import boto3
+          import os
+          import json
+          import time
+
+          def lambda_handler(event, context):
+
+              cd = boto3.client('codedeploy')
+              cw = boto3.client('cloudwatch')
+              cloudwatch = boto3.resource('cloudwatch')
+              ec2 = boto3.client('autoscaling')
+              
+              SNS_MSG=event['Records'][0]['Sns']['Message']
+              MSG=json.loads(SNS_MSG)
+
+              STATUS=MSG['status']
+              DEPLOYMENT_ID=MSG['deploymentId']
+              # Get the new asg from the last successful deployment
+              # response = cd.get_deployment_group(applicationName=os.environ['APPLICATION_NAME'],
+              #                                   deploymentGroupName=os.environ['DEPLOYMENT_GROUP_NAME'])
+              response=cd.get_deployment(deploymentId=DEPLOYMENT_ID)
+              ASG=response['deploymentInfo']['targetInstances']['autoScalingGroups'][0]
+
+              #ASG=response['deploymentGroupInfo']['autoScalingGroups'][0]['name']
+              print("SNS Message:= " + SNS_MSG)
+              print("Deployment Status:= " + STATUS)
+              print("Deployment ID:= " + DEPLOYMENT_ID)
+              print("AutoScaling Group:= " + ASG)
+
+              if STATUS == 'SUCCEEDED':
+
+                print("Updating cloudwatch alarms")
+                # Update cloudwatch alarm with the new ASG
+                for ALARM in os.environ['ALARMS'].split(","):
+                    
+                    # Get the existing parameters
+                    # This will be used to update the new alarm
+                    params = cw.describe_alarms(AlarmNames=[ALARM])
+
+                    # Update the alarm with dimensions
+                    metric = cloudwatch.Metric(params['MetricAlarms'][0]['Namespace'],
+                                              params['MetricAlarms'][0]['MetricName'])
+                    metric.put_alarm(
+                        AlarmName=params['MetricAlarms'][0]['AlarmName'],
+                        MetricName=params['MetricAlarms'][0]['MetricName'],
+                        Namespace=params['MetricAlarms'][0]['Namespace'],
+                        ComparisonOperator=params['MetricAlarms'][0]['ComparisonOperator'],
+                        EvaluationPeriods=params['MetricAlarms'][0]['EvaluationPeriods'],
+                        Period=params['MetricAlarms'][0]['Period'],
+                        Statistic=params['MetricAlarms'][0]['Statistic'],
+                        Threshold=params['MetricAlarms'][0]['Threshold'],
+                        AlarmActions=params['MetricAlarms'][0]['AlarmActions'],
+                        OKActions=params['MetricAlarms'][0]['OKActions'],
+                        Dimensions=[
+                            {
+                                'Name': 'AutoScalingGroupName',
+                                'Value': ASG
+                            },]
+                        )
+
+              elif STATUS == 'FAILED':
+
+                # wait for 10 minutes before actually deleting the asg
+                time.sleep(600)
+                print("deleting autoscaling group:= " + ASG)
+                # Remove ASG after deployment
+                ec2.delete_auto_scaling_group(AutoScalingGroupName=ASG,ForceDelete=True)
+
+  DeploymentGroupLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-',[!Ref Name, update-deployment-group]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.6
+      Environment:
+        Variables:
+          APPLICATION_NAME: !Ref CodeDeployApplicationName
+          DEPLOYMENT_GROUP_NAME: !Ref CodeDeployDeploymentGroupName
+          ASG_NAME: !Ref AutoscalingGroupName
+      Code:
+        ZipFile: |
+
+          import boto3
+          import os
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              
+              cd = boto3.client('codedeploy')
+              responseData = {}
+              physicalResourceId = {}
+              
+              # Update deployment group
+              try: 
+                response = cd.update_deployment_group(
+                  applicationName=os.environ['APPLICATION_NAME'],
+                  currentDeploymentGroupName=os.environ['DEPLOYMENT_GROUP_NAME'],
+                  autoScalingGroups=[os.environ['ASG_NAME']],
+                  deploymentStyle={
+                    'deploymentType': 'BLUE_GREEN',
+                    'deploymentOption': 'WITH_TRAFFIC_CONTROL'
+                  },
+                  blueGreenDeploymentConfiguration={
+                    'terminateBlueInstancesOnDeploymentSuccess': {
+                        'action': 'TERMINATE',
+                        'terminationWaitTimeInMinutes': 0
+                    },
+                    'deploymentReadyOption': {
+                        'actionOnTimeout': 'CONTINUE_DEPLOYMENT'
+                    },
+                    'greenFleetProvisioningOption': {
+                        'action': 'COPY_AUTO_SCALING_GROUP'
+                    }
+                  }
+                )
+
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
+                return
+              except Exception as error:
+                print(error)
+                cfnresponse.send(event, context, cfnresponse.FAILED, responseData, physicalResourceId)
+                return
+
+
+####
+# CloudWatch Section
+####
+
+  # EventTopicPolicy:
+  #   Type: 'AWS::SNS::TopicPolicy'
+  #   Properties:
+  #     PolicyDocument:
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service: events.amazonaws.com
+  #           Action: SNS:Publish
+  #           Resource: '*'
+  #     Topics:
+  #       - Fn::ImportValue:
+  #             !Sub "${SNSStack}-Arn"
+
+  CodeDeployEventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Name: !Join ['-',[!Ref Name, code-deploy-event]]
+      Description: Push code deploy states to SNS topic
+      EventPattern: 
+        source: 
+          - "aws.codedeploy"
+        detail-type: 
+          - "CodeDeploy Deployment State-change Notification"
+        detail: 
+          application: 
+            - !Ref CodeDeployApplicationName
+          deploymentGroup:
+            - !Ref CodeDeployDeploymentGroupName
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn:
+            Fn::ImportValue:
+              !Sub "${SNSStack}-Arn"
+          Id: !Join ['-',[!Ref Name, code-deploy-event]]
+
+  CPUUtilizationCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref Name, cpu-utilization]]
+      MetricName: CPUUtilization
+      Namespace: "AWS/EC2"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStack}-Arn"
+      OKActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStack}-Arn"
+
+  StatusChecksCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref Name, status-checks]]
+      MetricName: StatusCheckFailed
+      Namespace: "AWS/EC2"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Minimum
+      Threshold: 1
+      AlarmActions: 
+        - Fn::ImportValue: 
+            !Sub "${SNSStack}-Arn"
+      OKActions: 
+        - Fn::ImportValue:
+            !Sub "${SNSStack}-Arn"
+
+  CPUCreditBalanceCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsEnableCPUCreditAlarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref Name, cpu-credit-balance]]
+      MetricName: CPUCreditBalance
+      Namespace: "AWS/EC2"
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Minimum
+      Threshold: 24
+      AlarmActions: 
+        - Fn::ImportValue: 
+            !Sub "${SNSStack}-Arn"
+      OKActions: 
+        - Fn::ImportValue: 
+            !Sub "${SNSStack}-Arn"
+
+  UnhealthyHostCountCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref Name, unhealthy-host-count]]
+      MetricName: UnHealthyHostCount
+      Namespace: "AWS/ApplicationELB"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Maximum
+      Threshold: 1
+      AlarmActions:
+        - Fn::ImportValue: 
+            !Sub "${SNSStack}-Arn"
+      OKActions:
+        - Fn::ImportValue: 
+            !Sub "${SNSStack}-Arn"
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !Ref TargetGroupFullName
+
+# Outputs:
+
+  # CodeDeployApplicationName:
+  #   Description: The code deploy application name
+  #   Value: !Ref DefaultCodeDeployApplication
+  #   Export: 
+  #     Name: !Sub ${AWS::StackName}-CodeDeployApplicationName
+  
+  # CodeDeployDeploymentGroupName:
+  #   Description: The code deploy deployment group name
+  #   Value: !Ref DefaultCodeDeployDeploymentGroup
+  #   Export: 
+  #     Name: !Sub ${AWS::StackName}-CodeDeployDeploymentGroupName
+
+  # BucketName:
+  #   Description: The code deploy s3 bucket name
+  #   Value: !Ref DefaultS3Bucket
+  #   Export: 
+  #     Name: !Sub ${AWS::StackName}-BucketName
