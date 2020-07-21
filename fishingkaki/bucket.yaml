@@ -190,6 +190,106 @@ Resources:
                   - s3:DeleteObject
                 Resource: !Join ["/",[!GetAtt StagingMaintenanceBucket.Arn,"*"]]
 
+  # Production Web Bucket Static Web Page
+  # Production Web Bucket will Redirect traffic to Production Maintenance Bucket
+  # DNS Record for this bucket should be created manually
+  ProductionWebv2Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: classifieds.fishingkaki.com
+      VersioningConfiguration:
+        Status: !Ref Versioning
+      WebsiteConfiguration:
+        RedirectAllRequestsTo:
+          HostName: maintenance.fishingkaki.com
+          Protocol: https
+      Tags:
+        - 
+          Key: Name
+          Value: !Join [ '-', [!Ref OrgName , prd, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], webv2-bucket]]
+        - 
+          Key: Environment
+          Value: Staging
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  ProductionMaintenanceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: maintenance.fishingkaki.com
+      VersioningConfiguration:
+        Status: !Ref Versioning
+      WebsiteConfiguration:
+        ErrorDocument: index.html
+        IndexDocument: index.html
+      Tags:
+        - 
+          Key: Name
+          Value: !Join [ '-', [!Ref OrgName , prd, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance-bucket]]
+        - 
+          Key: Environment
+          Value: Staging
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  ProductionMaintenanceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties: 
+      Bucket: !Ref ProductionMaintenanceBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForClassifieds
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Join ["/",[!GetAtt ProductionMaintenanceBucket.Arn,"*"]]
+
+  # Website Endpoint and Route53 Hosted Zone ID can be found here: https://docs.aws.amazon.com/general/latest/gr/s3.html#s3_website_region_endpoints
+  # Website Endpoint: s3-website-ap-southeast-1.amazonaws.com
+  # Route53 Hosted Zone ID: Z3O0J2DXBE1FTB
+  ProductionMaintenanceDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId : Z2RBGCQXIXXAZ3
+      Name: maintenance.fishingkaki.com
+      Type: A
+      AliasTarget:
+        DNSName: s3-website-ap-southeast-1.amazonaws.com
+        EvaluateTargetHealth: false
+        HostedZoneId: Z3O0J2DXBE1FTB
+
+  ProductionMaintenanceBucketGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: ProductionMaintenanceBucketGroup
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, stg, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance-bucket-group]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:GetBucketLocation
+                  - s3:ListAllMyBuckets
+                Resource: arn:aws:s3:::*
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:ListBucket
+                Resource: !GetAtt ProductionMaintenanceBucket.Arn
+              - 
+                Effect: "Allow"
+                Action: 
+                  - s3:PutObject*
+                  - s3:GetObject*
+                  - s3:DeleteObject
+                Resource: !Join ["/",[!GetAtt ProductionMaintenanceBucket.Arn,"*"]]
+                
 ####
 # S3 Section
 ####
