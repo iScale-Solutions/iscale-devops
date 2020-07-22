@@ -86,38 +86,68 @@ Mappings:
 
 Resources:
 
+
 ####
 # Static Web Page
 ####
 
-  # Staging Web Bucket Static Web Page
-  # Staging Web Bucket will Redirect traffic to Staging Maintenance Bucket
-  # DNS Record for this bucket should be created manually
-  StagingWebv2Bucket:
-    Type: AWS::S3::Bucket
+  # Will Create ACM Manually on us-east-1 region
+  # because cloudfront is not possible to link ACM in Singapore yet.
+  # This is the ARN from the ACM generated from us-east-1 region: arn:aws:acm:us-east-1:482643916846:certificate/4d684c9e-cda7-498c-8ab3-d8dfd7fd0f58
+  # DNS Record for this bucket should be created manually and point to the CDN Domain Name
+  MaintenanceCDN:
+    Type: AWS::CloudFront::Distribution
+    DependsOn:
+    - MaintenanceBucket
     Properties:
-      BucketName: fkv2web-staging.fishingkaki.com.ph
-      VersioningConfiguration:
-        Status: !Ref Versioning
-      WebsiteConfiguration:
-        RedirectAllRequestsTo:
-          HostName: maintenance.fishingkaki.com.ph
-          Protocol: https
+      DistributionConfig:
+        Comment: Cloudfront Distribution pointing to Maintenance S3 bucket
+        Origins:
+        - DomainName: !Select [2, !Split ["/", !GetAtt MaintenanceBucket.WebsiteURL]]
+          Id: S3Origin
+          CustomOriginConfig:
+            HTTPPort: '80'
+            HTTPSPort: '443'
+            OriginProtocolPolicy: http-only
+        Enabled: true
+        HttpVersion: 'http2'
+        DefaultRootObject: index.html
+        Aliases:
+        - fkv2web-staging.fishingkaki.com.ph
+        - classifieds.fishingkaki.com
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - GET
+          - HEAD
+          Compress: true
+          TargetOriginId: S3Origin
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: redirect-to-https
+        PriceClass: PriceClass_All
+        ViewerCertificate:
+          AcmCertificateArn: arn:aws:acm:us-east-1:482643916846:certificate/4d684c9e-cda7-498c-8ab3-d8dfd7fd0f58
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2019
+        IPV6Enabled: false
       Tags:
         - 
           Key: Name
-          Value: !Join [ '-', [!Ref OrgName , stg, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], webv2-bucket]]
+          Value: !Join [ '-', [!Ref OrgName , prd, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cdn]]
         - 
           Key: Environment
-          Value: Staging
+          Value: Production
         - 
           Key: Organization
           Value: !Ref OrgName
 
-  StagingMaintenanceBucket:
+  # Maintenance Bucket for Static Web Page
+  MaintenanceBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: maintenance.fishingkaki.com.ph
+      BucketName: !Join [ '-', [!Ref OrgName, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance-bucket]]
       VersioningConfiguration:
         Status: !Ref Versioning
       WebsiteConfiguration:
@@ -126,7 +156,7 @@ Resources:
       Tags:
         - 
           Key: Name
-          Value: !Join [ '-', [!Ref OrgName , stg, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance-bucket]]
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance-bucket]]
         - 
           Key: Environment
           Value: Staging
@@ -134,10 +164,10 @@ Resources:
           Key: Organization
           Value: !Ref OrgName
 
-  StagingMaintenanceBucketPolicy:
+  MaintenanceBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties: 
-      Bucket: !Ref StagingMaintenanceBucket
+      Bucket: !Ref MaintenanceBucket
       PolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -145,26 +175,12 @@ Resources:
             Effect: Allow
             Principal: '*'
             Action: 's3:GetObject'
-            Resource: !Join ["/",[!GetAtt StagingMaintenanceBucket.Arn,"*"]]
+            Resource: !Join ["/",[!GetAtt MaintenanceBucket.Arn,"*"]]
 
-  # Website Endpoint and Route53 Hosted Zone ID can be found here: https://docs.aws.amazon.com/general/latest/gr/s3.html#s3_website_region_endpoints
-  # Website Endpoint: s3-website-ap-southeast-1.amazonaws.com
-  # Route53 Hosted Zone ID: Z3O0J2DXBE1FTB
-  StagingMaintenanceDnsRecord:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId : Z2FD4L7QZLLQWY
-      Name: maintenance.fishingkaki.com.ph
-      Type: A
-      AliasTarget:
-        DNSName: s3-website-ap-southeast-1.amazonaws.com
-        EvaluateTargetHealth: false
-        HostedZoneId: Z3O0J2DXBE1FTB
-
-  StagingMaintenanceBucketGroup:
+  MaintenanceBucketGroup:
     Type: AWS::IAM::Group
     Properties:
-      GroupName: StagingMaintenanceBucketGroup
+      GroupName: MaintenanceBucketGroup
       Policies:
         - 
           PolicyName: !Join ['-',[!Ref OrgName, stg, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance-bucket-group]]
@@ -181,115 +197,22 @@ Resources:
                 Effect: "Allow"
                 Action: 
                   - s3:ListBucket
-                Resource: !GetAtt StagingMaintenanceBucket.Arn
+                Resource: !GetAtt MaintenanceBucket.Arn
               - 
                 Effect: "Allow"
                 Action: 
                   - s3:PutObject*
                   - s3:GetObject*
                   - s3:DeleteObject
-                Resource: !Join ["/",[!GetAtt StagingMaintenanceBucket.Arn,"*"]]
+                Resource: !Join ["/",[!GetAtt MaintenanceBucket.Arn,"*"]]
 
-  # Production Web Bucket Static Web Page
-  # Production Web Bucket will Redirect traffic to Production Maintenance Bucket
-  # DNS Record for this bucket should be created manually
-  ProductionWebv2Bucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: classifieds.fishingkaki.com
-      VersioningConfiguration:
-        Status: !Ref Versioning
-      WebsiteConfiguration:
-        RedirectAllRequestsTo:
-          HostName: maintenance.fishingkaki.com
-          Protocol: https
-      Tags:
-        - 
-          Key: Name
-          Value: !Join [ '-', [!Ref OrgName , prd, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], webv2-bucket]]
-        - 
-          Key: Environment
-          Value: Staging
-        - 
-          Key: Organization
-          Value: !Ref OrgName
-
-  ProductionMaintenanceBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: maintenance.fishingkaki.com
-      VersioningConfiguration:
-        Status: !Ref Versioning
-      WebsiteConfiguration:
-        ErrorDocument: index.html
-        IndexDocument: index.html
-      Tags:
-        - 
-          Key: Name
-          Value: !Join [ '-', [!Ref OrgName , prd, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance-bucket]]
-        - 
-          Key: Environment
-          Value: Staging
-        - 
-          Key: Organization
-          Value: !Ref OrgName
-
-  ProductionMaintenanceBucketPolicy:
-    Type: AWS::S3::BucketPolicy
+  MaintenanceBucketGroupAddition:
+    Type: AWS::IAM::UserToGroupAddition
     Properties: 
-      Bucket: !Ref ProductionMaintenanceBucket
-      PolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Sid: PublicReadForClassifieds
-            Effect: Allow
-            Principal: '*'
-            Action: 's3:GetObject'
-            Resource: !Join ["/",[!GetAtt ProductionMaintenanceBucket.Arn,"*"]]
+      GroupName: !Ref MaintenanceBucketGroup
+      Users: 
+        - martin@fishingkaki.com
 
-  # Website Endpoint and Route53 Hosted Zone ID can be found here: https://docs.aws.amazon.com/general/latest/gr/s3.html#s3_website_region_endpoints
-  # Website Endpoint: s3-website-ap-southeast-1.amazonaws.com
-  # Route53 Hosted Zone ID: Z3O0J2DXBE1FTB
-  ProductionMaintenanceDnsRecord:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId : Z2RBGCQXIXXAZ3
-      Name: maintenance.fishingkaki.com
-      Type: A
-      AliasTarget:
-        DNSName: s3-website-ap-southeast-1.amazonaws.com
-        EvaluateTargetHealth: false
-        HostedZoneId: Z3O0J2DXBE1FTB
-
-  ProductionMaintenanceBucketGroup:
-    Type: AWS::IAM::Group
-    Properties:
-      GroupName: ProductionMaintenanceBucketGroup
-      Policies:
-        - 
-          PolicyName: !Join ['-',[!Ref OrgName, stg, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance-bucket-group]]
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - 
-                Effect: "Allow"
-                Action: 
-                  - s3:GetBucketLocation
-                  - s3:ListAllMyBuckets
-                Resource: arn:aws:s3:::*
-              - 
-                Effect: "Allow"
-                Action: 
-                  - s3:ListBucket
-                Resource: !GetAtt ProductionMaintenanceBucket.Arn
-              - 
-                Effect: "Allow"
-                Action: 
-                  - s3:PutObject*
-                  - s3:GetObject*
-                  - s3:DeleteObject
-                Resource: !Join ["/",[!GetAtt ProductionMaintenanceBucket.Arn,"*"]]
-                
 ####
 # S3 Section
 ####
@@ -522,3 +445,9 @@ Outputs:
     Value: !GetAtt DefaultS3Bucket.DomainName
     Export:
       Name: !Sub "${AWS::StackName}-DomainName"
+
+  MaintenanceCDNDomainName: 
+    Description: The Name of the maintenance cloudfront distribution.
+    Value: !GetAtt MaintenanceCDN.DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-MaintenanceCDNDomainName"
