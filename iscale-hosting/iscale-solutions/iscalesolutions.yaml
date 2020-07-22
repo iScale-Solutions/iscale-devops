@@ -45,9 +45,15 @@ Metadata:
           - HttpCodes
           - InstancePort
           - ClientDomainName
-          - ClientHostName
+          - ClientAdminHostName
           - Priority1
           - Priority2
+      -
+        Label:
+          default: "Static Hosting Configuration"
+        Parameters:
+          - ClientStaticHostName
+          - CloudFrontCertificate
 
     ParameterLabels:
       Name:
@@ -64,6 +70,8 @@ Metadata:
         default: "SNS Topic Stack Name"
       AssociatePublicIp:
         default: "Associate Public IP"
+      CloudFrontCertificate:
+        default: "CloudFront SSL Certificate ARN"
       InstanceAMI:
         default: "Instance AMI ID"
       InstanceType:
@@ -96,8 +104,10 @@ Metadata:
         default: "Instance Port"
       ClientDomainName:
         default: "Domain Name"
-      ClientHostName:
-        default: "Client Name"
+      ClientAdminHostName:
+        default: "Client Admin Name"
+      ClientStaticHostName:
+        default: "Client Static Name"
       Priority1:
         default: "Listener rule 1 Priority"
       Priority2:
@@ -143,6 +153,13 @@ Parameters:
     AllowedValues:
       - true
       - false
+  ClientStaticHostName:
+    Description: Static Host Name for the site (e.g. www)
+    Type: String
+    Default: www
+  CloudFrontCertificate:
+    Description: ARN of the SSL Certificate for CloudFront
+    Type: String
   InstanceAMI:
     Description: AMI image used by the EC2 instance.
     Type: String
@@ -213,10 +230,10 @@ Parameters:
     Description: The client's domain name (e.g. example.com, iscale-solutions.com).
     Type: String
     Default: iscale-solutions.com
-  ClientHostName:
-    Description: The client's host name (e.g. www, app, etc).
+  ClientAdminHostName:
+    Description: The client admin host name (e.g. admin, web-admin, etc).
     Type: String
-    Default: www
+    Default: webadmin
   Priority1:
     Description: The priority for listener rule 1.
     Type: Number
@@ -459,7 +476,7 @@ Resources:
       Conditions: 
         - Field: host-header
           Values: 
-            - !Join ['.', [!Ref ClientHostName, !Ref ClientDomainName]]
+            - !Join ['.', [!Ref ClientAdminHostName, !Ref ClientDomainName]]
       ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-ApplicationListenerArn" 
@@ -494,7 +511,7 @@ Resources:
       Conditions: 
         - Field: host-header
           Values: 
-            - !Join ['.', [!Ref ClientHostName, !Ref ClientDomainName]]
+            - !Join ['.', [!Ref ClientAdminHostName, !Ref ClientDomainName]]
       ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/4a01c6efc69d9d60
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-HttpListenerArn"
@@ -698,6 +715,37 @@ Resources:
                   - ec2:DescribeTags
                   - autoscaling:DescribeTags
                 Resource: "*"
+              - 
+                Effect: "Allow"
+                Action:
+                  - s3:*
+                Resource: 
+                  - !Join ['/', [!GetAtt [S3WebsiteBucket, Arn], '*']]
+                  - !GetAtt [S3WebsiteBucket, Arn]
+  StaticWebsiteUser:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: "Allow"
+                Action:
+                  - s3:*
+                Resource:
+                  - !Join ['/', [!GetAtt [S3WebsiteBucket, Arn], '*']]
+                  - !GetAtt [S3WebsiteBucket, Arn]
+
+  StaticWebsiteUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName:
+        Ref: StaticWebsiteUser
+
+
 
 ####
 # CloudWatch Section
@@ -826,7 +874,24 @@ Resources:
           Value: /dev/nvme0n1p1
         - Name: MountPath
           Value: /
-
+####
+# S3 Section
+####
+  S3WebsiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
 ####
 # AWS Backup Section
 ####
@@ -938,3 +1003,17 @@ Outputs:
     Value: !GetAtt DefaultIamRole.Arn
     Export: 
       Name: !Sub ${AWS::StackName}-InstanceRoleArn
+
+  S3StaticBucket:
+    Description: The S3 bucket holding the static website
+    Value: !Ref S3WebsiteBucket
+  StaticWebsiteUserAccessKeyId:
+    Description: Access Key Id for the static S3 bucket
+    Value: !Ref StaticWebsiteUserAccessKey
+  StaticWebsiteUserAccessKeySecret:
+    Description: Secret Key for the static S3 bucket
+    Value: !GetAtt [StaticWebsiteUserAccessKey, SecretAccessKey]
+
+
+
+
