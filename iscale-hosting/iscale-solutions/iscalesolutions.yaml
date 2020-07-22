@@ -54,6 +54,7 @@ Metadata:
         Parameters:
           - ClientStaticHostName
           - CloudFrontCertificate
+          - LambdaDefaultIndexARN
 
     ParameterLabels:
       Name:
@@ -102,6 +103,8 @@ Metadata:
         default: "Health Check HTTP Codes"
       InstancePort:
         default: "Instance Port"
+      LambdaDefaultIndexARN:
+        default: "Lambda Default Index ARN"
       ClientDomainName:
         default: "Domain Name"
       ClientAdminHostName:
@@ -226,6 +229,9 @@ Parameters:
     Description: The port on which the targets receive traffic.
     Type: Number
     Default: 80
+  LambdaDefaultIndexARN:
+    Description: Default Index Lambda function ARN
+    Type: String
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-solutions.com).
     Type: String
@@ -892,6 +898,56 @@ Resources:
         RestrictPublicBuckets: false
       WebsiteConfiguration:
         IndexDocument: index.html
+
+####
+# CloudFront Section
+####
+
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: "CloudFront Access to the S3 static origin"
+ 
+  StaticWebsiteCloudFront:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !GetAtt [S3WebsiteBucket, DomainName]
+          Id: S3WebsiteBucketOrigin
+          S3OriginConfig:
+            OriginAccessIdentity: !Join ["", ['origin-access-identity/cloudfront/', !Ref CloudFrontOriginAccessIdentity]]
+        Enabled: 'true'
+        Comment: !Join [" ", [ "Static website for", !Join [".", [!Ref ClientStaticHostName, !Ref ClientDomainName]]]]
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        Aliases:
+        - !Join [".", [!Ref ClientStaticHostName, !Ref ClientDomainName]]
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          TargetOriginId: S3WebsiteBucketOrigin
+          LambdaFunctionAssociations:
+          - EventType: origin-request
+            IncludeBody: false
+            LambdaFunctionARN: !Ref LambdaDefaultIndexARN
+          ForwardedValues:
+            QueryString: 'true'
+            Cookies:
+              Forward: all
+          Compress: true
+          ViewerProtocolPolicy: redirect-to-https
+          MinTTL: 3600
+          MaxTTL: 86400
+        PriceClass: PriceClass_All
+        ViewerCertificate: 
+          SslSupportMethod: sni-only
+          AcmCertificateArn: !Ref CloudFrontCertificate
 ####
 # AWS Backup Section
 ####
