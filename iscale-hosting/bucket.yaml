@@ -1,0 +1,255 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions an s3 bucket to be used as template url for cloudstack and custom resource that cleans up the bucket on delete
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Organization Configuration"
+        Parameters:
+          - Name
+          - OrgName
+
+    ParameterLabels:
+      Name:
+        default: "Name"
+      OrgName:
+        default: "Organization Name"
+
+Parameters: 
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    Default: cfn-templates
+  OrgName:
+    Description: The name of the organzation (e.g. iscale)
+    Type: String
+    Default: iscale-hosting
+  Versioning:
+    Description: Enables multiple versions of all objects in this bucket. You might enable versioning to prevent objects from being deleted or overwritten by mistake or to archive objects so that you can retrieve previous versions of them.
+    Type: String
+    Default: Enabled
+    AllowedValues:
+      - Enabled
+      - Suspended
+
+Mappings:
+
+  RegionShort:
+    us-east-2:
+      Name: ue2
+    us-east-1:
+      Name: ue1
+    us-west-1:
+      Name: uw1
+    us-west-2:
+      Name: uw2
+    ap-east-1:
+      Name: ae1
+    ap-south-1:
+      Name: as1
+    ap-northeast-1:
+      Name: ane1
+    ap-northeast-2:
+      Name: ane2
+    ap-northeast-3:
+      Name: ane3
+    ap-southeast-1:
+      Name: ase1
+    ap-southeast-2:
+      Name: ase2
+    ca-central-1:
+      Name: cc1
+    cn-north-1:
+      Name: cn1
+    cn-northwest-1:
+      Name: cnw1
+    eu-central-1:
+      Name: ec1
+    eu-west-1:
+      Name: ew1
+    eu-west-2:
+      Name: ew2
+    eu-west-3:
+      Name: ew3
+    eu-north-1:
+      Name: en1
+    me-south-1:
+      Name: ms1
+    sa-east-1:
+      Name: se1
+    us-gov-east-1:
+      Name: uge1
+    us-gov-west-1:
+      Name: ugw1
+
+Resources:
+
+####
+# S3 Section
+####
+
+  # S3 bucket for cloudformation template
+  DefaultS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join [ '-', [!Ref OrgName , !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VersioningConfiguration:
+        Status: !Ref Versioning
+      AccessControl: PublicRead
+      Tags: 
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName , !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Organization
+          Value: !Ref OrgName
+  CleanUpBucket:
+    DependsOn: CleanUpBucketLambda
+    Type: Custom::CleanUp
+    Properties:
+      ServiceToken: !GetAtt CleanUpBucketLambda.Arn
+      BucketName: !Ref DefaultS3Bucket
+
+####
+# Lambda Section
+####
+
+  CleanUpBucketLambda:
+    DependsOn: DefaultS3Bucket
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join [ '-', [!Ref OrgName , !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Code:
+        ZipFile: !Sub |
+          #!/usr/bin/env python
+          # -*- coding: utf-8 -*-
+          import json
+          import boto3
+          from botocore.vendored import requests
+          def empty_delete_buckets(bucket_name):
+              """
+              Empties and deletes the bucket
+              :param bucket_name:
+              :param region:
+              :return:
+              """
+              print "trying to delete the bucket {0}".format(bucket_name)
+              s3_client = boto3.client('s3')
+              s3 = boto3.resource('s3')
+              try:
+                  bucket = s3.Bucket(bucket_name).load()
+              except ClientError:
+                  print "bucket {0} does not exist".format(bucket_name)
+                  return
+              # Check if versioning is enabled
+              response = s3_client.get_bucket_versioning(Bucket=bucket_name)
+              status = response.get('Status','')
+              if status == 'Enabled':
+                  response = s3_client.put_bucket_versioning(Bucket=bucket_name,
+                                                             VersioningConfiguration={'Status': 'Suspended'})
+              paginator = s3_client.get_paginator('list_object_versions')
+              page_iterator = paginator.paginate(
+                  Bucket=bucket_name
+              )
+              for page in page_iterator:
+                  print page
+                  if 'DeleteMarkers' in page:
+                      delete_markers = page['DeleteMarkers']
+                      if delete_markers is not None:
+                          for delete_marker in delete_markers:
+                              key = delete_marker['Key']
+                              versionId = delete_marker['VersionId']
+                              s3_client.delete_object(Bucket=bucket_name, Key=key, VersionId=versionId)
+                  if 'Versions' in page and page['Versions'] is not None:
+                      versions = page['Versions']
+                      for version in versions:
+                          print version
+                          key = version['Key']
+                          versionId = version['VersionId']
+                          s3_client.delete_object(Bucket=bucket_name, Key=key, VersionId=versionId)
+              object_paginator = s3_client.get_paginator('list_objects_v2')
+              page_iterator = object_paginator.paginate(
+                  Bucket=bucket_name
+              )
+              for page in page_iterator:
+                  if 'Contents' in page:
+                      for content in page['Contents']:
+                          key = content['Key']
+                          s3_client.delete_object(Bucket=bucket_name, Key=content['Key'])
+              print "Successfully emptied the bucket {0}".format(bucket_name)
+          def lambda_handler(event, context):
+              try:
+                  bucket = event['ResourceProperties']['BucketName']
+                  if event['RequestType'] == 'Delete':
+                      empty_delete_buckets(bucket)
+                  sendResponseCfn(event, context, "SUCCESS")
+              except Exception as e:
+                  print(e)
+                  sendResponseCfn(event, context, "FAILED")
+          def sendResponseCfn(event, context, responseStatus):
+              response_body = {'Status': responseStatus,
+                               'Reason': 'Log stream name: ' + context.log_stream_name,
+                               'PhysicalResourceId': context.log_stream_name,
+                               'StackId': event['StackId'],
+                               'RequestId': event['RequestId'],
+                               'LogicalResourceId': event['LogicalResourceId'],
+                               'Data': json.loads("{}")}
+              requests.put(event['ResponseURL'], data=json.dumps(response_body))
+      Description: Cleans up the s3 bucket on delete
+      Handler: index.lambda_handler
+      Role : !GetAtt DefaultIamRole.Arn
+      Runtime: python2.7
+      Timeout: 60
+
+####
+# IAM Section
+####
+
+  DefaultIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Ref Name
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:*
+            - s3:*
+            Resource: '*'
+          - Effect: Deny
+            Action:
+            - s3:DeleteBucket
+            Resource: '*'
+
+Outputs:
+
+  BucketName: 
+    Description: The name of the s3 bucket
+    Value: !Ref DefaultS3Bucket
+    Export:
+      Name: !Sub "${AWS::StackName}-BucketName"
+
+  BucketArn: 
+    Description: The Amazon Resource Name (ARN) of the specified bucket.
+    Value: !GetAtt DefaultS3Bucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-BucketArn"
+
+  DomainName: 
+    Description: The IPv4 DNS name of the specified bucket.
+    Value: !GetAtt DefaultS3Bucket.DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-DomainName"
