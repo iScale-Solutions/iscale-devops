@@ -27,8 +27,10 @@ Metadata:
         Label:
           default: "Stack Configuration"
         Parameters:
+          - PayrollStackName
           - NetworkStackName
           - SNSStackName
+          - DomainStackName
       -
         Label:
           default: "Certificate Configuration"
@@ -42,6 +44,8 @@ Metadata:
         default: "Organization Name"
       EnvName:
         default: "Environment Name"
+      PayrollStackName:
+        default: "Payroll Stack Name"
       NetworkStackName:
         default: "Network Stack Name"
       SNSStackName:
@@ -69,7 +73,7 @@ Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
-    Default: internal
+    Default: payroll
   OrgName:
     Description: The name of the organization.
     Type: String
@@ -85,6 +89,10 @@ Parameters:
       - Staging
       - Development
       - Test
+  PayrollStackName:
+    Description: name of the Esport Stack
+    Type: String
+    Default: iscale-hosting-prd-uw2-payrollv2
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
@@ -176,7 +184,11 @@ Parameters:
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-solutions.com).
     Type: String
-    Default: iscale-solutions.com
+    Default: iscale-hosting.com
+  HostedZoneId:
+    Description: The ID of the hosted zone that you want to create the record in.
+    Type: String
+    Default: Z008386114RBDQ9BD0JFX
 
 Mappings: 
   ElbTypeShort:
@@ -255,21 +267,28 @@ Resources:
 # Certificate Section
 ####
 
-  # DefaultCertificate:
-  #   Type: AWS::CertificateManager::Certificate
-  #   Properties:
-  #     DomainName: !Join [".", ["*", !Ref ClientDomainName]]
-  #     ValidationMethod: DNS
-  #     Tags:
-  #       - 
-  #         Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], default-certificate]]
-  #       - 
-  #         Key: Environment
-  #         Value: !Ref EnvName
-  #       - 
-  #         Key: Organization
-  #         Value: !Ref OrgName
+  DefaultListenerCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties: 
+      Certificates: 
+        - CertificateArn: arn:aws:acm:us-west-2:178070162686:certificate/d0414384-241b-454b-b01d-7a9f9d3c0cd5
+      ListenerArn: !Ref DefaultLoadBalancerListener2
+
+####
+# Route53 Section
+####
+
+  # Payroll DNS Record
+  PayrollDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Join ['.',[!Ref Name, !Ref ClientDomainName]]
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt DefaultLoadBalancer.DNSName
+        EvaluateTargetHealth: true
+        HostedZoneId: !GetAtt DefaultLoadBalancer.CanonicalHostedZoneID
 
 ####
 # VPC Section
@@ -323,7 +342,8 @@ Resources:
 
   DefaultLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties: 
+    Properties:
+      Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name]]]
       IpAddressType: ipv4
       LoadBalancerAttributes: 
         - 
@@ -342,7 +362,7 @@ Resources:
       Tags:
           - 
             Key: Name
-            Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !FindInMap [ElbTypeShort, !Ref ElbType, Name]]]
+            Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !FindInMap [ElbTypeShort, !Ref ElbType, Name], !Ref Name]]
 
   # This listener redirects HTTP request to https
   DefaultLoadBalancerListener1:
@@ -428,6 +448,22 @@ Resources:
         - 
           Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !FindInMap [ElbTypeShort, !Ref ElbType, Name]]]
+
+  # Payroll listener Rule
+  PayrollListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: forward
+          TargetGroupArn:
+            Fn::ImportValue:
+              !Sub "${PayrollStackName}-TargetGroupArn" 
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.',[payroll, !Ref ClientDomainName]]
+      ListenerArn: !Ref DefaultLoadBalancerListener2
+      Priority: 100
 
 ####
 # WAF Section
