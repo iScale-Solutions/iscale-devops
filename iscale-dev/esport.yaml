@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: This cloudformation template provisions resources for lecellier
+Description: This cloudformation template provisions resources for esport
 
 Metadata:
   AWS::CloudFormation::Interface: 
@@ -44,6 +44,7 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
+          - DBClusterIdentifier
 
     ParameterLabels:
       Name:
@@ -84,12 +85,14 @@ Metadata:
         default: "Scheduled Expression (Start)"
       StopScheduleExpression:
         default: "Scheduled Expression (Stop)"
+      DBClusterIdentifier:
+        default: "Database Cluster Identifier"
 
 Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
-    Default: lecellier
+    Default: esport
   OrgName:
     Description: The name of the organization.
     Type: String
@@ -130,11 +133,11 @@ Parameters:
   InstanceAMI:
     Description: AMI image used by the EC2 instance.
     Type: String
-    Default: ami-09e10146809e8ed28
+    Default: ami-07f01b31ba962fe7f
   InstanceType:
     Description: The instnace type of the EC2 instance (e.g. t2.micro, t2.small, c4.large, etc).
     Type: String
-    Default: t3.micro
+    Default: t3.medium
   PolicyArns:
     Description: List of policy Arns associated to the EC2 instance.
     Type: String
@@ -177,11 +180,16 @@ Parameters:
   StartScheduleExpression:
     Description: Schedule expression when to start the the ec2 instance.
     Type: String
-    Default: cron(0 0 ? * MON-FRI *)
+    Default: cron(0 22 ? * SUN-THU *)
   StopScheduleExpression:
     Description: Schedule expression when to stop the the ec2 instance.
     Type: String
-    Default: cron(0 10 ? * MON-FRI *)
+    Default: cron(0 13 ? * MON-FRI *)
+  DBClusterIdentifier:
+    Description: The target aurora db instance identifier. Set this if EnableRds parameter is true.
+    Type: String
+    Default: esportdev-cluster
+  
 
 Mappings: 
   EnvShort:
@@ -367,7 +375,7 @@ Resources:
   DefaultIamInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 2]]
       Roles:
         - !Ref DefaultIamRole
 
@@ -413,6 +421,8 @@ Resources:
                   - route53:ChangeResourceRecordSets
                   - ec2:Start*
                   - ec2:Stop*
+                  - rds:StartDBCluster
+                  - rds:StopDBCluster
                 Resource: "*"
               - 
                 Effect: "Allow"
@@ -512,6 +522,7 @@ Resources:
         Variables:
           REGION: !Ref AWS::Region
           INSTANCE_IDS: !Ref DefaultInstance
+          DB_CLUSTER_IDENTIFIER: !Ref DBClusterIdentifier
       Code:
         ZipFile: |
 
@@ -525,9 +536,14 @@ Resources:
           def lambda_handler(event, context):
             region=os.environ['REGION']
             instanceIds=os.environ['INSTANCE_IDS']
+            dbClusterIdentifier=os.environ['DB_CLUSTER_IDENTIFIER']
             
             try:
               ec2 = boto3.client('ec2',region_name=region)
+              rds = boto3.client('rds')
+
+              logger.info('Starting DB Cluster: ' + str(dbClusterIdentifier))
+              rds.start_db_cluster(DBClusterIdentifier=dbClusterIdentifier)
 
               logger.info('Starting Instance: ' + str(instanceIds))
               ec2.start_instances(InstanceIds=[instanceIds],DryRun=False)
@@ -548,6 +564,7 @@ Resources:
         Variables:
           REGION: !Ref AWS::Region
           INSTANCE_IDS: !Ref DefaultInstance
+          DB_CLUSTER_IDENTIFIER: !Ref DBClusterIdentifier
       Code:
         ZipFile: |
 
@@ -561,12 +578,17 @@ Resources:
           def lambda_handler(event, context):
             region=os.environ['REGION']
             instanceIds=os.environ['INSTANCE_IDS']
+            dbClusterIdentifier=os.environ['DB_CLUSTER_IDENTIFIER']
             
             try:
               ec2 = boto3.client('ec2',region_name=region)
+              rds = boto3.client('rds')
 
               logger.info('Stopping Instance: ' + str(instanceIds))
               ec2.stop_instances(InstanceIds=[instanceIds],DryRun=False)
+
+              logger.info('Stopping DB Cluster: ' + str(dbClusterIdentifier))
+              rds.stop_db_cluster(DBClusterIdentifier=dbClusterIdentifier)
 
             except Exception:
               logger.exception('Error Encountered')
