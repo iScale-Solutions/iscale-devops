@@ -77,15 +77,15 @@ $(document).ready(function() {
 
 function ManageEnv(item) {
   var lambdaName = item.innerText;
+  var body = {
+    'command': lambdaName
+  }
+
   if (confirm("do you really want to invoke '" + lambdaName + "' ?")) {
     $.ajax({
       method: 'POST',
       dataType: 'json',
-      data: {
-        'command': lambdaName,
-        'command2': lambdaName,
-        'command3': lambdaName
-      },
+      data: JSON.stringify(body),
       url: _config.api.invokeUrl + '/manage',
       headers: {
         'Authorization': App.cognitoToken
