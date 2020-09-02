@@ -1159,6 +1159,7 @@ Resources:
           
   DefaultBackupVault:
     Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
     Properties:
       BackupVaultName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], vault]]
       EncryptionKeyArn: !GetAtt DefaultKey.Arn
@@ -1174,12 +1175,28 @@ Resources:
       BackupPlan:
         BackupPlanName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-plan]]
         BackupPlanRule:
-          -
-            RuleName: DailyBackup
+          - RuleName: DailyBackup
             TargetBackupVault: !Ref DefaultBackupVault
             ScheduleExpression: "cron(0 5 ? * * *)"
+            StartWindowMinutes: 480
+            CompletionWindowMinutes: 10080
             Lifecycle:
-              DeleteAfterDays: 7
+              DeleteAfterDays: 35
+          - RuleName: WeeklyBackup
+            TargetBackupVault: !Ref DefaultBackupVault
+            ScheduleExpression: "cron(0 5 ? * 7 *)"
+            StartWindowMinutes: 480
+            CompletionWindowMinutes: 10080
+            Lifecycle:
+              DeleteAfterDays: 90
+          - RuleName: MonthlyBackup
+            TargetBackupVault: !Ref DefaultBackupVault
+            ScheduleExpression: "cron(0 5 1 * ? *)"
+            StartWindowMinutes: 480
+            CompletionWindowMinutes: 10080
+            Lifecycle:
+              MoveToColdStorageAfterDays: 90
+              DeleteAfterDays: 1825
       BackupPlanTags:
         Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-plan]]
         Environment: !Ref EnvName
@@ -1210,11 +1227,10 @@ Resources:
       BackupSelection:
         SelectionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-selection]]
         IamRoleArn: !GetAtt BackupRole.Arn
-        ListOfTags:
-         -
-           ConditionType: "STRINGEQUALS"
-           ConditionKey: Name
-           ConditionValue: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+        Resources: [
+          Fn::ImportValue: !Sub "${DatabaseStackName}-DBInstanceARN",
+          !Join ["", ["arn:aws:elasticfilesystem:", !Ref 'AWS::Region', ":", !Ref 'AWS::AccountId', ":file-system/", !Ref DefaultFileSystem]]
+        ]
 
 Outputs:
 
