@@ -23,14 +23,13 @@ Metadata:
           - InstancePort
           - EnableWebAcl
           - EnableAlarm
+          - DefaultSSLCertARN
       -
         Label:
           default: "Stack Configuration"
         Parameters:
-          - PayrollStackName
           - NetworkStackName
           - SNSStackName
-          - DomainStackName
       -
         Label:
           default: "Certificate Configuration"
@@ -42,10 +41,10 @@ Metadata:
         default: "Resource Name"
       OrgName:
         default: "Organization Name"
+      DefaultSSLCertARN:
+        default: "Default SSL Certificate ARN"
       EnvName:
         default: "Environment Name"
-      PayrollStackName:
-        default: "Payroll Stack Name"
       NetworkStackName:
         default: "Network Stack Name"
       SNSStackName:
@@ -73,13 +72,16 @@ Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
-    Default: payroll
+    Default: internal
   OrgName:
     Description: The name of the organization.
     Type: String
     Default: iscale-hosting
     AllowedPattern: "^[a-z]+(-[a-z]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  DefaultSSLCertARN:
+    Description: ARN of the default SSL Certificate
+    Type: String
   EnvName:
     Description: The name of the environment
     Type: String
@@ -89,10 +91,6 @@ Parameters:
       - Staging
       - Development
       - Test
-  PayrollStackName:
-    Description: name of the Esport Stack
-    Type: String
-    Default: iscale-hosting-prd-uw2-payrollv2
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
@@ -184,11 +182,7 @@ Parameters:
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-solutions.com).
     Type: String
-    Default: iscale-hosting.com
-  HostedZoneId:
-    Description: The ID of the hosted zone that you want to create the record in.
-    Type: String
-    Default: Z008386114RBDQ9BD0JFX
+    Default: iscale-solutions.com
 
 Mappings: 
   ElbTypeShort:
@@ -264,33 +258,6 @@ Conditions:
 Resources: 
 
 ####
-# Certificate Section
-####
-
-  DefaultListenerCertificate:
-    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
-    Properties: 
-      Certificates: 
-        - CertificateArn: arn:aws:acm:us-west-2:178070162686:certificate/d0414384-241b-454b-b01d-7a9f9d3c0cd5
-      ListenerArn: !Ref DefaultLoadBalancerListener2
-
-####
-# Route53 Section
-####
-
-  # Payroll DNS Record
-  PayrollDnsRecord:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Join ['.',[!Ref Name, !Ref ClientDomainName]]
-      Type: A
-      AliasTarget:
-        DNSName: !GetAtt DefaultLoadBalancer.DNSName
-        EvaluateTargetHealth: true
-        HostedZoneId: !GetAtt DefaultLoadBalancer.CanonicalHostedZoneID
-
-####
 # VPC Section
 ####
 
@@ -342,8 +309,7 @@ Resources:
 
   DefaultLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties:
-      Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name]]]
+    Properties: 
       IpAddressType: ipv4
       LoadBalancerAttributes: 
         - 
@@ -362,7 +328,7 @@ Resources:
       Tags:
           - 
             Key: Name
-            Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !FindInMap [ElbTypeShort, !Ref ElbType, Name], !Ref Name]]
+            Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !FindInMap [ElbTypeShort, !Ref ElbType, Name]]]
 
   # This listener redirects HTTP request to https
   DefaultLoadBalancerListener1:
@@ -388,7 +354,7 @@ Resources:
     Condition: IsApplication
     Properties: 
       Certificates:
-        - CertificateArn: arn:aws:acm:us-west-2:178070162686:certificate/6f85ff4a-5672-46ec-9120-82dfe2e9ad8e
+        - CertificateArn: !Ref DefaultSSLCertARN
       DefaultActions: 
         - Type: "forward"
           TargetGroupArn: !Ref ApplicationTargetGroup
@@ -448,22 +414,6 @@ Resources:
         - 
           Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !FindInMap [ElbTypeShort, !Ref ElbType, Name]]]
-
-  # Payroll listener Rule
-  PayrollListenerRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties: 
-      Actions: 
-        - Type: forward
-          TargetGroupArn:
-            Fn::ImportValue:
-              !Sub "${PayrollStackName}-TargetGroupArn" 
-      Conditions: 
-        - Field: host-header
-          Values: 
-            - !Join ['.',[payroll, !Ref ClientDomainName]]
-      ListenerArn: !Ref DefaultLoadBalancerListener2
-      Priority: 100
 
 ####
 # WAF Section
