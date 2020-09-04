@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions all objects for blue green deployment
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - OrgName
+          - EnvName
+
+    ParameterLabels:
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: iscaleclient
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+
+Mappings: 
+  'Fn::Transform':
+    Name: 'AWS::Include'
+    Parameters:
+      Location: "s3://iscale-dev-cloudformation/include/mappings.yaml"
+
+Resources:
+  
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties: 
+      ApplicationName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, application]]
+      ComputePlatform: Server
+
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentConfigName: CodeDeployDefault.OneAtATime
+      #DeploymentGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, deployment-group]]
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      TriggerConfigurations:
+        -
+          TriggerEvents:
+            - DeploymentSuccess
+            - DeploymentFailure
+          TriggerName: Deployment
+          TriggerTargetArn:
+            Fn::ImportValue:
+              !Sub "${SNSStackName}-TopicArn"
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+      Ec2TagFilters: #Iannis - Need to make this an auto-scaling group
+      - 
+        Key: Name
+        Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        Type: "KEY_AND_VALUE"
+
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - !Join [".", [codedeploy, !Ref 'AWS::Region', amazonaws, com]]
+            Action: 
+              - "sts:AssumeRole"
+      ManagedPolicyArns: ["arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole"]
+
+  DeploymentBucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: PublicRead
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, code-deploy]]
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, code-deploy]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+# Outputs:

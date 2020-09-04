@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions resources for Tasaki
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      -
+        Label:
+          default: "Stack Configuration"
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      -
+        Label:
+          default: "EC2 Configuration"
+        Parameters:
+          - AssociatePublicIp
+          - InstanceAMI
+          - InstanceType
+          - PolicyArns
+          - EnableMonitoring
+          - KeyName
+          - TopicArn
+          - EnableCPUCreditAlarm
+      -
+        Label:
+          default: "S3 Configuration"
+        Parameters:
+          - Versioning
+      -
+        Label:
+          default: "Load Balancer Configuration"
+        Parameters:
+          - ClientDomainName
+      -
+        Label:
+          default: "Route53 Configuration"
+        Parameters:
+          - HostedZoneId
+          - Type
+          - TTL
+      -
+        Label:
+          default: "Scheduler Configuration"
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: "Resource Name"
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+      NetworkStackName:
+        default: "Network Stack Name"
+      SNSStackName:
+        default: "SNS Topic Stack Name"
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MaxLength: 32
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+  Versioning:
+    Description: Enables multiple versions of all objects in this bucket. You might enable versioning to prevent objects from being deleted or overwritten by mistake or to archive objects so that you can retrieve previous versions of them.
+    Type: String
+    Default: Enabled
+    AllowedValues:
+      - Enabled
+      - Suspended
+
+Mappings: 
+  'Fn::Transform':
+    Name: 'AWS::Include'
+    Parameters:
+      Location: "s3://iscale-dev-cloudformation/include/mappings.yaml"
+
+Resources:
+
+  DBStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: "https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml"
+      Parameters: 
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+        EnableCPUCreditAlarm: true
+        EnableEnhancedMonitoring: true
+        EnvName: !Ref EnvName
+        Engine: aurora-mysql
+        EngineVersion: 5.7.12
+        Family: aurora-mysql5.7
+        InstanceType: db.t3.small
+        LogRetentionPeriod: 7
+        MasterUser: root
+        MonitoringInterval: 30
+        MultiAz: false
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
+  DeployStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: "https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml"
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+  
+  AppServerStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: "https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver.yaml"
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        NetworkStackName: !Ref NetworkStackName
+
+####
+# S3 Section
+####
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    # DeletionPolicy: Retain #For now do not retain
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VersioningConfiguration:
+        Status: !Ref Versioning
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
