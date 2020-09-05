@@ -14,6 +14,7 @@ Metadata:
         Label:
           default: "Cloudformation Stack Configuration"
         Parameters:
+          # - LoadBalancerStackName
           - NetworkStackName
           - SNSStackName
 
@@ -39,6 +40,9 @@ Parameters:
       - Staging
       - Development
       - Test
+  # LoadBalancerStackName:
+  #   Description: Name of the ELB Stack Name
+  #   Type: String
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
@@ -78,6 +82,155 @@ Resources:
           Key: Organization
           Value: !Ref OrgName
 
+  # AppServerSecurityGroupIngress:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties: 
+  #     GroupId: !GetAtt AppServerSecurityGroup.GroupId
+  #     IpProtocol: TCP
+  #     FromPort: 80
+  #     ToPort: 80
+  #     SourceSecurityGroupId:
+  #       Fn::ImportValue:
+  #         !Sub "${LoadBalancerStackName}-SecurityGroupId"
+  
+  AppServerSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt AppServerSecurityGroup.GroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: "0.0.0.0/0"
 
+  AppServerIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Sid: "1"
+            Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Principal:
+              Service: "ec2.amazonaws.com"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - 
+          PolicyName: "CloudWatchPermissions"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: "Allow"
+                Action: 
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                  - autoscaling:DescribeTags
+                Resource: "*"
+        - 
+          PolicyName: "S3Permissions"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: "Allow"
+                Action:
+                  - s3:GetObject*
+                  - s3:PutObject*
+                  - s3:DeleteObject
+                Resource: 
+                  - !Join ['/', [!GetAtt [DataS3Bucket, Arn], '*']]
+                  - !GetAtt [DataS3Bucket, Arn]
+
+  AppServerIamProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppServerIamRole
+
+  DataS3Bucket:
+    Type: AWS::S3::Bucket
+    # DeletionPolicy: Retain #For now do not retain
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+####
+# EFS Section
+####
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+
+  EFSSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt EFSSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !GetAtt AppServerSecurityGroup.GroupId
+
+  AppServerFileSystem:
+    Type: AWS::EFS::FileSystem
+    # DeletionPolicy: Retain For now
+    Properties:
+      Encrypted: true
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+      FileSystemTags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  EFSMountTarget1: 
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref AppServerFileSystem
+      SubnetId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-InternalSubnetId1"
+      SecurityGroups: 
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2: 
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref AppServerFileSystem
+      SubnetId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-InternalSubnetId2"
+      SecurityGroups: 
+        - !Ref EFSSecurityGroup
 
 # Outputs:
