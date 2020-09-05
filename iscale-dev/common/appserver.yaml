@@ -14,15 +14,38 @@ Metadata:
         Label:
           default: "Cloudformation Stack Configuration"
         Parameters:
-          # - LoadBalancerStackName
+          - LoadBalancerStackName
           - NetworkStackName
           - SNSStackName
+      -
+        Label:
+          default: "Load Balancer Configuration"
+        Parameters:
+          - LoadBalancerPriority
+      -
+        Label:
+          default: "Domain Configuration"
+        Parameters:
+          - ClientDomainName
+          - HostedZoneId
 
     ParameterLabels:
+      Name:
+        default: "Resource Name"
       OrgName:
         default: "Organization Name"
       EnvName:
         default: "Environment Name"
+      LoadBalancerStackName:
+        default: "Load Balancer Stack Name"
+      NetworkStackName:
+        default: "Network Stack Name"
+      SNSStackName:
+        default: "SNS Topic Stack Name"
+      ClientDomainName:
+        default: "Domain Name"
+      HostedZoneId:
+        default: "Hosted Zone ID"
 
 Parameters:
   OrgName:
@@ -40,9 +63,19 @@ Parameters:
       - Staging
       - Development
       - Test
-  # LoadBalancerStackName:
-  #   Description: Name of the ELB Stack Name
-  #   Type: String
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    Default: iscale-software.com
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 50000
+  LoadBalancerStackName:
+    Description: Name of the ELB Stack Name
+    Type: String
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
@@ -82,16 +115,25 @@ Resources:
           Key: Organization
           Value: !Ref OrgName
 
-  # AppServerSecurityGroupIngress:
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     GroupId: !GetAtt AppServerSecurityGroup.GroupId
-  #     IpProtocol: TCP
-  #     FromPort: 80
-  #     ToPort: 80
-  #     SourceSecurityGroupId:
-  #       Fn::ImportValue:
-  #         !Sub "${LoadBalancerStackName}-SecurityGroupId"
+  AppServerSecurityGroupHTTPIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt AppServerSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-SecurityGroupId"
+
+  AppServerSecurityGroupSSHIngress: # Iannis - Make this conditionnal if can debug
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt AppServerSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
+      CidrIp: "0.0.0.0/0"
   
   AppServerSecurityGroupEgress:
     Type: AWS::EC2::SecurityGroupEgress
@@ -145,6 +187,19 @@ Resources:
                 Resource: 
                   - !Join ['/', [!GetAtt [DataS3Bucket, Arn], '*']]
                   - !GetAtt [DataS3Bucket, Arn]
+        -
+          PolicyName: "LogPermissions"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
 
   AppServerIamProfile:
     Type: AWS::IAM::InstanceProfile
@@ -232,5 +287,246 @@ Resources:
           !Sub "${NetworkStackName}-InternalSubnetId2"
       SecurityGroups: 
         - !Ref EFSSecurityGroup
+
+####
+# AutoScaling Group 
+####
+
+  AppServerLaunchConfig: 
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata: 
+      AWS::CloudFormation::Init: 
+        configSets: 
+          ascending: 
+            - InstallLogAgent
+            - InstallCustomData
+            - InstallCodeDeployAgent
+        InstallLogAgent:
+          commands:
+            command1:
+              command: "yum install -y awslogs"
+            command2:
+              command: "cp -fv /etc/awslogs/awscli.region /etc/awslogs/awscli.conf"
+            command3:
+              command: "rm -fv /etc/awslogs/awscli.region"
+            command4:
+              command: "service awslogs start"
+            command5:
+              command: "chkconfig awslogs on"
+          files:
+            /etc/awslogs/config/cfn-init.conf:
+              content: !Sub
+                |
+                [/var/log/cfn-init.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cfn-init.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/cfn-init.log
+            /etc/awslogs/config/cfn-init-cmd.conf:
+              content: !Sub
+                |
+                [/var/log/cfn-init-cmd.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cfn-init-cmd.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/cfn-init-cmd.log
+            /etc/awslogs/config/ssm.conf:
+              content: !Sub
+                |
+                [/var/log/amazon/ssm/amazon-ssm-agent.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/amazon/ssm/amazon-ssm-agent.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/amazon/ssm/amazon-ssm-agent.log
+            /etc/awslogs/awscli.region:
+              content: !Sub
+                |
+                [plugins]
+                cwlogs = cwlogs
+                [default]
+                region = ${AWS::Region}
+            
+        InstallCustomData:
+          files:
+            /var/lib/cloud/instance/custom-data.sh: 
+              content: !Sub
+                - |
+                  STACK_NAME=${AWS::StackName}
+                  AWS_REGION=${AWS::Region}
+                  DOMAIN=${DOMAIN}
+                  ENVIRONMENT=${ENVIRONMENT}
+                  CLIENT_NAME=${CLIENT_NAME}
+                  APPLICATION_SITE=${APPLICATION_SITE}
+                  INSTANCE_ROLE=${INSTANCE_ROLE}
+                  SECRET_ID=${SECRET_ID}
+                  BASE_URL=https://${DOMAIN}/
+                  BUCKET_NAME=${BUCKET_NAME}
+                - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+                  ENVIRONMENT: !Ref EnvName
+                  CLIENT_NAME: !Ref Name
+                  APPLICATION_SITE: !Ref OrgName
+                  INSTANCE_ROLE: !Ref AppServerIamRole
+                  SECRET_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+                  BUCKET_NAME: !Ref DataS3Bucket
+              permissions: 0700
+              owner: root
+              group: root
+        
+        InstallCodeDeployAgent:
+          files:
+            /etc/awslogs/config/codedeploy.conf:
+              content: !Sub
+                |
+                [/var/log/aws/codedeploy-agent/codedeploy-agent.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/aws/codedeploy-agent/codedeploy-agent.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/aws/codedeploy-agent/codedeploy-agent.log
+          commands:
+            command1:
+              command: "service awslogs restart" # To pickup the log file and troubleshoot issues
+            command2:
+              command: "yum install ruby"
+            command3:
+              command: "yum install wget"
+            command4:
+              command: "wget https://\"$BUCKETNAME\".s3.\"$REGION\".amazonaws.com/latest/install"
+              cwd: "/home/ec2-user"
+              env:
+                BUCKETNAME: !Join ['-', ['aws-codedeploy', !Ref 'AWS::Region']]
+                REGION: !Ref 'AWS::Region'
+            command5:
+              command: "chmod u+x install"
+              cwd: "/home/ec2-user"
+            command6:
+              command: "./install auto"
+              cwd: "/home/ec2-user"
+            command7:
+              command: "chkconfig codedeploy-agent on"
+            command8:
+              command: "rm -fv ./install"
+              cwd: "/home/ec2-user"
+              
+    Properties:
+      # KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue'] #For now no key
+      # KeyName: iscale-hosting #Iannis - make this a param
+      ImageId: ami-0841edc20334f9287 #Iannis - make param
+      SecurityGroups: [!GetAtt AppServerSecurityGroup.GroupId]
+      InstanceType: t3.micro #Iannis - make param
+      AssociatePublicIpAddress: true #Iannis - make param
+      IamInstanceProfile: !GetAtt AppServerIamProfile.Arn
+      InstanceMonitoring: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # yum update -y
+          # Install the files and packages from the metadata
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c ascending --region ${AWS::Region}
+          # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+          /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+          # Signal the status from cfn-init
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
+
+  AppServerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+    # CreationPolicy:
+    #   AutoScalingCreationPolicy:
+    #     MinSuccessfulInstancesPercent: 100
+      # ResourceSignal:
+      #   Count: 1
+      #   Timeout: PT10M
+    Properties:
+      Cooldown: 60
+      MaxSize: 1
+      MinSize: 0
+      DesiredCapacity: 1 #Iannis - Make this a param
+      VPCZoneIdentifier:
+        -
+          Fn::ImportValue:
+            !Sub "${NetworkStackName}-PublicSubnetId1"
+      TargetGroupARNs: [!Ref AppServerTargetGroup]
+      LaunchConfigurationName: !Ref AppServerLaunchConfig
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          PropagateAtLaunch: True
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+          PropagateAtLaunch: True
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+          PropagateAtLaunch: True
+
+#####
+# Link the setup to the Load Balancer
+#####
+
+  LoadBalancerDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
+      RecordSets:
+      - Name: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+        Type: A
+        AliasTarget:
+          HostedZoneId: 
+            Fn::ImportValue:
+              !Sub "${LoadBalancerStackName}-CanonicalHostedZoneID"
+          DNSName:
+            Fn::ImportValue:
+              !Sub "${LoadBalancerStackName}-DNSName"
+
+  # Application Server ELB Target Group 
+  AppServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health.php
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: 
+        HttpCode: 200
+      Port: 80
+      Protocol: HTTP
+      VpcId:  
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
+
+  ELBSSLListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref AppServerTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn" 
+      Priority: !Ref LoadBalancerPriority
+
 
 # Outputs:
