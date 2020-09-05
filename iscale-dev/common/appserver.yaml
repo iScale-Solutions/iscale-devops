@@ -301,17 +301,22 @@ Resources:
             - InstallLogAgent
             - InstallCustomData
             - InstallCodeDeployAgent
+            - MountEFS
+            - SetupApache
         InstallLogAgent:
+          packages:
+            yum: 
+              awslogs: []
           commands:
-            command1:
-              command: "yum install -y awslogs"
-            command2:
+            # command01:
+            #   command: "yum install -y awslogs"
+            command02:
               command: "cp -fv /etc/awslogs/awscli.region /etc/awslogs/awscli.conf"
-            command3:
+            command03:
               command: "rm -fv /etc/awslogs/awscli.region"
-            command4:
+            command04:
               command: "service awslogs start"
-            command5:
+            command05:
               command: "chkconfig awslogs on"
           files:
             /etc/awslogs/config/cfn-init.conf:
@@ -379,6 +384,10 @@ Resources:
               group: root
         
         InstallCodeDeployAgent:
+          packages:
+            yum: 
+              wget: []
+              ruby: []
           files:
             /etc/awslogs/config/codedeploy.conf:
               content: !Sub
@@ -391,29 +400,75 @@ Resources:
                 initial_position = start_of_file
                 log_group_name = /var/log/aws/codedeploy-agent/codedeploy-agent.log
           commands:
-            command1:
+            command01:
               command: "service awslogs restart" # To pickup the log file and troubleshoot issues
-            command2:
-              command: "yum install ruby"
-            command3:
-              command: "yum install wget"
-            command4:
+            command03:
               command: "wget https://\"$BUCKETNAME\".s3.\"$REGION\".amazonaws.com/latest/install"
               cwd: "/home/ec2-user"
               env:
                 BUCKETNAME: !Join ['-', ['aws-codedeploy', !Ref 'AWS::Region']]
                 REGION: !Ref 'AWS::Region'
-            command5:
+            command04:
               command: "chmod u+x install"
               cwd: "/home/ec2-user"
-            command6:
+            command05:
               command: "./install auto"
               cwd: "/home/ec2-user"
-            command7:
+            command06:
               command: "chkconfig codedeploy-agent on"
-            command8:
+            command07:
               command: "rm -fv ./install"
               cwd: "/home/ec2-user"
+
+        MountEFS:
+          packages:
+            yum: 
+              amazon-efs-utils: []
+          commands:
+            command02:
+              command: "mkdir -p /mnt/efs"
+            command03:
+              command: "mkdir -p /var/magento/import"
+            command04:
+              command: "mkdir -p /var/magento/pub/"
+            command05:
+              command: "mkdir -p /var/magento/import/"
+            command06:
+              command: "mount -t efs -o tls,iam \"$EFS_ID\" /mnt/efs"
+              env:
+                EFS_ID: !Ref AppServerFileSystem
+            command07:
+              command: "echo '\"$EFS_ID\":/ /mnt/efs efs _netdev,tls,iam 0 0' >> /etc/fstab"
+              env:
+                EFS_ID: !Ref AppServerFileSystem
+            command08:
+              command: "mkdir -p /mnt/efs/pub/media"
+            command09:
+              command: "mkdir -p /mnt/efs/import/product_images"
+            command10:
+              command: "ln -s /mnt/efs/pub/media /var/magento/pub/media"
+            command11:
+              command: "ln -s /mnt/efs/import/product_images /var/magento/import/product_images"
+
+        SetupApache:
+          packages:
+            yum: 
+              php73: []
+              php73-bcmath: []
+              php73-gd: []
+              php73-intl: []
+              php73-mbstring: []
+              php73-mysqlnd: []
+              php73-xml: []
+              php73-soap: []
+              httpd24: []
+              mod24_security.x86_64: []
+          commands:
+            command01:
+              command: "chown -Rf apache:apache /mnt/efs/"
+            command02:
+              command: "chown -Rf apache:apache /var/magento/"
+
               
     Properties:
       # KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue'] #For now no key
@@ -421,7 +476,7 @@ Resources:
       ImageId: ami-0841edc20334f9287 #Iannis - make param
       SecurityGroups: [!GetAtt AppServerSecurityGroup.GroupId]
       InstanceType: t3.micro #Iannis - make param
-      AssociatePublicIpAddress: true #Iannis - make param
+      AssociatePublicIpAddress: true
       IamInstanceProfile: !GetAtt AppServerIamProfile.Arn
       InstanceMonitoring: true
       UserData:
