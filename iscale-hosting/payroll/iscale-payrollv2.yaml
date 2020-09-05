@@ -49,10 +49,10 @@ Metadata:
           - HealthyThresholdCount
           - UnhealthyThresholdCount
           - HttpCodes
+          - HTTPSRulePriority
           - InstancePort
           - ClientDomainName
-          - Priority1
-          - Priority2
+          - SSLCertificateARN
       -
         Label:
           default: "Scheduler Configuration"
@@ -113,10 +113,10 @@ Metadata:
         default: "Instance Port"
       ClientDomainName:
         default: "Domain Name"
-      Priority1:
-        default: "Listener rule 1 Priority"
-      Priority2:
-        default: "Listener rule 2 Priority"
+      HTTPSRulePriority:
+        default: "HTTPS Listener rule Priority"
+      SSLCertificateARN:
+        default: "SSL Certificate ARN"
       StartScheduleExpression:
         default: "Scheduled Expression (Start)"
       StopScheduleExpression:
@@ -247,18 +247,15 @@ Parameters:
     Description: The client's domain name (e.g. example.com, iscale-solutions.com).
     Type: String
     Default: iscale-solutions.com
-  Priority1:
-    Description: The priority for listener rule 1.
+  HTTPSRulePriority:
+    Description: The priority for HTTPS listener rule.
     Type: Number
     Default: 1
     MinValue: 1
     MaxValue: 50000
-  Priority2:
-    Description: The priority for listener rule 2.
-    Type: Number
-    Default: 2
-    MinValue: 1
-    MaxValue: 50000
+  SSLCertificateARN:
+    Description: ARN of the domain SSL certificate
+    Type: String
   StartScheduleExpression:
     Description: Schedule expression when to start the the asg/rds instance.
     Type: String
@@ -343,7 +340,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
     Properties: 
       Certificates: 
-        - CertificateArn: arn:aws:acm:us-west-2:178070162686:certificate/d0414384-241b-454b-b01d-7a9f9d3c0cd5
+        - CertificateArn: !Ref SSLCertificateARN
       ListenerArn:
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
@@ -354,6 +351,7 @@ Resources:
 
   DefaultFileSystem:
     Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
     Properties:
       Encrypted: true
       KmsKeyId: !GetAtt DefaultKey.Arn
@@ -423,7 +421,7 @@ Resources:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-PrivateSubnetId1"
       SecurityGroups: 
-        - !Ref EfsSecurityGroup
+        - !Ref EFSSecurityGroup
 
   DefaultMountTarget2: 
     Type: AWS::EFS::MountTarget
@@ -433,7 +431,7 @@ Resources:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-PrivateSubnetId2"
       SecurityGroups: 
-        - !Ref EfsSecurityGroup
+        - !Ref EFSSecurityGroup
 
 ####
 # EC2 Section
@@ -452,7 +450,7 @@ Resources:
         HttpCode: !Ref HttpCodes
       Port: !Ref InstancePort
       Protocol: !If [IsSsl, "HTTPS", "HTTP"]
-      VpcId: #vpc-0eeeb47ddc550dcb5
+      VpcId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-VpcId"
       Tags:
@@ -479,7 +477,7 @@ Resources:
         HttpCode: !Ref HttpCodes
       Port: !Ref InstancePort
       Protocol: !If [IsSsl, "HTTPS", "HTTP"]
-      VpcId: #vpc-0eeeb47ddc550dcb5
+      VpcId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-VpcId"
       Tags:
@@ -494,7 +492,7 @@ Resources:
           Value: !Ref OrgName
 
   # These listeners are for SSL
-  DefaultListenerRule1:
+  HTTPSListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
       Actions: 
@@ -504,26 +502,10 @@ Resources:
         - Field: host-header
           Values: 
             - !Join ['.', ['payroll', !Ref ClientDomainName]]
-      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/c4fffee7823621cc
+      ListenerArn:
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-ApplicationListenerArn" 
-      Priority: !Ref Priority1
-
-  # These listeners are for HTTP
-  DefaultListenerRule2:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties: 
-      Actions: 
-        - Type: forward
-          TargetGroupArn: !Ref DefaultTargetGroup
-      Conditions: 
-        - Field: host-header
-          Values: 
-            - !Join ['.', ['tasaki', !Ref ClientDomainName]]
-      ListenerArn: #arn:aws:elasticloadbalancing:us-west-2:178070162686:listener/app/Hosti-Publi-JOP96QI64S4H/142111f71f1f5117/4a01c6efc69d9d60
-        Fn::ImportValue:
-          !Sub "${LoadBalancerStackName}-HttpListenerArn"
-      Priority: !Ref Priority1
+      Priority: !Ref HTTPSRulePriority
 
 ####
 # AutoScaling Group Section
@@ -619,12 +601,12 @@ Resources:
       ToPort: -1
       CidrIp: "0.0.0.0/0"
 
-  EfsSecurityGroup:
+  EFSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+      # GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
-      VpcId: #vpc-0eeeb47ddc550dcb5
+      VpcId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-VpcId"
       Tags:
@@ -632,10 +614,10 @@ Resources:
           Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
 
-  EfsSecurityGroupIngress:
+  EFSSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties: 
-      GroupId: !GetAtt EfsSecurityGroup.GroupId
+      GroupId: !GetAtt EFSSecurityGroup.GroupId
       IpProtocol: TCP
       FromPort: 2049
       ToPort: 2049
