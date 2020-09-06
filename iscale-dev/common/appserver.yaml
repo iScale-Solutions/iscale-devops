@@ -133,7 +133,7 @@ Resources:
       IpProtocol: TCP
       FromPort: 22
       ToPort: 22
-      CidrIp: "0.0.0.0/0"
+      CidrIp: 0.0.0.0/0
   
   AppServerSecurityGroupEgress:
     Type: AWS::EC2::SecurityGroupEgress
@@ -142,30 +142,30 @@ Resources:
       IpProtocol: -1
       FromPort: -1
       ToPort: -1
-      CidrIp: "0.0.0.0/0"
+      CidrIp: 0.0.0.0/0
 
   AppServerIamRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: 2012-10-17
         Statement:
           - 
-            Sid: "1"
-            Effect: "Allow"
-            Action: "sts:AssumeRole"
+            Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
             Principal:
-              Service: "ec2.amazonaws.com"
+              Service: ec2.amazonaws.com
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
         - 
-          PolicyName: "CloudWatchPermissions"
+          PolicyName: CloudWatchPermissions
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               -
-                Effect: "Allow"
+                Effect: Allow
                 Action: 
                   - cloudwatch:PutMetricData
                   - cloudwatch:GetMetricStatistics
@@ -174,12 +174,12 @@ Resources:
                   - autoscaling:DescribeTags
                 Resource: "*"
         - 
-          PolicyName: "S3Permissions"
+          PolicyName: S3DataPermissions
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - 
-                Effect: "Allow"
+                Effect: Allow
                 Action:
                   - s3:GetObject*
                   - s3:PutObject*
@@ -187,13 +187,29 @@ Resources:
                 Resource: 
                   - !Join ['/', [!GetAtt [DataS3Bucket, Arn], '*']]
                   - !GetAtt [DataS3Bucket, Arn]
-        -
-          PolicyName: "LogPermissions"
+              - Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                Resource: "arn:aws:s3:::*"
+        - 
+          PolicyName: ReadOnS3DeploymentBucket
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - 
-                Effect: "Allow"
+                Effect: Allow
+                Action:
+                  - s3:GetObject*
+                Resource: #Assume naming convention since deployment bucket follows this. Else we would have to read it from the deployment stack
+                  - !Join ['-',[ "arn:aws:s3:::", !Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, "code-deploy/*"]]
+        -
+          PolicyName: LogPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
                 Action: 
                   - logs:CreateLogStream
                   - logs:DescribeLogStreams
@@ -210,6 +226,8 @@ Resources:
   DataS3Bucket:
     Type: AWS::S3::Bucket
     # DeletionPolicy: Retain #For now do not retain
+    # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
+    # Recommend not specifying bucket name here for non-prod setups
     Properties:
       BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
       VersioningConfiguration:
@@ -252,7 +270,7 @@ Resources:
 
   AppServerFileSystem:
     Type: AWS::EFS::FileSystem
-    # DeletionPolicy: Retain For now
+    # DeletionPolicy: Retain
     Properties:
       Encrypted: true
       LifecyclePolicies:
@@ -304,20 +322,19 @@ Resources:
             - MountEFS
             - SetupMySQL
             - SetupApache
+            - SetupComposer
         InstallLogAgent:
           packages:
             yum: 
               awslogs: []
           commands:
-            # command01:
-            #   command: "yum install -y awslogs"
-            command02:
+            command01:
               command: "cp -fv /etc/awslogs/awscli.region /etc/awslogs/awscli.conf"
-            command03:
+            command02:
               command: "rm -fv /etc/awslogs/awscli.region"
-            command04:
+            command03:
               command: "service awslogs start"
-            command05:
+            command04:
               command: "chkconfig awslogs on"
           files:
             /etc/awslogs/config/cfn-init.conf:
@@ -522,6 +539,15 @@ Resources:
               command: "service httpd start"
             command04:
               command: "chkconfig httpd on"
+
+        SetupComposer:
+          commands:
+            command01:
+              command: "curl -sS https://getcomposer.org/installer | php"
+            command02:
+              command: "mv composer.phar /usr/local/bin/composer"
+            command03:
+              command: "ln -s /usr/local/bin/composer /usr/bin/composer"
 
     Properties:
       # KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue'] #For now no key
