@@ -302,6 +302,7 @@ Resources:
             - InstallCustomData
             - InstallCodeDeployAgent
             - MountEFS
+            - SetupMySQL
             - SetupApache
         InstallLogAgent:
           packages:
@@ -450,7 +451,54 @@ Resources:
             command11:
               command: "ln -s /mnt/efs/import/product_images /var/magento/import/product_images"
 
+        SetupMySQL:
+          packages:
+              yum:
+                mysql57: []
+
         SetupApache:
+          files:
+            /var/www/html/health.php:
+              content: !Sub
+                |
+                <?php
+                OK
+                ?>
+            /var/www/html/info.php:
+              content: !Sub
+                |
+                <?php
+                phpinfo();
+                ?>
+            /etc/httpd/conf.modules.d/remoteip.conf:
+              content: !Sub
+                - |
+                  RemoteIPHeader X-Forwarded-For
+            /etc/httpd/conf.d/magentosite.conf: 
+              content: !Sub
+                - |
+                  UseCanonicalName On
+                  <VirtualHost _default_:80>
+                          ServerAlias ${DOMAIN}
+                          ServerAdmin webmaster@localhost
+                          ServerName ${DOMAIN}
+
+                          DocumentRoot /var/magento
+                          <Directory /var/magento>
+                                  Options FollowSymLinks
+                                  AllowOverride All
+                                  Require all granted
+                          </Directory>
+
+                          ErrorLog /var/log/httpd/error.log
+                          CustomLog /var/log/httpd/access.log combined
+
+                          RewriteEngine on
+                  </VirtualHost>
+                - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+              permissions: 0700
+              owner: root
+              group: root
           packages:
             yum: 
               php73: []
@@ -468,8 +516,13 @@ Resources:
               command: "chown -Rf apache:apache /mnt/efs/"
             command02:
               command: "chown -Rf apache:apache /var/magento/"
+            # command03: #quote escape error - will need to rework this
+            #   command: "sed -i 's/LogFormat \"%h %l %u %t \\"%r\\" %>s %b \\"%{Referer}i\\" \\"%{User-Agent}i\\"\" combined/LogFormat \"%a %l %u %t \\"%r\\" %>s %O \\"%{Referer}i\\" \\"%{User-Agent}i\\"\" combined/' /etc/httpd/conf/httpd.conf"
+            command03:
+              command: "service httpd start"
+            command04:
+              command: "chkconfig httpd on"
 
-              
     Properties:
       # KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue'] #For now no key
       # KeyName: iscale-hosting #Iannis - make this a param
