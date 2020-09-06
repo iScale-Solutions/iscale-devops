@@ -19,7 +19,8 @@ Metadata:
           - ElbType
           - Scheme
           - ElbSource
-          - ElbPort
+          - ElbHTTPPort
+          - ElbHTTPSPort
           - ElbProtocol
           - InstancePort
       -
@@ -42,8 +43,10 @@ Metadata:
         default: "Load Balancer Scheme"
       ElbSource:
         default: "Load Balancer Source CiDR Block"
-      ElbPort:
-        default: "Load Balancer Port"
+      ElbHTTPPort:
+        default: "Load Balancer HTTP Port"
+      ElbHTTPSPort:
+        default: "Load Balancer HTTPS Port"
       ElbProtocol:
         default: "Load Balancer Protocol"
       InstancePort:
@@ -89,8 +92,12 @@ Parameters:
     Type: String
     Default: 0.0.0.0/0
     AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
-  ElbPort:
-    Description: The Load Balancer port.
+  ElbHTTPPort:
+    Description: The Load Balancer HTTP port.
+    Type: Number
+    Default: 80
+  ElbHTTPSPort:
+    Description: The Load Balancer HTTPS port.
     Type: Number
     Default: 443
   ElbProtocol:
@@ -167,7 +174,6 @@ Mappings:
 Conditions:
   IsApplication: !Equals [!Ref ElbType, application]
   IsNetwork: !Equals [!Ref ElbType, network]
-  IsElbSsl: !Equals [!Ref ElbPort, 443]
   IsInstanceSsl: !Equals [!Ref InstancePort, 443]
   IsEnableWebAcl: !Equals [!Ref EnableWebAcl, true]
   IsEnableAlarm: !Equals [!Ref EnableAlarm, true]
@@ -191,13 +197,22 @@ Resources:
             Key: Name
             Value: !Join [ '-', [ !Ref Name, !FindInMap [ ElbTypeShort, !Ref ElbType, Name ]] ]
 
-  ELBSecurityGroupIngress:
+  ELBSecurityGroupHTTPSIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !GetAtt ELBSecurityGroup.GroupId
       IpProtocol: "tcp"
-      FromPort: !Ref ElbPort
-      ToPort: !Ref ElbPort
+      FromPort: !Ref ElbHTTPSPort
+      ToPort: !Ref ElbHTTPSPort
+      CidrIp: !Ref ElbSource
+  
+  ELBSecurityGroupHTTPIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt ELBSecurityGroup.GroupId
+      IpProtocol: "tcp"
+      FromPort: !Ref ElbHTTPPort
+      ToPort: !Ref ElbHTTPPort
       CidrIp: !Ref ElbSource
 
   ELBSecurityGroupEgress:
@@ -242,13 +257,13 @@ Resources:
         - Type: redirect
           RedirectConfig:
             Protocol: HTTPS
-            Port: !Ref ElbPort
+            Port: !Ref ElbHTTPSPort
             Host: "#{host}"
             Path: "/#{path}"
             Query: "#{query}"
             StatusCode: "HTTP_301"
       LoadBalancerArn: !Ref LoadBalancer
-      Port: !Ref InstancePort
+      Port: !Ref ElbHTTPPort
       Protocol: HTTP
 
   # Listener for application load balancer
@@ -262,8 +277,8 @@ Resources:
         - Type: "forward"
           TargetGroupArn: !Ref ApplicationTargetGroup
       LoadBalancerArn: !Ref LoadBalancer
-      Port: !Ref ElbPort
-      Protocol: !If [IsElbSsl, HTTPS, HTTP]
+      Port: !Ref ElbHTTPSPort
+      Protocol: HTTPS
       SslPolicy: !Ref SslPolicy
 
   # Listener for application load balancer
@@ -275,7 +290,7 @@ Resources:
         - Type: "forward"
           TargetGroupArn: !Ref NetworkTargetGroup
       LoadBalancerArn: !Ref LoadBalancer
-      Port: !Ref ElbPort
+      Port: !Ref ElbHTTPSPort
       Protocol: !Ref ElbProtocol
 
   # Application Target Group
