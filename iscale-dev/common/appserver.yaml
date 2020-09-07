@@ -1,0 +1,666 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions an EC2 instance with all surrounding objects
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - OrgName
+          - EnvName
+      -
+        Label:
+          default: "Cloudformation Stack Configuration"
+        Parameters:
+          - LoadBalancerStackName
+          - NetworkStackName
+          - SNSStackName
+      -
+        Label:
+          default: "Load Balancer Configuration"
+        Parameters:
+          - LoadBalancerPriority
+      -
+        Label:
+          default: "Domain Configuration"
+        Parameters:
+          - ClientDomainName
+          - HostedZoneId
+
+    ParameterLabels:
+      Name:
+        default: "Resource Name"
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+      LoadBalancerStackName:
+        default: "Load Balancer Stack Name"
+      NetworkStackName:
+        default: "Network Stack Name"
+      SNSStackName:
+        default: "SNS Topic Stack Name"
+      ClientDomainName:
+        default: "Domain Name"
+      HostedZoneId:
+        default: "Hosted Zone ID"
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    Default: iscale-software.com
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 50000
+  LoadBalancerStackName:
+    Description: Name of the ELB Stack Name
+    Type: String
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: iscaleclient
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+
+Mappings: 
+  'Fn::Transform':
+    Name: 'AWS::Include'
+    Parameters:
+      Location: "s3://iscale-dev-cloudformation/include/mappings.yaml"
+
+Resources:
+  
+  AppServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], appserver] ]
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, appserver]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  AppServerSecurityGroupHTTPIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt AppServerSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-SecurityGroupId"
+
+  AppServerSecurityGroupSSHIngress: # Iannis - Make this conditionnal if can debug
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt AppServerSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+  
+  AppServerSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt AppServerSecurityGroup.GroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: 0.0.0.0/0
+
+  AppServerIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - 
+            Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - 
+          PolicyName: CloudWatchPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: 
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                  - autoscaling:DescribeTags
+                Resource: "*"
+        - 
+          PolicyName: S3DataPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - s3:GetObject*
+                  - s3:PutObject*
+                  - s3:DeleteObject
+                Resource: 
+                  - !Join ['/', [!GetAtt [DataS3Bucket, Arn], '*']]
+                  - !GetAtt [DataS3Bucket, Arn]
+              - Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                Resource: "arn:aws:s3:::*"
+        - 
+          PolicyName: ReadOnS3DeploymentBucket
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - s3:GetObject*
+                Resource: #Assume naming convention since deployment bucket follows this. Else we would have to read it from the deployment stack
+                  - !Join ['-',[ "arn:aws:s3:::", !Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, "code-deploy/*"]]
+        -
+          PolicyName: LogPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  AppServerIamProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppServerIamRole
+
+  DataS3Bucket:
+    Type: AWS::S3::Bucket
+    # DeletionPolicy: Retain #For now do not retain
+    # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
+    # Recommend not specifying bucket name here for non-prod setups
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+####
+# EFS Section
+####
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+
+  EFSSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt EFSSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !GetAtt AppServerSecurityGroup.GroupId
+
+  AppServerFileSystem:
+    Type: AWS::EFS::FileSystem
+    # DeletionPolicy: Retain
+    Properties:
+      Encrypted: true
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+      FileSystemTags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  EFSMountTarget1: 
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref AppServerFileSystem
+      SubnetId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-InternalSubnetId1"
+      SecurityGroups: 
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2: 
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref AppServerFileSystem
+      SubnetId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-InternalSubnetId2"
+      SecurityGroups: 
+        - !Ref EFSSecurityGroup
+
+####
+# AutoScaling Group 
+####
+
+  AppServerLaunchConfig: 
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata: 
+      AWS::CloudFormation::Init: 
+        configSets: 
+          ascending: 
+            - InstallLogAgent
+            - InstallCustomData
+            - InstallCodeDeployAgent
+            - MountEFS
+            - SetupMySQL
+            - SetupApache
+            - SetupComposer
+        InstallLogAgent:
+          packages:
+            yum: 
+              awslogs: []
+          commands:
+            command01:
+              command: "cp -fv /etc/awslogs/awscli.region /etc/awslogs/awscli.conf"
+            command02:
+              command: "rm -fv /etc/awslogs/awscli.region"
+            command03:
+              command: "service awslogs start"
+            command04:
+              command: "chkconfig awslogs on"
+          files:
+            /etc/awslogs/config/cfn-init.conf:
+              content: !Sub
+                |
+                [/var/log/cfn-init.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cfn-init.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/cfn-init.log
+            /etc/awslogs/config/cfn-init-cmd.conf:
+              content: !Sub
+                |
+                [/var/log/cfn-init-cmd.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cfn-init-cmd.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/cfn-init-cmd.log
+            /etc/awslogs/config/ssm.conf:
+              content: !Sub
+                |
+                [/var/log/amazon/ssm/amazon-ssm-agent.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/amazon/ssm/amazon-ssm-agent.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/amazon/ssm/amazon-ssm-agent.log
+            /etc/awslogs/awscli.region:
+              content: !Sub
+                |
+                [plugins]
+                cwlogs = cwlogs
+                [default]
+                region = ${AWS::Region}
+            
+        InstallCustomData:
+          files:
+            /var/lib/cloud/instance/custom-data.sh: 
+              content: !Sub
+                - |
+                  STACK_NAME=${AWS::StackName}
+                  AWS_REGION=${AWS::Region}
+                  DOMAIN=${DOMAIN}
+                  ENVIRONMENT=${ENVIRONMENT}
+                  CLIENT_NAME=${CLIENT_NAME}
+                  APPLICATION_SITE=${APPLICATION_SITE}
+                  INSTANCE_ROLE=${INSTANCE_ROLE}
+                  SECRET_ID=${SECRET_ID}
+                  BASE_URL=https://${DOMAIN}/
+                  BUCKET_NAME=${BUCKET_NAME}
+                - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+                  ENVIRONMENT: !Ref EnvName
+                  CLIENT_NAME: !Ref Name
+                  APPLICATION_SITE: !Ref OrgName
+                  INSTANCE_ROLE: !Ref AppServerIamRole
+                  SECRET_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+                  BUCKET_NAME: !Ref DataS3Bucket
+              permissions: 0700
+              owner: root
+              group: root
+        
+        InstallCodeDeployAgent:
+          packages:
+            yum: 
+              wget: []
+              ruby: []
+          files:
+            /etc/awslogs/config/codedeploy.conf:
+              content: !Sub
+                |
+                [/var/log/aws/codedeploy-agent/codedeploy-agent.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/aws/codedeploy-agent/codedeploy-agent.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/aws/codedeploy-agent/codedeploy-agent.log
+          commands:
+            command01:
+              command: "service awslogs restart" # To pickup the log file and troubleshoot issues
+            command03:
+              command: "wget https://\"$BUCKETNAME\".s3.\"$REGION\".amazonaws.com/latest/install"
+              cwd: "/home/ec2-user"
+              env:
+                BUCKETNAME: !Join ['-', ['aws-codedeploy', !Ref 'AWS::Region']]
+                REGION: !Ref 'AWS::Region'
+            command04:
+              command: "chmod u+x install"
+              cwd: "/home/ec2-user"
+            command05:
+              command: "./install auto"
+              cwd: "/home/ec2-user"
+            command06:
+              command: "chkconfig codedeploy-agent on"
+            command07:
+              command: "rm -fv ./install"
+              cwd: "/home/ec2-user"
+
+        MountEFS:
+          packages:
+            yum: 
+              amazon-efs-utils: []
+          commands:
+            command02:
+              command: "mkdir -p /mnt/efs"
+            command03:
+              command: "mkdir -p /var/magento/import"
+            command04:
+              command: "mkdir -p /var/magento/pub/"
+            command05:
+              command: "mkdir -p /var/magento/import/"
+            command06:
+              command: "mount -t efs -o tls,iam \"$EFS_ID\" /mnt/efs"
+              env:
+                EFS_ID: !Ref AppServerFileSystem
+            command07:
+              command: "echo '\"$EFS_ID\":/ /mnt/efs efs _netdev,tls,iam 0 0' >> /etc/fstab"
+              env:
+                EFS_ID: !Ref AppServerFileSystem
+            command08:
+              command: "mkdir -p /mnt/efs/pub/media"
+            command09:
+              command: "mkdir -p /mnt/efs/import/product_images"
+            command10:
+              command: "ln -s /mnt/efs/pub/media /var/magento/pub/media"
+            command11:
+              command: "ln -s /mnt/efs/import/product_images /var/magento/import/product_images"
+
+        SetupMySQL:
+          packages:
+              yum:
+                mysql57: []
+
+        SetupApache:
+          files:
+            /var/www/html/health.php:
+              content: !Sub
+                |
+                <?php
+                OK
+                ?>
+            /var/www/html/info.php:
+              content: !Sub
+                |
+                <?php
+                phpinfo();
+                ?>
+            /etc/httpd/conf.modules.d/remoteip.conf:
+              content: !Sub
+                |
+                RemoteIPHeader X-Forwarded-For
+            /etc/httpd/conf.d/magentosite.conf: 
+              content: !Sub
+                - |
+                  UseCanonicalName On
+                  <VirtualHost _default_:80>
+                          ServerAlias ${DOMAIN}
+                          ServerAdmin webmaster@localhost
+                          ServerName ${DOMAIN}
+
+                          DocumentRoot /var/magento
+                          <Directory /var/magento>
+                                  Options FollowSymLinks
+                                  AllowOverride All
+                                  Require all granted
+                          </Directory>
+
+                          ErrorLog /var/log/httpd/error.log
+                          CustomLog /var/log/httpd/access.log combined
+
+                          RewriteEngine on
+                  </VirtualHost>
+                - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+              permissions: 0700
+              owner: root
+              group: root
+          packages:
+            yum: 
+              php73: []
+              php73-bcmath: []
+              php73-gd: []
+              php73-intl: []
+              php73-mbstring: []
+              php73-mysqlnd: []
+              php73-xml: []
+              php73-soap: []
+              httpd24: []
+              mod24_security.x86_64: []
+          commands:
+            command01:
+              command: "chown -Rf apache:apache /mnt/efs/"
+            command02:
+              command: "chown -Rf apache:apache /var/magento/"
+            # command03: #quote escape error - will need to rework this
+            #   command: "sed -i 's/LogFormat \"%h %l %u %t \\"%r\\" %>s %b \\"%{Referer}i\\" \\"%{User-Agent}i\\"\" combined/LogFormat \"%a %l %u %t \\"%r\\" %>s %O \\"%{Referer}i\\" \\"%{User-Agent}i\\"\" combined/' /etc/httpd/conf/httpd.conf"
+            command03:
+              command: "service httpd start"
+            command04:
+              command: "chkconfig httpd on"
+
+        SetupComposer:
+          commands:
+            command01:
+              command: "curl -sS https://getcomposer.org/installer | php"
+            command02:
+              command: "mv composer.phar /usr/local/bin/composer"
+            command03:
+              command: "ln -s /usr/local/bin/composer /usr/bin/composer"
+
+    Properties:
+      # KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue'] #For now no key
+      # KeyName: iscale-hosting #Iannis - make this a param
+      ImageId: ami-0841edc20334f9287 #Iannis - make param
+      SecurityGroups: [!GetAtt AppServerSecurityGroup.GroupId]
+      InstanceType: t3.micro #Iannis - make param
+      AssociatePublicIpAddress: true
+      IamInstanceProfile: !GetAtt AppServerIamProfile.Arn
+      InstanceMonitoring: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # yum update -y
+          # Install the files and packages from the metadata
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c ascending --region ${AWS::Region}
+          # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+          /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+          # Signal the status from cfn-init
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
+
+  AppServerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+    # CreationPolicy:
+    #   AutoScalingCreationPolicy:
+    #     MinSuccessfulInstancesPercent: 100
+      # ResourceSignal:
+      #   Count: 1
+      #   Timeout: PT10M
+    Properties:
+      Cooldown: 60
+      MaxSize: 1
+      MinSize: 0
+      DesiredCapacity: 1 #Iannis - Make this a param
+      VPCZoneIdentifier:
+        -
+          Fn::ImportValue:
+            !Sub "${NetworkStackName}-PublicSubnetId1"
+      TargetGroupARNs: [!Ref AppServerTargetGroup]
+      LaunchConfigurationName: !Ref AppServerLaunchConfig
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          PropagateAtLaunch: True
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+          PropagateAtLaunch: True
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+          PropagateAtLaunch: True
+
+#####
+# Link the setup to the Load Balancer
+#####
+
+  LoadBalancerDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
+      RecordSets:
+      - Name: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+        Type: A
+        AliasTarget:
+          HostedZoneId: 
+            Fn::ImportValue:
+              !Sub "${LoadBalancerStackName}-CanonicalHostedZoneID"
+          DNSName:
+            Fn::ImportValue:
+              !Sub "${LoadBalancerStackName}-DNSName"
+
+  # Application Server ELB Target Group 
+  AppServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health.php
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: 
+        HttpCode: 200
+      Port: 80
+      Protocol: HTTP
+      VpcId:  
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
+
+  ELBSSLListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref AppServerTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn" 
+      Priority: !Ref LoadBalancerPriority
+
+
+# Outputs:

@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions resources for Tasaki
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      -
+        Label:
+          default: "Stack Configuration"
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - LoadBalancerStackName
+      -
+        Label:
+          default: "EC2 Configuration"
+        Parameters:
+          - AssociatePublicIp
+          - InstanceAMI
+          - InstanceType
+          - PolicyArns
+          - EnableMonitoring
+          - KeyName
+          - TopicArn
+          - EnableCPUCreditAlarm
+      -
+        Label:
+          default: "Load Balancer Configuration"
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerPriority
+      -
+        Label:
+          default: "Route53 Configuration"
+        Parameters:
+          - HostedZoneId
+      -
+        Label:
+          default: "Scheduler Configuration"
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+      -
+        Label:
+          default: "IAM configuration"
+        Parameters:
+          - BitBucketUserArn
+
+    ParameterLabels:
+      BitBucketUserArn:
+        default: "ARN of BitBucket IAM user"
+      Name:
+        default: "Resource Name"
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+      LoadBalancerPriority:
+        default: "Load Balancer Rule Priority"
+      LoadBalancerStackName:
+        default: "Load Balancer Stack Name"
+      NetworkStackName:
+        default: "Network Stack Name"
+      SNSStackName:
+        default: "SNS Topic Stack Name"
+      ClientDomainName:
+        default: "Domain Name"
+      HostedZoneId:
+        default: "Hosted Zone ID"
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MaxLength: 32
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  BitBucketUserArn:
+    Description: The ARN of the BitBucket deployment user
+    Type: String
+    Default: arn:aws:iam::338284463834:user/bitbucket-edia
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    Default: iscale-software.com
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 50000
+  HostedZoneId:
+    Description: The ID of the hosted zone that you want to create the record in.
+    Type: String
+    Default: Z3IVOZ67OCE9RL
+  LoadBalancerStackName:
+    Description: THe name of the load balancer stack.
+    Type: String
+    Default: iscale-dev-stg-uw2-alb
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+  
+Mappings: 
+  'Fn::Transform':
+    Name: 'AWS::Include'
+    Parameters:
+      Location: "s3://iscale-dev-cloudformation/include/mappings.yaml"
+
+Resources:
+
+  DBStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: "https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml"
+      Parameters: 
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+        EnableCPUCreditAlarm: true
+        EnableEnhancedMonitoring: true
+        EnvName: !Ref EnvName
+        Engine: aurora-mysql
+        EngineVersion: 5.7.12
+        Family: aurora-mysql5.7
+        InstanceType: db.t3.small
+        LogRetentionPeriod: 7
+        MasterUser: root
+        MonitoringInterval: 30
+        MultiAz: false
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
+  DeployStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: "https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml"
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        BitBucketUserArn: !Ref BitBucketUserArn
+  
+  AppServerStack: 
+    DependsOn: 
+      - DBStack
+      - DeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: "https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver.yaml"
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        LoadBalancerPriority: !Ref LoadBalancerPriority
+        LoadBalancerStackName: !Ref LoadBalancerStackName
+        SNSStackName: !Ref SNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+
+Outputs:
+  DeploymentUserGroup:
+    Description: Add the BitBucket user into this group
+    Value: 
+      Fn::GetAtt:
+        - DeployStack
+        - Outputs.DeploymentUserGroup

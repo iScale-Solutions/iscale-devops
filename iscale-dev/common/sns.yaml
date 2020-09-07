@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions an SNS Topic and sends notifications thru slack and email
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - OrgName
+          - EnvName
+      -
+        Label:
+          default: "SNS Topic Configuration"
+        Parameters:
+          - Email
+          - OpsidianEndpoint
+          - EnableEmailSubscription
+          - EnableSlackSubscription
+
+    ParameterLabels:
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+      Email:
+        default: "Recipient Email Address"
+      OpsidianEndpoint:
+        default: "Opsidian Endpoint"
+      EnableEmailSubscription:
+        default: "Enable Email Subscription"
+      EnableSlackSubscription:
+        default: "Enable Slack Subscription"
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  Email:
+    Description: The email address where to send the notifications.
+    Type: String
+    Default: ""
+  OpsidianEndpoint:
+    Description: The slack opsidian endpoint.
+    Type: String
+    Default: https://api.opsidian.ai/sns/5b69a30f0c16d0256b81a4371aca06b3
+  EnableEmailSubscription:
+    Description: Enables email subscription. Otherwise, disabled.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  EnableSlackSubscription:
+    Description: Enables slack subscription. Otherwise, disabled.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+
+Mappings: 
+  'Fn::Transform':
+    Name: 'AWS::Include'
+    Parameters:
+      Location: "s3://iscale-dev-cloudformation/include/mappings.yaml"
+
+Conditions:
+  IsEnableEmailSubscription: !Equals [ !Ref EnableEmailSubscription, true ]
+  IsEnableSlackSubscription: !Equals [ !Ref EnableSlackSubscription, true ]
+
+Resources:
+  DefaultSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], snstopic]]
+      TopicName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], snstopic]]
+
+  EmailSubscription:
+    Type: "AWS::SNS::Subscription"
+    Condition: IsEnableEmailSubscription
+    Properties:
+      Endpoint: !Ref Email
+      Protocol: email
+      TopicArn: !Ref DefaultSnsTopic
+  
+  SlackSubscription:
+    Type: "AWS::SNS::Subscription"
+    Condition: IsEnableSlackSubscription
+    Properties:
+      Endpoint: !Ref OpsidianEndpoint
+      Protocol: https
+      TopicArn: !Ref DefaultSnsTopic
+
+  EventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Id: Default
+        Statement:
+          - 
+            Sid: __Default__1
+            Effect: "Allow"
+            Principal:
+              Service: events.amazonaws.com
+            Action: 
+              - SNS:Publish
+            Resource: !Ref DefaultSnsTopic
+          - 
+            Sid: __Default__2
+            Effect: "Allow"
+            Principal:
+              AWS: "*"
+            Action: 
+              - SNS:Publish
+            Resource: !Ref DefaultSnsTopic
+      Topics: [!Ref DefaultSnsTopic]
+
+Outputs:
+  TopicArn: 
+    Description: Arn of the SNS Topic
+    Value: !Ref DefaultSnsTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-TopicArn"
