@@ -347,7 +347,8 @@ Resources:
 
               if request_type in ['Create', 'Update']:
                 responseData['DatabasePassword']=generate_random_password(20)
-                responseData['AdminPassword']=generate_random_password(20)
+                responseData['DatabaseRootPassword']=generate_random_password(20)
+                responseData['MagentoAdminPassword']=generate_random_password(20)
 
               send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
               return
@@ -396,17 +397,19 @@ Resources:
         SecretStringTemplate: !Sub
           - |
             {
-              "ROOT_USER": "${ROOT_USER}",
+              "DB_ROOT_USER": "${DB_ROOT_USER}",
+              "DB_ROOT_PASSWORD": "${DB_ROOT_PASSWORD}",
               "DB_NAME": "${DB_NAME}",
               "DB_USER": "${DB_USER}",
               "DB_PASSWORD": "${DB_PASSWORD}",
-              "ADMIN_PASSWORD": "${ADMIN_PASSWORD}"
+              "MAGENTO_ADMIN_PASSWORD": "${MAGENTO_ADMIN_PASSWORD}"
             }
-          - ROOT_USER: !Ref MasterUser
+          - DB_ROOT_USER: !Ref MasterUser
+            DB_ROOT_PASSWORD: !GetAtt RDSPasswordGenerator.DatabaseRootPassword
             DB_NAME: !Ref DatabaseName
             DB_USER: dbuser
             DB_PASSWORD: !GetAtt RDSPasswordGenerator.DatabasePassword
-            ADMIN_PASSWORD: !GetAtt RDSPasswordGenerator.AdminPassword
+            MAGENTO_ADMIN_PASSWORD: !GetAtt RDSPasswordGenerator.MagentoAdminPassword
         GenerateStringKey: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         PasswordLength: 30
         ExcludeCharacters: '"@/\'
@@ -443,7 +446,7 @@ Resources:
 
   RDSCluster:
     Type: "AWS::RDS::DBCluster"
-    DeletionPolicy: Delete
+    DeletionPolicy: Delete #For now - later will change based on env
     DependsOn:
       - RDSIamRole
       - RDSParameterGroup
@@ -464,7 +467,7 @@ Resources:
       # EngineMode: provisioned
       # KmsKeyId: !If [IsEncrypted, !GetAtt DefaultKmsKey.Arn, !Ref 'AWS::NoValue']
       MasterUsername: !Ref MasterUser
-      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref RDSSecretManager, ':SecretString:', !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]] ,'}}' ]]
+      MasterUserPassword: !GetAtt RDSPasswordGenerator.DatabaseRootPassword
       Port: !Ref Port
       PreferredBackupWindow: !If [ HasBackupWindow, !Ref BackupWindow, !Ref 'AWS::NoValue']
       SnapshotIdentifier: !If [ HasSnapshot, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
@@ -707,16 +710,14 @@ Resources:
           MetricNamespace: LogMetrics
           MetricName: !Join ['-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], warnings]]
 
-# Upgrade log
-
+    # Upgrade log
   UpgradeLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       RetentionInDays: !Ref LogRetentionPeriod
       LogGroupName: !Join [ '/', [/aws/rds/instance, !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], upgrade]]
 
-# Standard metrics/alarms
-
+  # Standard metrics/alarms
   FreeStorageCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
