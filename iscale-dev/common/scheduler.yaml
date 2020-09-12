@@ -1,0 +1,413 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: A scheduler for Databases, individual EC2 instances, and autoscaling groups
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      
+        Label:
+          default: "Scheduled Objects"
+        Parameters:
+          - DatabaseClusterArn
+          - CodeDeployApplicationName
+          - CodeDeployDeploymentGroupName
+
+        Label:
+          default: "Schedules"
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: "Resource Name"
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+      CodeDeployApplicationName:
+        default: "CodeDeploy Application name"
+      CodeDeployDeploymentGroupName:
+        default: "CodeDeploy Deployment Group name"
+      DatabaseClusterArn:
+        default: "Database Cluster ARN"
+      StartScheduleExpression:
+        default: "Start Schedule CRON Expression"
+      StopScheduleExpression:
+        default: "Stop Schedule CRON Expression"
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MaxLength: 8
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+  CodeDeployApplicationName:
+    Description: Name of the CodeDeploy Application
+    Type: String
+  CodeDeployDeploymentGroupName:
+    Description: Name of the CodeDeploy Deployment Group for the application
+    Type: String
+  DatabaseClusterArn:
+    Description: The name of the database cluster
+    Type: String
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings: 
+  'Fn::Transform':
+    Name: 'AWS::Include'
+    Parameters:
+      Location: "s3://iscale-dev-cloudformation/include/mappings.yaml"
+
+Conditions:
+  HasStartSchedule: !Not [!Equals [!Ref StartScheduleExpression, ""]]
+  HasStopSchedule: !Not [!Equals [!Ref StopScheduleExpression, ""]]
+
+Resources:
+
+####
+# IAM Section
+####
+
+  LambdaScheduleDBClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com" 
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - 
+          PolicyName: "ScheduleDBClusterPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - 
+                Effect: Allow
+                Action: 
+                  - rds:DescribeDBClusters
+                  - rds:StopDBCluster
+                  - rds:StartDBCluster
+                Resource: !Ref DatabaseClusterArn
+              - 
+                Effect: "Allow"
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  LambdaScheduleAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com" 
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - 
+          PolicyName: "ScheduleAutoScalingPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: 
+                  - codedeploy:GetDeploymentGroup
+                Resource: !Join [":", ["arn:aws:codedeploy", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "deploymentgroup", !Join ['/', [!Ref CodeDeployApplicationName, !Ref CodeDeployDeploymentGroupName]]]]
+              - 
+                Effect: "Allow"
+                Action: 
+                  - autoscaling:SetDesiredCapacity
+                Resource: !Join [":", ["arn:aws:autoscaling", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "autoScalingGroup", '*', !Join ['', ['autoScalingGroupName/', !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, '*']]]]]]
+
+####
+# Lambda Section
+####
+
+  StartDBClusterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function starting a DB cluster on a given schedule"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleDBClusterRole.Arn 
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          CLUSTER_ID: !Ref DatabaseClusterArn
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            ClusterID=os.environ['CLUSTER_ID']
+            
+            try:
+              rds = boto3.client('rds',region_name=region)
+
+              logger.info('Starting Cluster : ' + str(ClusterID))
+              rds.start_db_cluster(DBClusterIdentifier=ClusterID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopDBClusterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function stopping a DB cluster on a given schedule"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleDBClusterRole.Arn 
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          CLUSTER_ID: !Ref DatabaseClusterArn
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            ClusterID=os.environ['CLUSTER_ID']
+            
+            try:
+              rds = boto3.client('rds',region_name=region)
+
+              logger.info('Stopping Cluster : ' + str(ClusterID))
+              rds.stop_db_cluster(DBClusterIdentifier=ClusterID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopDeploymentASGFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function bringing an autoscaling group size to 0"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleAutoScalingRole.Arn 
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          CODEDEPLOY_APP: !Ref CodeDeployApplicationName
+          CODEDEPLOY_GROUP: !Ref CodeDeployDeploymentGroupName
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            appName=os.environ['CODEDEPLOY_APP']
+            groupName=os.environ['CODEDEPLOY_GROUP']
+            
+            try:
+              codedeploy = boto3.client('codedeploy',region_name=region)
+
+              logger.info('Retrieving Deployment Group details for : ' + str(appName) + '/' + str(groupName))
+              response = codedeploy.get_deployment_group(
+                            applicationName=appName,
+                            deploymentGroupName=groupName 
+                          )
+              
+              logger.info(response)
+
+              asgToStop=response['deploymentGroupInfo']['autoScalingGroups'][0]['name']
+              logger.info('AutoScaling Group to reduce is : ' + str(asgToStop))
+
+              logger.info('Making: ' + str(asgToStop) + ' desired size to 0.')
+              autoscaling = boto3.client('autoscaling',region_name=region)
+              response = autoscaling.set_desired_capacity(
+                          AutoScalingGroupName=asgToStop,
+                          DesiredCapacity=0,
+                          HonorCooldown=False
+                        )
+
+              logger.info('AutoScaling group reduction complete with response: ' + str(response))
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StartDeploymentASGFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function bringing an autoscaling group size to 1"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleAutoScalingRole.Arn 
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          CODEDEPLOY_APP: !Ref CodeDeployApplicationName
+          CODEDEPLOY_GROUP: !Ref CodeDeployDeploymentGroupName
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            appName=os.environ['CODEDEPLOY_APP']
+            groupName=os.environ['CODEDEPLOY_GROUP']
+            
+            try:
+              codedeploy = boto3.client('codedeploy',region_name=region)
+
+              logger.info('Retrieving Deployment Group details for : ' + str(appName) + '/' + str(groupName))
+              response = codedeploy.get_deployment_group(
+                            applicationName=appName,
+                            deploymentGroupName=groupName 
+                          )
+              
+              logger.info(response)
+
+              asgToStop=response['deploymentGroupInfo']['autoScalingGroups'][0]['name']
+              logger.info('AutoScaling Group to augment is : ' + str(asgToStop))
+
+              logger.info('Making: ' + str(asgToStop) + ' desired size to 1.')
+              autoscaling = boto3.client('autoscaling',region_name=region)
+              response = autoscaling.set_desired_capacity(
+                          AutoScalingGroupName=asgToStop,
+                          DesiredCapacity=0,
+                          HonorCooldown=False
+                        )
+
+              logger.info('AutoScaling group augmentation complete with response: ' + str(response))
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+####
+# CloudWatch Section
+####
+
+  StartScheduledEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasStartSchedule
+    Properties:
+      #Use a clean name for self service app + object rarely needs to be replaced
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      Description: Starts the DB cluster at a specific time
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StartDBClusterFunction.Arn 
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstart]]
+      - 
+        Arn: !GetAtt StartDeploymentASGFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscalingstart]]
+
+  ScheduledEventPermissionToStartCluster:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartDBClusterFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StartScheduledEventRule.Arn
+
+  ScheduledEventPermissionToAugmentAutoScalingGroup:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartDeploymentASGFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StartScheduledEventRule.Arn
+
+  StopScheduledEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasStopSchedule
+    Properties:
+      #Use a clean name for self service app + object rarely needs to be replaced
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      Description: Stops the DB cluster at a specific time
+      ScheduleExpression: !Ref StopScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StopDBClusterFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstop]]
+      - 
+        Arn: !GetAtt StopDeploymentASGFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscalingstop]]
+
+  ScheduledEventPermissionToStopCluster:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopDBClusterFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StopScheduledEventRule.Arn
+
+  ScheduledEventPermissionToReduceAutoScalingGroup:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopDeploymentASGFunction
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StopScheduledEventRule.Arn
