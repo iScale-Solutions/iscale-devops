@@ -101,7 +101,8 @@ Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
-    MaxLength: 8 #Make it 8 as template will use this for resource names that cannot exceed 32
+    MinLength: 3
+    MaxLength: 8
   OrgName:
     Description: The name of the organization.
     Type: String
@@ -112,6 +113,11 @@ Parameters:
     Description: The name of the environment
     Type: String
     Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
   MultiAz:
     Description: Set to true if MultiAZ is enabled. Otherwise, disabled.
     Type: String
@@ -132,6 +138,8 @@ Parameters:
     Description: The port number on which the database accepts connections.
     Type: Number
     Default: 3306
+    MinValue: 1
+    MaxValue: 65535
   StorageEncrypted:
     Description: Set to true if DB instance encryption is enabled. Otherwise, disabeld.
     Type: String
@@ -146,7 +154,7 @@ Parameters:
   Engine:
     Description: The name of the database engine that you want to use for this DB instance.
     Type: String
-    Default: postgres
+    Default: aurora-mysql
     AllowedValues:
       - aurora
       - aurora-mysql
@@ -174,6 +182,8 @@ Parameters:
     Description: The number of days for which automated backups are retained. Setting this parameter to a positive number enables backups. Setting this parameter to 0 disables automated backups.
     Default: 30
     Type: Number
+    MinValue: 0
+    MaxValue: 35
   BackupWindow:
     Description: The daily time range during which automated backups are created if automated backups are enabled using the BackupRetentionPeriod parameter.
     Type: String
@@ -245,6 +255,7 @@ Conditions:
   IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
   IsEncrypted: !Equals [!Ref StorageEncrypted, true]
   IsEnableEnhancedMonitoring: !Equals [!Ref EnableEnhancedMonitoring, true]
+  IsDev: !Equals [!Ref EnvName, Development]
 
 Resources:
 
@@ -446,7 +457,7 @@ Resources:
 
   RDSCluster:
     Type: AWS::RDS::DBCluster
-    DeletionPolicy: Delete #For now - later will change based on env
+    DeletionPolicy: Snapshot
     DependsOn:
       - RDSIamRole
       - RDSParameterGroup
@@ -481,7 +492,7 @@ Resources:
   DBInstance:
     Type: AWS::RDS::DBInstance
     DependsOn:
-      - PostgresqlLogGroup
+      - RDSLogGroup
       - UpgradeLogGroup
       - RDSIamRole
       - RDSParameterGroup
@@ -616,19 +627,19 @@ Resources:
 # CloudWatch Section
 ####
 
-  # PostgreSQL log / metrics / alarms
+  # Database log / metrics / alarms
 
-  PostgresqlLogGroup:
+  RDSLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       RetentionInDays: !Ref LogRetentionPeriod
-      LogGroupName: !Join [ '/', [/aws/rds/instance, !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,]], postgresql]]
+      LogGroupName: !Join [ '/', [/aws/rds/instance, !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]]]
 
   # Error Denied
   ErrorDeniedMetricFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
-      LogGroupName: !Ref PostgresqlLogGroup
+      LogGroupName: !Ref RDSLogGroup
       FilterPattern: "[timestamp, id, message=\"*password authentication failed*\"]"
       MetricTransformations:
         -
@@ -659,7 +670,7 @@ Resources:
   FatalMetricFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
-      LogGroupName: !Ref PostgresqlLogGroup
+      LogGroupName: !Ref RDSLogGroup
       FilterPattern: "[time, id, message_type=\"*FATAL*\"]"
       MetricTransformations:
         -
@@ -671,7 +682,7 @@ Resources:
   ErrorsMetricFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
-      LogGroupName: !Ref PostgresqlLogGroup
+      LogGroupName: !Ref RDSLogGroup
       FilterPattern: "[time, id, message_type=\"*ERROR*\"]"
       MetricTransformations:
         -
@@ -702,7 +713,7 @@ Resources:
   WarningsMetricFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
-      LogGroupName: !Ref PostgresqlLogGroup
+      LogGroupName: !Ref RDSLogGroup
       FilterPattern: "[time, id, message_type=\"*WARNING*\"]"
       MetricTransformations:
         -

@@ -90,6 +90,8 @@ Parameters:
   DatabasePort:
     Description: Database Port Number
     Type: Number
+    MinValue: 1
+    MaxValue: 65535
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
     Type: Number
@@ -110,7 +112,8 @@ Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
-    Default: iscaleclient
+    MinLength: 3
+    MaxLength: 8
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
@@ -125,6 +128,9 @@ Mappings:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  IsProd: !Equals [!Ref EnvName, Production]
 
 Resources:
   
@@ -267,11 +273,14 @@ Resources:
 
   DataS3Bucket:
     Type: AWS::S3::Bucket
-    # DeletionPolicy: Retain #For now do not retain
     # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
     # Recommend not specifying bucket name here for non-prod setups
+    DeletionPolicy: Retain
     Properties:
-      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      BucketName: !If
+        - IsProd
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - !Ref AWS::NoValue
       VersioningConfiguration:
         Status: Enabled
       Tags:
@@ -312,7 +321,7 @@ Resources:
 
   AppServerFileSystem:
     Type: AWS::EFS::FileSystem
-    # DeletionPolicy: Retain
+    DeletionPolicy: Retain
     Properties:
       Encrypted: true
       LifecyclePolicies:
@@ -750,6 +759,3 @@ Resources:
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-ApplicationListenerArn" 
       Priority: !Ref LoadBalancerPriority
-
-
-# Outputs:
