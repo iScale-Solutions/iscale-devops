@@ -265,7 +265,7 @@ Resources:
                   - s3:GetBucketLocation
                 Resource: "arn:aws:s3:::*"
         - 
-          PolicyName: ReadOnS3DeploymentBucket
+          PolicyName: DeploymentResourcesAccess
           PolicyDocument:
             Version: 2012-10-17
             Statement:
@@ -276,6 +276,12 @@ Resources:
                   - s3:GetObject*
                 Resource: #Assume naming convention since deployment bucket follows this. Else we would have to read it from the deployment stack
                   - !Join ['',[ "arn:aws:s3:::", !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Ref Name, "-code-deploy/*"]]
+                  - !Join ['',[ "arn:aws:s3:::", !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Ref Name, "-code-deploy"]]
+              - 
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                Resource: '*'
         -
           PolicyName: WriteCloudWatchLogs
           PolicyDocument:
@@ -663,16 +669,18 @@ Resources:
       IamInstanceProfile: !GetAtt AppServerIamProfile.Arn
       InstanceMonitoring: true
       UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash -xe
-          # yum update -y
-          # Install the files and packages from the metadata
-          yum install -y aws-cfn-bootstrap
-          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c Magento --region ${AWS::Region}
-          # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
-          /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
-          # Signal the status from cfn-init
-          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+            # yum update -y
+            # Install the files and packages from the metadata
+            yum install -y aws-cfn-bootstrap
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c Magento --region ${AWS::Region} --role ${ROLE}
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+            /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
+          - ROLE: !Ref AppServerIamRole
 
   AppServerAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
