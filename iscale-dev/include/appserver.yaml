@@ -53,3 +53,314 @@
         - Key: Organization
           Value: 
             Ref: OrgName
+
+  AppServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Join:
+          - '-'
+          - - Ref: OrgName
+            - Fn::FindInMap: 
+              - EnvShort
+              - Ref: EnvName
+              - Name
+            - Fn::FindInMap:
+              - RegionShort
+              - Ref: 'AWS::Region'
+              - Name
+            - Ref: Name
+            - appserver
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: 
+            Fn::Join: 
+              - '-'
+              - - Ref: OrgName
+                - Fn::FindInMap: 
+                  - EnvShort
+                  - Ref: EnvName
+                  - Name
+                - Fn::FindInMap:
+                  - RegionShort
+                  - Ref: 'AWS::Region'
+                  - Name
+                - Ref: Name
+                - appserver
+        - Key: Environment
+          Value: 
+            Ref: EnvName
+        - Key: Organization
+          Value: 
+            Ref: OrgName
+
+  AppServerSecurityGroupHTTPIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: 
+        Fn::GetAtt: 
+          - AppServerSecurityGroup
+          - GroupId
+      IpProtocol: TCP
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-SecurityGroupId"
+      Description: Allow connection from Load Balancer
+
+  AppServerSecurityGroupSSHIngress: # Iannis - Make this conditionnal if can debug
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: IsNotProd
+    Properties: 
+      GroupId: 
+        Fn::GetAtt: 
+          - AppServerSecurityGroup
+          - GroupId
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+
+  AppServerSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: 
+        Fn::GetAtt:
+          - AppServerSecurityGroup
+          - GroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: 0.0.0.0/0
+
+  RDSSecurityGroupAllowAppServerIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: 
+        Ref: DatabaseSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 
+        Ref: DatabasePort
+      ToPort: 
+        Ref: DatabasePort
+      SourceSecurityGroupId: 
+        Ref: AppServerSecurityGroup
+      Description: Allow DB connection from App Servers
+
+  AppServerIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AccessCloudWatchMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                  - autoscaling:DescribeTags
+                Resource: "*"
+        - PolicyName: AccessToS3DataBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject*
+                  - s3:PutObject*
+                  - s3:DeleteObject
+                Resource: 
+                  - Fn::Join: 
+                    - '/'
+                    - - Fn::GetAtt: 
+                        - DataS3Bucket
+                        - Arn
+                      - '*'
+                  - Fn::GetAtt: 
+                    - DataS3Bucket
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                Resource: "arn:aws:s3:::*"
+        - PolicyName: DeploymentResourcesAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObject*
+                Resource: #Assume naming convention since deployment bucket follows this. Else we would have to read it from the deployment stack
+                  Fn::Join: 
+                    - ''
+                    - - "arn:aws:s3:::"
+                      - Ref: OrgName
+                      - '-'
+                      - Fn::FindInMap: 
+                        - EnvShort
+                        - Ref: EnvName
+                        - Name
+                      - '-'
+                      - Fn::FindInMap:
+                        - RegionShort
+                        - Ref: 'AWS::Region'
+                        - Name
+                      - '-'
+                      - Ref: Name
+                      - "-code-deploy/*"
+                  # - !Join ['',[ "arn:aws:s3:::", !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Ref Name, "-code-deploy/*"]]
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                Resource: '*'
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+        - PolicyName: AccessSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - secretsmanager:GetSecretValue
+                Resource: 
+                  Fn::Join: 
+                    - ':'
+                    - - "arn:aws:secretsmanager"
+                      - Ref: 'AWS::Region'
+                      - Ref: 'AWS::AccountId'
+                      - secret
+                      - Fn::Join: 
+                        - '-'
+                        - - Ref: OrgName
+                          - Fn::FindInMap: 
+                            - EnvShort
+                            - Ref: EnvName
+                            - Name
+                          - Fn::FindInMap:
+                            - RegionShort
+                            - Ref: 'AWS::Region'
+                            - Name
+                          - Ref: Name
+                          - "*"
+                # !Join [':', ["arn:aws:secretsmanager", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "secret", !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, "*"]]]]
+
+  ####
+  # EFS Section
+  ####
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      #GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+      GroupDescription:
+        Fn::Join: 
+          - '-'
+          - - Ref: OrgName
+            - Fn::FindInMap: 
+              - EnvShort
+              - Ref: EnvName
+              - Name
+            - Fn::FindInMap:
+              - RegionShort
+              - Ref: 'AWS::Region'
+              - Name
+            - Ref: Name
+            - efs
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: 
+            Fn::Join: 
+              - '-'
+              - - Ref: OrgName
+                - Fn::FindInMap: 
+                  - EnvShort
+                  - Ref: EnvName
+                  - Name
+                - Fn::FindInMap:
+                  - RegionShort
+                  - Ref: 'AWS::Region'
+                  - Name
+                - Ref: Name
+                - efs
+        - Key: Environment
+          Value: 
+            Ref: EnvName
+        - Key: Organization
+          Value: 
+            Ref: OrgName
+  
+  EFSSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: 
+        Fn::GetAtt:
+          - EFSSecurityGroup
+          - GroupId
+      IpProtocol: TCP
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - AppServerSecurityGroup
+        - GroupId
+  
+  AppServerFileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    Properties:
+      Encrypted: true
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+      FileSystemTags:
+        - Key: Name
+          Value: 
+            Fn::Join: 
+              - '-'
+              - - Ref: OrgName
+                - Fn::FindInMap: 
+                  - EnvShort
+                  - Ref: EnvName
+                  - Name
+                - Fn::FindInMap:
+                  - RegionShort
+                  - Ref: 'AWS::Region'
+                  - Name
+                - Ref: Name
+                - efs
+        - Key: Environment
+          Value: 
+            Ref: EnvName
+        - Key: Organization
+          Value: 
+            Ref: OrgName
