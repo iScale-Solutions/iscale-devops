@@ -266,65 +266,16 @@ Parameters:
     Default: cron(0 13 ? * MON-FRI *)
 
 Mappings: 
-  EnvShort:
-    Production:
-      Name: prd
-    Staging:
-      Name: stg
-    Development:
-      Name: dev
-    Test:
-      Name: test
-  RegionShort:
-    us-east-2:
-      Name: ue2
-    us-east-1:
-      Name: ue1
-    us-west-1:
-      Name: uw1
-    us-west-2:
-      Name: uw2
-    ap-east-1:
-      Name: ae1
-    ap-south-1:
-      Name: as1
-    ap-northeast-1:
-      Name: ane1
-    ap-northeast-2:
-      Name: ane2
-    ap-northeast-3:
-      Name: ane3
-    ap-southeast-1:
-      Name: ase1
-    ap-southeast-2:
-      Name: ase2
-    ca-central-1:
-      Name: cc1
-    cn-north-1:
-      Name: cn1
-    cn-northwest-1:
-      Name: cnw1
-    eu-central-1:
-      Name: ec1
-    eu-west-1:
-      Name: ew1
-    eu-west-2:
-      Name: ew2
-    eu-west-3:
-      Name: ew3
-    eu-north-1:
-      Name: en1
-    me-south-1:
-      Name: ms1
-    sa-east-1:
-      Name: se1
-    us-gov-east-1:
-      Name: uge1
-    us-gov-west-1:
-      Name: ugw1 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
 
 Conditions:
-
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
   IsAssociatePublicIp: !Equals [!Ref AssociatePublicIp, true]
   HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
@@ -511,25 +462,102 @@ Resources:
 # AutoScaling Group Section
 ####
 
-  DefaultLaunchConfig: 
+  AppServerLaunchConfig: 
     Type: AWS::AutoScaling::LaunchConfiguration
-    Properties:
-      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
-      ImageId: !Ref InstanceAMI
-      SecurityGroups: [!GetAtt DefaultSecurityGroup.GroupId]
-      InstanceType: !Ref InstanceType
-      AssociatePublicIpAddress: !Ref AssociatePublicIp
-      IamInstanceProfile: !GetAtt DefaultIamInstanceProfile.Arn
-      InstanceMonitoring: !Ref EnableMonitoring
-      UserData:
-        Fn::Base64: !Sub
-          - |
-            #cloud-config
-            write_files:
-              - path: /var/lib/cloud/instance/custom-data.sh
-                permissions: 0700
-                owner: root:root
-                content: |
+    Metadata: 
+      AWS::CloudFormation::Init: 
+        configSets:
+          Odoo:
+            - InstallLogAgent
+            - InstallCustomData
+          
+        InstallLogAgent:
+          # packages:
+          #   yum:
+          #     awslogs: []
+          
+          # commands:
+          #   command01:
+          #     command: cp -fv /var/awslogs/etc/awscli.region /var/awslogs/etc/aws.conf
+          #   command02:
+          #     command: rm -fv /var/awslogs/etc/awscli.region
+          #   command03:
+          #     command: service awslogs start
+          #   command04:
+          #     command: chkconfig awslogs on
+          
+          files:
+            /var/awslogs/etc/config/cfn-init.conf:
+              content: !Sub
+                |
+                [/var/log/cfn-init.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cfn-init.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/cfn-init.log
+            
+            /var/awslogs/etc/config/cfn-init-cmd.conf:
+              content: !Sub
+                |
+                [/var/log/cfn-init-cmd.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cfn-init-cmd.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/cfn-init-cmd.log
+            
+            /var/awslogs/etc/config/ssm.conf:
+              content: !Sub
+                |
+                [/var/log/amazon/ssm/amazon-ssm-agent.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/amazon/ssm/amazon-ssm-agent.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/amazon/ssm/amazon-ssm-agent.log
+            
+            /var/awslogs/etc/config/deployments.conf:
+              content: !Sub
+                |
+                [codedeploy-agent-deployments.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /opt/codedeploy-agent/deployment-root/deployment-logs/codedeploy-agent-deployments.log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/codedeploy-agent-deployments.log
+            
+            # /var/awslogs/etc/config/blur.conf:
+            #   content: !Sub
+            #     |
+            #     [blur.log]
+            #     datetime_format = %b %d %H:%M:%S
+            #     file = /var/log/blur.log
+            #     buffer_duration = 5000
+            #     log_stream_name = {instance_id}
+            #     initial_position = start_of_file
+            #     log_group_name = /var/log/blur.log
+
+            /var/awslogs/etc/awscli.region:
+              content: !Sub
+                |
+                [plugins]
+                cwlogs = cwlogs
+                [default]
+                region = ${AWS::Region}
+                
+        InstallCustomData:
+          # packages:
+          #   yum: 
+          #     jq: []
+          files:
+            /var/lib/cloud/instance/custom-data.sh: 
+              content: !Sub
+                - |
                   STACK_NAME=${AWS::StackName}
                   AWS_REGION=${AWS::Region}
                   DOMAIN=${DOMAIN}
@@ -541,16 +569,41 @@ Resources:
                   EFS_NAME=${EFS_NAME}
                   DB_HOST=${DB_HOST}
                   BASE_URL=https://${DOMAIN}/
-          - DOMAIN: !Join [".", ["payroll", !Ref ClientDomainName]]
-            ENVIRONMENT: !Ref EnvName
-            CLIENT_NAME: payroll
-            APPLICATION_SITE: !Ref OrgName
-            INSTANCE_ROLE: !Ref DefaultIamRole
-            EFS_NAME: !Join ['.',[!Ref DefaultFileSystem, efs, !Ref 'AWS::Region', amazonaws.com]]
-            SECRET_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], payroll]]
-            DB_HOST:
-              Fn::ImportValue:
-                !Sub "${DatabaseStackName}-EndpointAddress"
+                - DOMAIN: !Join [".", ["payroll", !Ref ClientDomainName]]
+                  ENVIRONMENT: !Ref EnvName
+                  CLIENT_NAME: payroll
+                  APPLICATION_SITE: !Ref OrgName
+                  INSTANCE_ROLE: !Ref DefaultIamRole
+                  EFS_NAME: !Join ['.',[!Ref DefaultFileSystem, efs, !Ref 'AWS::Region', amazonaws.com]]
+                  SECRET_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], payroll]]
+                  DB_HOST:
+                    Fn::ImportValue:
+                      !Sub "${DatabaseStackName}-EndpointAddress"
+              permissions: 0700
+              owner: root
+              group: root
+    
+    Properties:
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      ImageId: !Ref InstanceAMI
+      SecurityGroups: [!GetAtt DefaultSecurityGroup.GroupId]
+      InstanceType: !Ref InstanceType
+      AssociatePublicIpAddress: !Ref AssociatePublicIp
+      IamInstanceProfile: !GetAtt DefaultIamInstanceProfile.Arn
+      InstanceMonitoring: !Ref EnableMonitoring
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+            # Install the files and packages from the metadata
+            apt-get -y install python-pip
+            pip install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+            /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c Odoo --region ${AWS::Region} --role ${ROLE}
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+            /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+            /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
+          - ROLE: !Ref DefaultIamRole
 
 ####
 # VPC Section
@@ -580,7 +633,7 @@ Resources:
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-SecurityGroupId"
 
-  # # SSH access from bastion
+  # SSH access from VPC
   # DefaultSecurityGroupIngress2:
   #   Type: AWS::EC2::SecurityGroupIngress
   #   Properties:
@@ -592,6 +645,16 @@ Resources:
   #       Fn::ImportValue:
   #         !Sub "${NetworkStackName}-VpcCidrBlock"
   
+  # SSH access from bastion
+  DefaultSecurityGroupIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt DefaultSecurityGroup.GroupId
+      IpProtocol: "tcp"
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+
   DefaultSecurityGroupEgress:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
@@ -684,6 +747,12 @@ Resources:
                   - logs:CreateLogStream
                   - logs:DescribeLogStream
                 Resource: arn:aws:logs:*:*:*
+              -
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                Resource: '*'
+              
 
   SSMServiceRole:
     Type: AWS::IAM::Role
