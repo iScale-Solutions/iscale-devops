@@ -251,7 +251,9 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
-  IsAurora: !Or [!Equals [!Ref Engine, aurora], !Equals [!Ref Engine, aurora-mysql], !Equals [!Ref Engine, aurora-postgresql]]
+  IsAuroraPostgreSQL: !Equals [!Ref Engine, aurora-postgresql]
+  IsAuroraMySQL: !Equals [!Ref Engine, aurora-mysql]
+  IsAurora: !Or [Condition: IsAuroraPostgreSQL, Condition: IsAuroraMySQL]
   IsNotAurora: !Not [Condition: IsAurora]
   HasSnapshot: !Not [!Equals [!Ref SnapshotIdentifier, ""]]
   HasSourceDbInstanceIdentifier: !Not [!Equals [!Ref SourceDbInstanceIdentifier, ""]]
@@ -450,14 +452,11 @@ Resources:
     Properties:
       Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
       Family: !Ref Family
-      Parameters:
-        sql_mode: IGNORE_SPACE
-        # log_statement: ddl
-        # log_min_duration_statement: 1000
+      Parameters: !If [IsAuroraPostgreSQL, log_connections: 1, sql_mode: IGNORE_SPACE] #Dummy ones
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-
+  
   RDSCluster:
     Type: AWS::RDS::DBCluster
     DeletionPolicy: Snapshot
@@ -469,17 +468,11 @@ Resources:
       BackupRetentionPeriod: !Ref BackupRetentionPeriod
       DatabaseName: !Ref DatabaseName
       DBClusterIdentifier: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-      DBClusterParameterGroupName: !Ref RDSParameterGroup
-      DBClusterParameterGroupName: default.aurora-mysql5.7
+      DBClusterParameterGroupName: !Ref RDSDBClusterParameterGroup
       DBSubnetGroupName: !Ref DBSubnetGroup
       EnableCloudwatchLogsExports:
-        - audit
-        - error
-        - slowquery
+        !If [IsAuroraMySQL, [audit, error, slowquery], [postgresql]]
       Engine: !Ref Engine
-      # EngineVersion: !Ref EngineVersion
-      # EngineMode: provisioned
-      # KmsKeyId: !If [IsEncrypted, !GetAtt DefaultKmsKey.Arn, !Ref 'AWS::NoValue']
       MasterUsername: !Ref MasterUser
       MasterUserPassword: !GetAtt RDSPasswordGenerator.DatabaseRootPassword
       Port: !Ref Port
@@ -492,6 +485,24 @@ Resources:
       VpcSecurityGroupIds:
         - !GetAtt RDSSecurityGroup.GroupId
 
+  RDSDBClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Condition: IsAuroraMySQL
+    Properties: 
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Family: aurora-mysql5.7
+      Parameters: 
+        character_set_database: utf32
+    
+  RDSDBClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Condition: IsAuroraPostgreSQL
+    Properties: 
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Family: aurora-postgresql11
+      Parameters: 
+        client_encoding: UTF8
+    
   DBInstance:
     Type: AWS::RDS::DBInstance
     DependsOn:
@@ -507,7 +518,7 @@ Resources:
       #Let it be random
       #DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
       DBParameterGroupName: !Ref RDSParameterGroup
-      DBParameterGroupName: default.aurora-mysql5.7 #need to fix this hardcoded
+      # DBParameterGroupName: default.aurora-mysql5.7 #need to fix this hardcoded
       DBSnapshotIdentifier: !If [ HasSnapshot, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
       DBSubnetGroupName: !Ref DBSubnetGroup
       Engine: !Ref Engine
