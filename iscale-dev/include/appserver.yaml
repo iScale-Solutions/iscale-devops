@@ -364,3 +364,84 @@
         - Key: Organization
           Value: 
             Ref: OrgName
+
+  EFSMountTarget1: 
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: 
+        Ref: AppServerFileSystem
+      SubnetId:
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-InternalSubnetId1"
+      SecurityGroups: 
+        - Ref: EFSSecurityGroup
+
+  EFSMountTarget2: 
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId:
+        Ref: AppServerFileSystem
+      SubnetId:
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-InternalSubnetId2"
+      SecurityGroups: 
+        - Ref: EFSSecurityGroup
+
+  #####
+  # Link the setup to the Load Balancer
+  #####
+  LoadBalancerDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        # - Name: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+        - Name:
+            Fn::Join:
+              - '.'
+              - - Fn::Join:
+                  - '-'
+                  - - Ref: Name
+                    - Fn::FindInMap:
+                      - EnvShort
+                      - Ref: EnvName
+                      - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  ELBSSLListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions:
+        - Type: forward
+          TargetGroupArn: 
+            Ref: AppServerTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values:
+            - Fn::Join:
+                - '.'
+                - - Fn::Join:
+                    - '-'
+                    - - Ref: Name
+                      - Fn::FindInMap:
+                        - EnvShort
+                        - Ref: EnvName
+                        - Name
+                  - Ref: ClientDomainName
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority:
+        Ref: LoadBalancerPriority
