@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions an s3 bucket to be used as template url
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Organization Configuration"
+        Parameters:
+          - Name
+          - OrgName
+
+    ParameterLabels:
+      Name:
+        default: "Name"
+      OrgName:
+        default: "Organization Name"
+
+Parameters: 
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    Default: cloudformation
+  OrgName:
+    Description: The name of the organization (e.g. iscale-dev)
+    Type: String
+    Default: iscale-dev
+  Versioning:
+    Description: Enables multiple versions of all objects in this bucket. You might enable versioning to prevent objects from being deleted or overwritten by mistake or to archive objects so that you can retrieve previous versions of them.
+    Type: String
+    Default: Enabled
+    AllowedValues:
+      - Enabled
+      - Suspended
+
+Resources:
+
+####
+# S3 Section
+####
+
+  # S3 bucket for cloudformation templates
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join [ '-', [!Ref OrgName , !Ref Name]]
+      VersioningConfiguration:
+        Status: !Ref Versioning
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName , !Ref Name]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  # Allow access to the templates from specific AWS accounts. This is not shared publicly
+  # The principal is hardcoded so that we can know specifically who has access. As a parameter
+  # we would likely not know which account ID belongs to which client
+  S3BucketPolicy: 
+    Type: AWS::S3::BucketPolicy
+    Properties: 
+      Bucket: !Ref S3Bucket
+      PolicyDocument: 
+        Statement: 
+          - 
+            Action: 
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Effect: "Allow"
+            Resource: !Join ['', ["arn:aws:s3:::", !Ref S3Bucket, '/*']]
+            Principal: 
+              AWS: 
+                - 338284463834 #iScale Dev
+                - 178070162686 #iScale Hosting
+                - 880804344419 #CloudCFO
+                - 482643916846 #FishingKaki
+
+Outputs:
+
+  BucketName: 
+    Description: The name of the s3 bucket
+    Value: !Ref S3Bucket
+
+  BucketArn: 
+    Description: The Amazon Resource Name (ARN) of the specified bucket.
+    Value: !GetAtt S3Bucket.Arn
+
+  DomainName: 
+    Description: The IPv4 DNS name of the specified bucket.
+    Value: !GetAtt S3Bucket.DomainName
