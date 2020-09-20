@@ -65,13 +65,14 @@ Parameters:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
     MinLength: 3
-    MaxLength: 8
+    MaxLength: 9
   OrgName:
     Description: The name of the organization.
     Type: String
     Default: iscale-dev
     AllowedPattern: "^[a-z]+(-[a-z]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
   EnvName:
     Description: The name of the environment
     Type: String
@@ -94,7 +95,7 @@ Parameters:
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
     Type: Number
-    Default: 100
+    Default: 300
     MinValue: 1
     MaxValue: 50000
   LoadBalancerStackName:
@@ -167,82 +168,88 @@ Resources:
 #         SNSStackName: !Ref SNSStackName
 #         BitBucketUserArn: !Ref BitBucketUserArn
   
-#   AppServerStack: 
-#     DependsOn: 
-#       - DBStack
-#       - DeployStack
-#     Type: AWS::CloudFormation::Stack
-#     Properties: 
-#       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-magento.yaml
-#       Parameters: 
-#         Name: !Ref Name
-#         EnvName: !Ref EnvName
-#         OrgName: !Ref OrgName
-#         LoadBalancerPriority: !Ref LoadBalancerPriority
-#         DatabaseEndpoint: 
-#           Fn::GetAtt:
-#             - DBStack
-#             - Outputs.ClusterEndpointAddress
-#         DatabasePort: 
-#           Fn::GetAtt:
-#             - DBStack
-#             - Outputs.ClusterPort
-#         DatabaseSecurityGroupId:
-#           Fn::GetAtt:
-#             - DBStack
-#             - Outputs.SecurityGroupId
-#         LoadBalancerStackName: !Ref LoadBalancerStackName
-#         SNSStackName: !Ref SNSStackName
-#         NetworkStackName: !Ref NetworkStackName
-#         ClientDomainName: !Ref ClientDomainName
-#         MagentoPublicKey: !Ref MagentoPublicKey
-#         MagentoPrivateKey: !Ref MagentoPrivateKey
+  AppServerStack: 
+    DependsOn: 
+      - DBStack
+      # - DeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        LoadBalancerPriority: !Ref LoadBalancerPriority
+        DatabaseEndpoint: 
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterEndpointAddress
+        DatabasePort: 
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterPort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: ami-0f060cde5d9876216 #Hardcode for now
+        InstanceOS: Ubuntu
+        LoadBalancerStackName: !Ref LoadBalancerStackName
+        SNSStackName: !Ref SNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
 
-#   BackupStack:
-#     DependsOn: 
-#       - DBStack
-#       - AppServerStack
-#     Type: AWS::CloudFormation::Stack
-#     Properties: 
-#       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
-#       Parameters: 
-#         Name: !Ref Name
-#         EnvName: !Ref EnvName
-#         OrgName: !Ref OrgName
-#         BackupARNList: !Join
-#           - ','
-#           - - Fn::GetAtt:
-#               - DBStack
-#               - Outputs.DBClusterARN
-#             - Fn::GetAtt:
-#               - AppServerStack
-#               - Outputs.AppServerEFSArn
+  BackupStack:
+    DependsOn: 
+      - DBStack
+      - AppServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        # BackupARNList: !Join
+        #   - ','
+        #   - - Fn::GetAtt:
+        #       - DBStack
+        #       - Outputs.DBClusterARN
+        #     - Fn::GetAtt:
+        #       - AppServerStack
+        #       - Outputs.AppServerEFSArn
+        BackupARNList: 
+          - Fn::GetAtt:
+            - DBStack
+            - Outputs.DBClusterARN
 
-#   SchedulerStack: 
-#     DependsOn: 
-#       - DBStack
-#       - AppServerStack
-#     Type: AWS::CloudFormation::Stack
-#     Properties: 
-#       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-#       Parameters: 
-#         Name: !Ref Name
-#         EnvName: !Ref EnvName
-#         OrgName: !Ref OrgName
-#         StartScheduleExpression: !Ref StartScheduleExpression
-#         StopScheduleExpression: !Ref StopScheduleExpression
-#         DatabaseClusterArn:
-#           Fn::GetAtt:
-#             - DBStack
-#             - Outputs.DBClusterARN
-#         CodeDeployApplicationName:
-#           Fn::GetAtt:
-#             - DeployStack
-#             - Outputs.CodeDeployApplicationName
-#         CodeDeployDeploymentGroupName:
-#           Fn::GetAtt:
-#             - DeployStack
-#             - Outputs.CodeDeployDeploymentGroupName
+  SchedulerStack: 
+    DependsOn: 
+      - DBStack
+      - AppServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        UseFriendlyNames: FALSE
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseClusterArn:
+          - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBClusterARN
+        # CodeDeployApplicationName:
+        #   Fn::GetAtt:
+        #     - DeployStack
+        #     - Outputs.CodeDeployApplicationName
+        # CodeDeployDeploymentGroupName:
+        #   Fn::GetAtt:
+        #     - DeployStack
+        #     - Outputs.CodeDeployDeploymentGroupName
         
 # Outputs:
 #   DeploymentUserGroup:

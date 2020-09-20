@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: This template provisions a Magento EC2 instance with all surrounding objects
+Description: This  template provisions a basic EC2 instance on Amazon Linux with all surrounding objects
 
 Metadata:
   AWS::CloudFormation::Interface: 
@@ -24,6 +24,12 @@ Metadata:
           - LoadBalancerPriority
       -
         Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceOS
+          - InstanceAMI
+      -
+        Label:
           default: Domain Configuration
         Parameters:
           - ClientDomainName
@@ -34,12 +40,6 @@ Metadata:
           - DatabaseEndpoint
           - DatabasePort
           - DatabaseSecurityGroupId
-      -
-        Label:
-          default: Magento Repository Access
-        Parameters:
-          - MagentoPublicKey
-          - MagentoPrivateKey
 
     ParameterLabels:
       Name:
@@ -62,10 +62,11 @@ Metadata:
         default: SNS Topic Stack Name
       ClientDomainName:
         default: Domain Name
-      MagentoPublicKey:
-        default: Magento Public Key
-      MagentoPrivateKey:
-        default: Magento Private Key
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceOS:
+        default: Instance Operating System
+      
 
 Parameters:
   OrgName:
@@ -101,6 +102,16 @@ Parameters:
     Description: Database Security Group
     Type: String
     MinLength: 1
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0841edc20334f9287
+  InstanceOS:
+    Description: Instance Operating System
+    Type: String
+    AllowedValues:
+      - Amazon
+      - Ubuntu
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
     Type: Number
@@ -111,21 +122,11 @@ Parameters:
     Description: Name of the ELB Stack Name
     Type: String
     MinLength: 1
-  MagentoPublicKey: 
-    NoEcho: true
-    Description: Magento Repository Public Key
-    Type: String
-    MinLength: 1
-  MagentoPrivateKey: 
-    NoEcho: true
-    Description: Magento Repository Private Key
-    Type: String
-    MinLength: 1
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
     MinLength: 3
-    MaxLength: 8
+    MaxLength: 9
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
@@ -148,6 +149,8 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsAmazonLinux: !Equals [InstanceOS, Amazon]
+  IsUbuntu: !Equals [InstanceOS, Ubuntu]
 
 Resources:
   
@@ -156,7 +159,42 @@ Resources:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/appserver.yaml
-  
+
+####
+# SES Section (Need to make this optional)
+####
+
+  SESUser:
+    Type: AWS::IAM::User
+    Properties: 
+      Path: /
+      Policies: 
+        - 
+          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ses-user-policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: "Allow"
+                Action: "ses:SendRawEmail"
+                Resource: '*'
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ses-user]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+      UserName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ses-user]]
+
+  SESUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref SESUser
+
 ####
 # AutoScaling Group 
 ####
@@ -166,14 +204,11 @@ Resources:
     Metadata: 
       AWS::CloudFormation::Init: 
         configSets: 
-          Magento: 
-            - InstallLogAgent
+          Basic: 
+            # - InstallLogAgent
             - InstallCustomData
-            - MountEFS
-            - SetupMySQLClient
-            - SetupApache
-            - SetupComposer
-            - InstallCodeDeployAgent
+            # - MountEFS
+            # - InstallCodeDeployAgent
         InstallLogAgent:
           packages:
             yum: 
@@ -254,10 +289,10 @@ Resources:
                   SECRET_ID=${SECRET_ID}
                   BASE_URL=https://${DOMAIN}/
                   BUCKET_NAME=${BUCKET_NAME}
-                  MAGENTO_PUB_KEY=${MAGENTO_PUB_KEY}
-                  MAGENTO_PRIVATE_KEY=${MAGENTO_PRIVATE_KEY}
                   DB_HOST=${DB_HOST}
                   DB_PORT=${DB_PORT}
+                  AWS_SES_USER=${AWS_SES_USER}
+                  AWS_SES_PASSWORD=${AWS_SES_PASSWORD}
                 - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
                   ENVIRONMENT: !Ref EnvName
                   CLIENT_NAME: !Ref Name
@@ -265,10 +300,10 @@ Resources:
                   INSTANCE_ROLE: !Ref AppServerIamRole
                   SECRET_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
                   BUCKET_NAME: !Ref DataS3Bucket
-                  MAGENTO_PUB_KEY: !Ref MagentoPublicKey
-                  MAGENTO_PRIVATE_KEY: !Ref MagentoPrivateKey
                   DB_HOST: !Ref DatabaseEndpoint
                   DB_PORT: !Ref DatabasePort
+                  AWS_SES_USER: !Ref SESUserAccessKey
+                  AWS_SES_PASSWORD: !GetAtt SESUserAccessKey.SecretAccessKey
               permissions: 0700
               owner: root
               group: root
@@ -339,118 +374,10 @@ Resources:
               command: ln -s /mnt/efs/pub/media /var/magento/pub/media
             command11:
               command: ln -s /mnt/efs/import/product_images /var/magento/import/product_images
-
-        SetupMySQLClient:
-          packages:
-              yum:
-                mysql57: []
-
-        SetupApache:
-          files:
-            /var/www/html/health.php:
-              content: !Sub
-                |
-                <?php
-                OK
-                ?>
-            /var/www/html/info.php:
-              content: !Sub
-                |
-                <?php
-                phpinfo();
-                ?>
-            /etc/httpd/conf.modules.d/remoteip.conf:
-              content: !Sub
-                |
-                RemoteIPHeader X-Forwarded-For
-            /etc/httpd/conf.d/magentosite.conf: 
-              content: !Sub
-                - |
-                  UseCanonicalName On
-                  <VirtualHost _default_:80>
-                          ServerAlias ${DOMAIN}
-                          ServerAdmin webmaster@localhost
-                          ServerName ${DOMAIN}
-
-                          DocumentRoot /var/www/html/pub
-                          <Directory /var/www/html/pub>
-                                  Options FollowSymLinks
-                                  AllowOverride All
-                                  Require all granted
-                          </Directory>
-
-                          ErrorLog /var/log/httpd/error.log
-                          CustomLog /var/log/httpd/access.log combined
-
-                          RewriteEngine on
-                  </VirtualHost>
-                - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
-              permissions: 0700
-              owner: root
-              group: root
-            /etc/awslogs/config/httpd_error.conf: #This is for AWS Log Manager
-              content: !Sub
-                |
-                [/var/log/httpd/error.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/httpd/error.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/httpd/error.log
-            /etc/awslogs/config/httpd_access.conf: #This is for AWS Log Manager
-              content: !Sub
-                |
-                [/var/log/httpd/access.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/httpd/access.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/httpd/access.log
-          packages:
-            yum: 
-              php73: []
-              php73-bcmath: []
-              php73-gd: []
-              php73-intl: []
-              php73-mbstring: []
-              php73-mysqlnd: []
-              php73-xml: []
-              php73-soap: []
-              httpd24: []
-              mod24_security.x86_64: []
-          commands:
-            command01:
-              command: chown -Rf apache:apache /mnt/efs/
-            command02:
-              command: chown -Rf apache:apache /var/magento/
-            # command03: #quote escape error - will need to rework this
-            #   command: "sed -i 's/LogFormat \"%h %l %u %t \\"%r\\" %>s %b \\"%{Referer}i\\" \\"%{User-Agent}i\\"\" combined/LogFormat \"%a %l %u %t \\"%r\\" %>s %O \\"%{Referer}i\\" \\"%{User-Agent}i\\"\" combined/' /etc/httpd/conf/httpd.conf"
-            command03:
-              command: service httpd start
-            command04:
-              command: chkconfig httpd on
-
-        SetupComposer:
-          commands:
-            command01:
-              command: curl -sS https://getcomposer.org/installer | php
-              env: 
-                HOME: /root
-                COMPOSER_HOME: /root
-              cwd: /root
-            command02:
-              command: mv composer.phar /usr/local/bin/composer
-              cwd: /root
-            command03:
-              command: ln -s /usr/local/bin/composer /usr/bin/composer
-              cwd: /root
-
     Properties:
       # KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue'] #For now no key
       # KeyName: iscale-hosting #Iannis - make this a param
-      ImageId: ami-0841edc20334f9287 #Iannis - make param
+      ImageId: !Ref InstanceAMI
       SecurityGroups: [!GetAtt AppServerSecurityGroup.GroupId]
       InstanceType: t3.small #Iannis - make param
       AssociatePublicIpAddress: true
@@ -462,12 +389,12 @@ Resources:
             #!/bin/bash -xe
             # yum update -y
             # Install the files and packages from the metadata
-            yum install -y aws-cfn-bootstrap
-            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c Magento --region ${AWS::Region} --role ${ROLE}
+            # yum install -y aws-cfn-bootstrap
+            /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c Basic --region ${AWS::Region} --role ${ROLE}
             # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
-            /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+             /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
             # Signal the status from cfn-init
-            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
+             /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
           - ROLE: !Ref AppServerIamRole
 
   AppServerAutoScalingGroup:
@@ -475,17 +402,11 @@ Resources:
     UpdatePolicy:
       AutoScalingReplacingUpdate:
         WillReplace: true
-    # CreationPolicy:
-    #   AutoScalingCreationPolicy:
-    #     MinSuccessfulInstancesPercent: 100
-      # ResourceSignal:
-      #   Count: 1
-      #   Timeout: PT5M
     Properties:
       Cooldown: 60
       MaxSize: 1
       MinSize: 0
-      DesiredCapacity: 1 #Iannis - Make this a param
+      DesiredCapacity: 1
       VPCZoneIdentifier:
         -
           Fn::ImportValue:
@@ -514,13 +435,13 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /health.php
+      HealthCheckPath: /
       HealthCheckProtocol: HTTP
       HealthCheckTimeoutSeconds: 10
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
       Matcher: 
-        HttpCode: 200
+        HttpCode: 200,302
       Port: 80
       Protocol: HTTP
       VpcId:  
@@ -536,3 +457,11 @@ Outputs:
   AppServerEFSArn:
     Description: ARN of the AppServer EFS
     Value: !GetAtt AppServerFileSystem.Arn
+
+  SESAccessKeyId:
+    Description: SES User Access Key ID
+    Value: !Ref SESUserAccessKey
+    
+  SESSecretAccessKey:
+    Description: SES Secret Access Key
+    Value: !GetAtt SESUserAccessKey.SecretAccessKey

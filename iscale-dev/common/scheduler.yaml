@@ -48,13 +48,14 @@ Parameters:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
     MinLength: 3
-    MaxLength: 8
+    MaxLength: 9
   OrgName:
     Description: The name of the organization.
     Type: String
     Default: iscale-dev
     AllowedPattern: "^[a-z]+(-[a-z]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
   EnvName:
     Description: The name of the environment
     Type: String
@@ -67,12 +68,15 @@ Parameters:
   CodeDeployApplicationName:
     Description: Name of the CodeDeploy Application
     Type: String
+    Default: ""
   CodeDeployDeploymentGroupName:
     Description: Name of the CodeDeploy Deployment Group for the application
     Type: String
+    Default: ""
   DatabaseClusterArn:
     Description: The name of the database cluster
     Type: String
+    Default: ""
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -81,6 +85,13 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
+  UseFriendlyNames:
+    Description: Set to TRUE to have nice formatted scheduler event names
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: TRUE
 
 Mappings: 
   Fn::Transform:
@@ -95,6 +106,13 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasStartSchedule: !Not [!Equals [!Ref StartScheduleExpression, ""]]
   HasStopSchedule: !Not [!Equals [!Ref StopScheduleExpression, ""]]
+  HasDB: !Not [!Equals [!Ref DatabaseClusterArn, ""]]
+  HasDBAndStartSchedule: !And [Condition: HasDB, Condition: HasStartSchedule]
+  HasDBAndStopSchedule: !And [Condition: HasDB, Condition: HasStopSchedule]
+  HasCodeDeploy: !And [!Not [!Equals [!Ref CodeDeployApplicationName, ""]], !Not [!Equals [!Ref CodeDeployDeploymentGroupName, ""]]]
+  HasCodeDeployAndStartSchedule: !And [Condition: HasCodeDeploy, Condition: HasStartSchedule]
+  HasCodeDeployAndStopSchedule: !And [Condition: HasCodeDeploy, Condition: HasStopSchedule]
+  UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
 
 Resources:
 
@@ -103,6 +121,7 @@ Resources:
 ####
 
   LambdaScheduleDBClusterRole:
+    Condition: HasDB
     Type: AWS::IAM::Role
     Properties:
       Path: /
@@ -138,6 +157,7 @@ Resources:
                 Resource: "arn:aws:logs:*:*:*"
 
   LambdaScheduleAutoScalingRole:
+    Condition: HasCodeDeploy
     Type: AWS::IAM::Role
     Properties:
       Path: /
@@ -174,6 +194,7 @@ Resources:
 ####
 
   StartDBClusterFunction:
+    Condition: HasDBAndStartSchedule
     Type: AWS::Lambda::Function
     Properties:
       Description: Lambda Function starting a DB cluster on a given schedule
@@ -209,6 +230,7 @@ Resources:
               logger.exception('Error Encountered')
 
   StopDBClusterFunction:
+    Condition: HasDBAndStopSchedule
     Type: AWS::Lambda::Function
     Properties:
       Description: Lambda Function stopping a DB cluster on a given schedule
@@ -244,6 +266,7 @@ Resources:
               logger.exception('Error Encountered')
 
   StopDeploymentASGFunction:
+    Condition: HasCodeDeployAndStopSchedule
     Type: AWS::Lambda::Function
     Properties:
       Description: Lambda Function bringing an autoscaling group size to 0
@@ -299,6 +322,7 @@ Resources:
               logger.exception('Error Encountered')
 
   StartDeploymentASGFunction:
+    Condition: HasCodeDeployAndStartSchedule
     Type: AWS::Lambda::Function
     Properties:
       Description: Lambda Function bringing an autoscaling group size to 1
@@ -357,12 +381,14 @@ Resources:
 # CloudWatch Section
 ####
 
-  StartScheduledEventRule:
+  StartScheduledDBEventRule:
     Type: AWS::Events::Rule
-    Condition: HasStartSchedule
+    Condition: HasDBAndStartSchedule
     Properties:
-      #Use a clean name for self service app + object rarely needs to be replaced
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, start]]
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, start]]
+        - !Ref 'AWS::NoValue'
       Description: !Join [' ',[ "Start", !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], "at a specified time"]]
       ScheduleExpression: !Ref StartScheduleExpression
       State:  ENABLED
@@ -370,32 +396,49 @@ Resources:
       - 
         Arn: !GetAtt StartDBClusterFunction.Arn 
         Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstart]]
+      
+  StartScheduledASGEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasCodeDeployAndStartSchedule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, asg, start]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ "Start", !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], "at a specified time"]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  ENABLED
+      Targets:
       - 
         Arn: !GetAtt StartDeploymentASGFunction.Arn
         Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscalingstart]]
 
   ScheduledEventPermissionToStartCluster:
+    Condition: HasDBAndStartSchedule
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref StartDBClusterFunction
       Action:  lambda:InvokeFunction
       Principal:  events.amazonaws.com
-      SourceArn: !GetAtt StartScheduledEventRule.Arn
+      SourceArn: !GetAtt StartScheduledDBEventRule.Arn
 
   ScheduledEventPermissionToAugmentAutoScalingGroup:
+    Condition: HasCodeDeployAndStartSchedule
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref StartDeploymentASGFunction
       Action:  lambda:InvokeFunction
       Principal:  events.amazonaws.com
-      SourceArn: !GetAtt StartScheduledEventRule.Arn
+      SourceArn: !GetAtt StartScheduledASGEventRule.Arn
 
-  StopScheduledEventRule:
+  StopScheduledDBEventRule:
     Type: AWS::Events::Rule
-    Condition: HasStopSchedule
+    Condition: HasDBAndStopSchedule
     Properties:
-      #Use a clean name for self service app + object rarely needs to be replaced
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, stop]]
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, stop]]
+        - !Ref 'AWS::NoValue'
       Description: !Join [' ',[ "Stop", !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], "at a specified time"]]
       ScheduleExpression: !Ref StopScheduleExpression
       State:  ENABLED
@@ -403,22 +446,37 @@ Resources:
       - 
         Arn: !GetAtt StopDBClusterFunction.Arn
         Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstop]]
+
+  StopScheduledASGEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasCodeDeployAndStopSchedule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, asg, stop]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ "Stop", !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], "at a specified time"]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State:  ENABLED
+      Targets:
       - 
         Arn: !GetAtt StopDeploymentASGFunction.Arn
         Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscalingstop]]
 
   ScheduledEventPermissionToStopCluster:
+    Condition: HasDBAndStopSchedule
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref StopDBClusterFunction
       Action:  lambda:InvokeFunction
       Principal:  events.amazonaws.com
-      SourceArn: !GetAtt StopScheduledEventRule.Arn
+      SourceArn: !GetAtt StopScheduledDBEventRule.Arn
 
   ScheduledEventPermissionToReduceAutoScalingGroup:
+    Condition: HasCodeDeployAndStopSchedule
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref StopDeploymentASGFunction
       Action:  lambda:InvokeFunction
       Principal:  events.amazonaws.com
-      SourceArn: !GetAtt StopScheduledEventRule.Arn
+      SourceArn: !GetAtt StopScheduledASGEventRule.Arn
