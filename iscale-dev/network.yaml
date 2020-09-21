@@ -49,12 +49,15 @@ Parameters:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
     Default: ""
+    MinLength: 3
+    MaxLength: 9
   OrgName:
     Description: The name of the organization.
     Type: String
     Default: iscale-dev
     AllowedPattern: "^[a-z]+(-[a-z]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
   EnvName:
     Description: The name of the environment
     Type: String
@@ -107,7 +110,17 @@ Parameters:
       - true
       - false
 
-Conditions: 
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsUsEast: !Equals [!Ref 'AWS::Region', us-east-1]
   IsMultiAz: !Equals [!Ref MultiAz, true]
   IsCreatePrivate: !Equals [!Ref CreatePrivate, true]
@@ -116,64 +129,6 @@ Conditions:
   IsMultiAzAndPrivate: !And [Condition: IsMultiAz, Condition: IsCreatePrivate]
   IsMultiAzPrivateAndCreateMultipleNatGateway: !And [Condition: IsMultiAzAndPrivate, Condition: IsCreateMultipleNatGateway]
 
-Mappings: 
-  EnvShort:
-    Production:
-      Name: prd
-    Staging:
-      Name: stg
-    Development:
-      Name: dev
-    Test:
-      Name: test
-  RegionShort:
-    us-east-2:
-      Name: ue2
-    us-east-1:
-      Name: ue1
-    us-west-1:
-      Name: uw1
-    us-west-2:
-      Name: uw2
-    ap-east-1:
-      Name: ae1
-    ap-south-1:
-      Name: as1
-    ap-northeast-1:
-      Name: ane1
-    ap-northeast-2:
-      Name: ane2
-    ap-northeast-3:
-      Name: ane3
-    ap-southeast-1:
-      Name: ase1
-    ap-southeast-2:
-      Name: ase2
-    ca-central-1:
-      Name: cc1
-    cn-north-1:
-      Name: cn1
-    cn-northwest-1:
-      Name: cnw1
-    eu-central-1:
-      Name: ec1
-    eu-west-1:
-      Name: ew1
-    eu-west-2:
-      Name: ew2
-    eu-west-3:
-      Name: ew3
-    eu-north-1:
-      Name: en1
-    me-south-1:
-      Name: ms1
-    sa-east-1:
-      Name: se1
-    us-gov-east-1:
-      Name: uge1
-    us-gov-west-1:
-      Name: ugw1
-
 Resources:
 
 ####
@@ -181,7 +136,7 @@ Resources:
 ####
 
 # Actual VPC
-  DefaultVPC:
+  VPC:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: !Ref VpcCidrBlock
@@ -198,16 +153,16 @@ Resources:
     Properties:
       GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], default]]
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], default]]
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, default]]
 
 # Default Route Table
-  DefaultRoutTable:
+  DefaultRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, default]]
@@ -216,7 +171,7 @@ Resources:
   DefaultNetworkAcl:
     Type: AWS::EC2::NetworkAcl
     Properties:
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, default]]
@@ -290,7 +245,7 @@ Resources:
       SubnetId: !Ref InternalSubnet2
 
 # DHCP Options
-  DefaultDhcpOptions:
+  DhcpOptions:
     Type: AWS::EC2::DHCPOptions
     Properties: 
       DomainName: !If [IsUsEast, ec2.internal, !Sub '${AWS::Region}.compute.internal'] 
@@ -302,11 +257,11 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dhcp-options]]
 
-  DefaultDhcpOptionsAssociation:
+  DhcpOptionsAssociation:
     Type: AWS::EC2::VPCDHCPOptionsAssociation
     Properties: 
-      DhcpOptionsId: !Ref DefaultDhcpOptions
-      VpcId: !Ref DefaultVPC
+      DhcpOptionsId: !Ref DhcpOptions
+      VpcId: !Ref VPC
 
 # This create subnets for 2 AZs only if MultiAZ is enabled
 
@@ -317,7 +272,7 @@ Resources:
       AvailabilityZone: !Select
         - 0
         - Fn::GetAZs: !Ref 'AWS::Region'
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       CidrBlock: !Select [ 0, !Cidr [!Ref VpcCidrBlock, !Ref CidrCount, !Ref MaskSize]]
       Tags:
         - Key: Name
@@ -331,7 +286,7 @@ Resources:
       AvailabilityZone: !Select
         - 1
         - Fn::GetAZs: !Ref 'AWS::Region'
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       CidrBlock: !Select [ 1, !Cidr [!Ref VpcCidrBlock, !Ref CidrCount, !Ref MaskSize]]
       Tags:
         - Key: Name
@@ -345,7 +300,7 @@ Resources:
       AvailabilityZone: !Select
         - 0
         - Fn::GetAZs: !Ref 'AWS::Region'
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       CidrBlock: !Select [ 2, !Cidr [!Ref VpcCidrBlock, !Ref CidrCount, !Ref MaskSize]]
       Tags:
         - Key: Name
@@ -359,7 +314,7 @@ Resources:
       AvailabilityZone: !Select
         - 1
         - Fn::GetAZs: !Ref 'AWS::Region'
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       CidrBlock: !Select [ 3, !Cidr [!Ref VpcCidrBlock, !Ref CidrCount, !Ref MaskSize]]
       Tags:
         - Key: Name
@@ -372,7 +327,7 @@ Resources:
       AvailabilityZone: !Select
         - 0
         - Fn::GetAZs: !Ref 'AWS::Region'
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       CidrBlock: !Select [ 4, !Cidr [!Ref VpcCidrBlock, !Ref CidrCount, !Ref MaskSize]]
       Tags:
         - Key: Name
@@ -386,32 +341,31 @@ Resources:
       AvailabilityZone: !Select
         - 1
         - Fn::GetAZs: !Ref 'AWS::Region'
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       CidrBlock: !Select [ 5, !Cidr [!Ref VpcCidrBlock, !Ref CidrCount, !Ref MaskSize]]
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, internal-b]]
 
 # Internet Gateway
-  DefaultInternetGateway:
+  InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, gateway]]
 
-  DefaultInternetAttachGateway:
+  InternetGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
-      VpcId: !Ref DefaultVPC
-      InternetGatewayId: !Ref DefaultInternetGateway
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
 
 # Public Route Table
-
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, public-route-table]]
@@ -421,15 +375,15 @@ Resources:
     Properties:
       RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref DefaultInternetGateway
+      GatewayId: !Ref InternetGateway
 
-  PulibcSubnetRouteTableAssociation1:
+  PublicSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet1
       RouteTableId: !Ref PublicRouteTable
 
-  PulibcSubnetRouteTableAssociation2:
+  PublicSubnet1RouteTableAssociationåå:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Condition: IsMultiAz
     Properties:
@@ -437,15 +391,14 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
 
 # Nat Gateway
-
   NatGatewayElasticIp1:
     Type: AWS::EC2::EIP
     Condition: IsCreatePrivate
-    DependsOn: DefaultInternetGateway
+    DependsOn: InternetGateway
     Properties:
       Domain: vpc
 
-  DefaultNatGateway1:
+  NatGateway1:
     Type: AWS::EC2::NatGateway
     Condition: IsCreatePrivate
     Properties: 
@@ -458,11 +411,11 @@ Resources:
   NatGatewayElasticIp2:
     Type: AWS::EC2::EIP
     Condition: IsMultiAzPrivateAndCreateMultipleNatGateway
-    DependsOn: DefaultInternetGateway
+    DependsOn: InternetGateway
     Properties:
       Domain: vpc
 
-  DefaultNatGateway2:
+  NatGateway2:
     Type: AWS::EC2::NatGateway
     Condition: IsMultiAzPrivateAndCreateMultipleNatGateway
     Properties: 
@@ -479,7 +432,7 @@ Resources:
     Type: AWS::EC2::RouteTable
     Condition: IsCreatePrivate
     Properties:
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, private-route-table-a]]
@@ -490,9 +443,9 @@ Resources:
     Properties:
       RouteTableId: !Ref PrivateRouteTable1
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref DefaultNatGateway1
+      NatGatewayId: !Ref NatGateway1
 
-  PrivateSubnetRouteTableAssociation1:
+  PrivateSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Condition: IsCreatePrivate
     Properties:
@@ -504,7 +457,7 @@ Resources:
     Type: AWS::EC2::RouteTable
     Condition: IsMultiAzAndPrivate
     Properties:
-      VpcId: !Ref DefaultVPC
+      VpcId: !Ref VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, private-route-table-b]]
@@ -515,9 +468,9 @@ Resources:
     Properties:
       RouteTableId: !Ref PrivateRouteTable2
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !If [ IsCreateMultipleNatGateway , !Ref DefaultNatGateway2, !Ref DefaultNatGateway1]
+      NatGatewayId: !If [ IsCreateMultipleNatGateway , !Ref NatGateway2, !Ref NatGateway1]
 
-  PrivateSubnetRouteTableAssociation2:
+  PrivateSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Condition: IsMultiAzAndPrivate
     Properties:
@@ -526,27 +479,27 @@ Resources:
 
 # Internal Route Table
 
-  InternalSubnetRouteTableAssociation1:
+  InternalSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref InternalSubnet1
-      RouteTableId: !Ref DefaultRoutTable
+      RouteTableId: !Ref DefaultRouteTable
 
-  InternalSubnetRouteTableAssociation2:
+  InternalSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Condition: IsMultiAz
     Properties:
       SubnetId: !Ref InternalSubnet2
-      RouteTableId: !Ref DefaultRoutTable
+      RouteTableId: !Ref DefaultRouteTable
 
 # Flow Log
 
-  DefaultFlowLog:
+  VPCFlowLog:
     Type: AWS::EC2::FlowLog
     Properties: 
       DeliverLogsPermissionArn: !GetAtt FlowLogIamRole.Arn
       LogGroupName: !Ref FlowLogLogGroup
-      ResourceId: !Ref DefaultVPC
+      ResourceId: !Ref VPC
       ResourceType: VPC
       TrafficType: ALL
 
@@ -559,7 +512,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       RetentionInDays: !Ref LogRetentionPeriod
-      LogGroupName: !Join ['-',[!Join ["",["/", !Ref OrgName]], !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], default/vpc-flow-log-group]]
+      LogGroupName: !Join ['-',[!Join ["",["/", !Ref OrgName]], !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], /vpc-flow-log-group]]
 
 ####
 # IAM Section
@@ -597,7 +550,7 @@ Resources:
 Outputs:
   VpcId: 
     Description: The ID of the VPC
-    Value: !Ref DefaultVPC
+    Value: !Ref VPC
     Export:
       Name: !Sub "${AWS::StackName}-VpcId"
 
