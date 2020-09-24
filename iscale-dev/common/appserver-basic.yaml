@@ -105,7 +105,11 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-0841edc20334f9287
+    Default: ami-0841edc20334f9287 #Basic Amazon Linux AMI
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
   InstanceOS:
     Description: Instance Operating System
     Type: String
@@ -151,6 +155,7 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsAmazonLinux: !Equals [InstanceOS, Amazon]
   IsUbuntu: !Equals [InstanceOS, Ubuntu]
+  HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
 
 Resources:
   
@@ -159,41 +164,6 @@ Resources:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/appserver.yaml
-
-####
-# SES Section (Need to make this optional)
-####
-
-  SESUser:
-    Type: AWS::IAM::User
-    Properties: 
-      Path: /
-      Policies: 
-        - 
-          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ses-user-policy]]
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - 
-                Effect: "Allow"
-                Action: "ses:SendRawEmail"
-                Resource: '*'
-      Tags:
-        - 
-          Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ses-user]]
-        - 
-          Key: Environment
-          Value: !Ref EnvName
-        - 
-          Key: Organization
-          Value: !Ref OrgName
-      UserName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ses-user]]
-
-  SESUserAccessKey:
-    Type: AWS::IAM::AccessKey
-    Properties:
-      UserName: !Ref SESUser
 
 ####
 # AutoScaling Group 
@@ -205,10 +175,7 @@ Resources:
       AWS::CloudFormation::Init: 
         configSets: 
           Basic: 
-            # - InstallLogAgent
             - InstallCustomData
-            # - MountEFS
-            # - InstallCodeDeployAgent
         InstallLogAgent:
           packages:
             yum: 
@@ -375,8 +342,7 @@ Resources:
             command11:
               command: ln -s /mnt/efs/import/product_images /var/magento/import/product_images
     Properties:
-      # KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue'] #For now no key
-      # KeyName: iscale-hosting #Iannis - make this a param
+      KeyName: !If [HasInstanceKey, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref InstanceAMI
       SecurityGroups: [!GetAtt AppServerSecurityGroup.GroupId]
       InstanceType: t3.small #Iannis - make param
