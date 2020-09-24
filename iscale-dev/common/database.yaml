@@ -156,20 +156,20 @@ Parameters:
     Type: String
     Default: aurora-mysql
     AllowedValues:
-      - aurora
+      # - aurora
       - aurora-mysql
       - aurora-postgresql
-      - mariadb
+      # - mariadb
       - mysql
-      - oracle-ee
-      - oracle-se2
-      - oracle-se1
-      - oracle-se
-      - postgres
-      - sqlserver-ee
-      - sqlserver-se
-      - sqlserver-ex
-      - sqlserver-web
+      # - oracle-ee
+      # - oracle-se2
+      # - oracle-se1
+      # - oracle-se
+      # - postgres
+      # - sqlserver-ee
+      # - sqlserver-se
+      # - sqlserver-ex
+      # - sqlserver-web
   EngineVersion:
     Description: The version number of the database engine to use.
     Type: String
@@ -178,6 +178,7 @@ Parameters:
     Description: The amount of storage (in gigabytes) to allocate for the DB instance.
     Type: Number
     Default: 20
+    MinValue: 20
   BackupRetentionPeriod:
     Description: The number of days for which automated backups are retained. Setting this parameter to a positive number enables backups. Setting this parameter to 0 disables automated backups.
     Default: 30
@@ -252,10 +253,15 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsAuroraPostgreSQL: !Equals [!Ref Engine, aurora-postgresql]
+  # IsRDSMySQL: !Equals [!Ref Engine, mysql]
   IsAuroraMySQL: !Equals [!Ref Engine, aurora-mysql]
   IsAurora: !Or [Condition: IsAuroraPostgreSQL, Condition: IsAuroraMySQL]
-  IsNotAurora: !Not [Condition: IsAurora]
+  HasNoCluster: !Not [Condition: IsAurora]
+  HasCluster: !Not [Condition: HasNoCluster]
   HasSnapshot: !Not [!Equals [!Ref SnapshotIdentifier, ""]]
+  HasClusterSnapshot: !And [Condition: HasCluster, Condition: HasSnapshot]
+  HasClusterAndClusterSnapshot: !And [Condition: HasCluster, Condition: HasClusterSnapshot]
+  HasSnapshotAndNoCluster: !And [Condition: HasSnapshot, Condition: HasNoCluster]
   HasSourceDbInstanceIdentifier: !Not [!Equals [!Ref SourceDbInstanceIdentifier, ""]]
   HasBackupWindow: !Not [!Equals [!Ref BackupWindow, ""]]
   IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
@@ -263,63 +269,6 @@ Conditions:
   IsEnableEnhancedMonitoring: !Equals [!Ref EnableEnhancedMonitoring, true]
 
 Resources:
-
-####
-# KMS Section
-####
-
-  # DefaultKmsKey:
-  #   Condition: IsEncrypted
-  #   Type: AWS::KMS::Key
-  #   Properties:
-  #     KeyPolicy:
-  #       Version: 2012-10-17
-  #       Id: key-default-1
-  #       Statement:
-  #         -
-  #           Sid: Enable IAM User Permissions
-  #           Effect: Allow
-  #           Principal:
-  #             AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':root']]
-  #           Action:
-  #             - 'kms:*'
-  #           Resource: '*'
-  #         -
-  #           Sid: Allow administration of the key
-  #           Effect: Allow
-  #           Principal:
-  #             AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':role/MasterAccountAccessRole']]
-  #           Action:
-  #             - "kms:Create*"
-  #             - "kms:Describe*"
-  #             - "kms:Enable*"
-  #             - "kms:List*"
-  #             - "kms:Put*"
-  #             - "kms:Update*"
-  #             - "kms:Revoke*"
-  #             - "kms:Disable*"
-  #             - "kms:Get*"
-  #             - "kms:Delete*"
-  #             - "kms:ScheduleKeyDeletion"
-  #             - "kms:CancelKeyDeletion"
-  #           Resource: '*'
-  #     Tags:
-  #       -
-  #         Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-  #       -
-  #         Key: Environment
-  #         Value: !Ref EnvName
-  #       -
-  #         Key: Organization
-  #         Value: !Ref OrgName
-
-  # DefaultKmsAlias:
-  #   Condition: IsEncrypted
-  #   Type: AWS::KMS::Alias
-  #   Properties:
-  #     AliasName: !Join ['-',[!Join ['/', ["alias", !Ref OrgName]], !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-  #     TargetKeyId: !Ref DefaultKmsKey
 
 ####
 # Lambda Section
@@ -462,11 +411,11 @@ Resources:
     DeletionPolicy: Snapshot
     DependsOn:
       - RDSIamRole
-    Condition: IsAurora
+    Condition: HasCluster
     Properties:
       BackupRetentionPeriod: !Ref BackupRetentionPeriod
       DatabaseName: !Ref DatabaseName
-      DBClusterIdentifier: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      DBClusterIdentifier: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cluster]]
       DBClusterParameterGroupName: !If
         - IsAuroraMySQL
         - !Ref RDSMySQLClusterParameterGroup
@@ -475,12 +424,12 @@ Resources:
       EnableCloudwatchLogsExports:
         !If [IsAuroraMySQL, [audit, error, slowquery], [postgresql]]
       Engine: !Ref Engine
-      MasterUsername: !Ref MasterUser
-      MasterUserPassword: !GetAtt RDSPasswordGenerator.DatabaseRootPassword
+      MasterUsername: !If [HasClusterSnapshot, !Ref 'AWS::NoValue', !Ref MasterUser]
+      MasterUserPassword: !If [HasClusterSnapshot, !Ref 'AWS::NoValue', !GetAtt RDSPasswordGenerator.DatabaseRootPassword]
       Port: !Ref Port
       PreferredBackupWindow: !If [ HasBackupWindow, !Ref BackupWindow, !Ref 'AWS::NoValue']
-      SnapshotIdentifier: !If [ HasSnapshot, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
-      StorageEncrypted: !Ref StorageEncrypted
+      SnapshotIdentifier: !If [HasClusterSnapshot, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
+      StorageEncrypted: !If [HasClusterSnapshot, !Ref 'AWS::NoValue', !Ref StorageEncrypted]
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -495,6 +444,7 @@ Resources:
       Family: aurora-mysql5.7
       Parameters: 
         character_set_database: utf32
+        sql_mode: IGNORE_SPACE
     
   RDSPostgreSQLClusterParameterGroup:
     Type: AWS::RDS::DBClusterParameterGroup
@@ -516,19 +466,33 @@ Resources:
       AllocatedStorage: !If [IsAurora, !Ref 'AWS::NoValue', !Ref AllocatedStorage]
       DBInstanceClass: !Ref InstanceType
       AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
-      DBClusterIdentifier: !If [IsAurora, !Ref RDSCluster, !Ref 'AWS::NoValue']
+      DBClusterIdentifier: !If [HasCluster, !Ref RDSCluster, !Ref 'AWS::NoValue']
       #Let it be random
-      #DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      DBInstanceIdentifier: #only give a name when no cluster. Cluster has a user friendly name
+        Fn::If:
+          - HasNoCluster
+          - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          - !Ref 'AWS::NoValue'
+      DBName: !If [HasNoCluster, !Ref DatabaseName, !Ref 'AWS::NoValue']
       DBParameterGroupName: !Ref RDSParameterGroup
-      DBSnapshotIdentifier: !If [ HasSnapshot, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
+      DBSnapshotIdentifier: !If [HasSnapshotAndNoCluster, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
       DBSubnetGroupName: !Ref DBSubnetGroup
       Engine: !Ref Engine
-      # KmsKeyId: !If [IsEncrypted, !GetAtt DefaultKmsKey.Arn, !Ref 'AWS::NoValue']
+      MasterUsername: !If [HasNoCluster, !Ref MasterUser, !Ref 'AWS::NoValue']
+      MasterUserPassword: !If [HasNoCluster, !GetAtt RDSPasswordGenerator.DatabaseRootPassword, !Ref 'AWS::NoValue']
+      StorageEncrypted: !If [HasNoCluster, !Ref StorageEncrypted, !Ref 'AWS::NoValue']
+      StorageType: !If [HasNoCluster, gp2, !Ref 'AWS::NoValue']
       MonitoringRoleArn: !If [IsEnableEnhancedMonitoring, !GetAtt RDSIamRole.Arn, !Ref 'AWS::NoValue']
       MonitoringInterval: !If [IsEnableEnhancedMonitoring, !Ref MonitoringInterval, !Ref 'AWS::NoValue']
       MultiAZ: !Ref MultiAz
+      Port: !If [HasNoCluster, !Ref Port, !Ref 'AWS::NoValue']
       PubliclyAccessible: false
       SourceDBInstanceIdentifier: !If [ HasSourceDbInstanceIdentifier, !Ref SourceDbInstanceIdentifier, !Ref 'AWS::NoValue']
+      VPCSecurityGroups: 
+        Fn::If:
+            - HasNoCluster
+            - - !GetAtt RDSSecurityGroup.GroupId
+            - !Ref 'AWS::NoValue'
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -809,6 +773,7 @@ Outputs:
     Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
   DBClusterARN:
+    Condition: IsAurora
     Description: ARN of the created RDS cluster
     Value: !Join [":", ["arn:aws:rds", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "cluster", !Ref RDSCluster]]
 
@@ -820,11 +785,16 @@ Outputs:
     Description: The security group id of the RDS instance
     Value: !GetAtt RDSSecurityGroup.GroupId
 
-  EndpointAddress:
+  DBInstanceAddress:
     Description: The endpoint address of the RDS instance
     Value: !GetAtt DBInstance.Endpoint.Address
 
+  DBInstancePort:
+    Description: The port number of the RDS instance
+    Value: !Ref Port
+  
   ClusterPort:
+    Condition: IsAurora
     Description: The port number of the RDS cluster
     Value: !Ref Port
 
