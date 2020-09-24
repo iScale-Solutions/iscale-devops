@@ -111,6 +111,7 @@ Parameters:
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
+    Default: ''
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
     Type: Number
@@ -120,7 +121,7 @@ Parameters:
   LoadBalancerStackName:
     Description: THe name of the load balancer stack.
     Type: String
-    Default: iscale-dev-stg-uw2-alb
+    Default: cloudcfo-stg-uw2-alb
     MinLength: 1
   NetworkStackName:
     Description: The name of the network stack.
@@ -155,21 +156,43 @@ Conditions:
       
 Resources:
 
+  # DBStack: 
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties: 
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+  #       EnableCPUCreditAlarm: true
+  #       EnableEnhancedMonitoring: true
+  #       EnvName: !Ref EnvName
+  #       Engine: aurora-mysql
+  #       EngineVersion: 2.09.0 #5.7.12 previously
+  #       Family: aurora-mysql5.7
+  #       InstanceType: db.t3.small
+  #       MasterUser: root
+  #       NetworkStackName: !Ref NetworkStackName
+  #       OrgName: !Ref OrgName
+  #       SNSStackName: !Ref SNSStackName
+  #       StorageEncrypted: true
+
   DBStack: 
     Type: AWS::CloudFormation::Stack
     Properties: 
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
       Parameters: 
         Name: !Ref Name
-        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: 20 #Gb
         EnableCPUCreditAlarm: true
         EnableEnhancedMonitoring: true
         EnvName: !Ref EnvName
-        Engine: aurora-mysql
-        EngineVersion: 5.7.12
-        Family: aurora-mysql5.7
-        InstanceType: db.t3.small
+        Engine: mysql
+        EngineVersion: 8.0.20
+        Family: mysql8.0
+        InstanceType: !If [IsProd, db.t3.small, db.t3.micro]
         MasterUser: root
+        MultiAz: !If [IsProd, true, false]
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
@@ -205,11 +228,11 @@ Resources:
         DatabaseEndpoint: 
           Fn::GetAtt:
             - DBStack
-            - Outputs.ClusterEndpointAddress
+            - Outputs.DBInstanceAddress
         DatabasePort: 
           Fn::GetAtt:
             - DBStack
-            - Outputs.ClusterPort
+            - Outputs.DBInstancePort
         DatabaseSecurityGroupId:
           Fn::GetAtt:
             - DBStack
@@ -219,25 +242,25 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         ClientDomainName: !Ref ClientDomainName
 
-  BackupStack:
-    DependsOn: 
-      - DBStack
-      - AppServerStack
-    Type: AWS::CloudFormation::Stack
-    Properties: 
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
-      Parameters: 
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        BackupARNList: !Join
-          - ','
-          - - Fn::GetAtt:
-              - DBStack
-              - Outputs.DBClusterARN
-            - Fn::GetAtt:
-              - AppServerStack
-              - Outputs.AppServerEFSArn
+  # BackupStack:
+  #   DependsOn: 
+  #     - DBStack
+  #     - AppServerStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties: 
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       BackupARNList: !Join
+  #         - ','
+  #         - - Fn::GetAtt:
+  #             - DBStack
+  #             - Outputs.DBInstanceARN
+  #           - Fn::GetAtt:
+  #             - AppServerStack
+  #             - Outputs.AppServerEFSArn
 
 #   SchedulerStack: 
 #     DependsOn: 
