@@ -66,9 +66,10 @@ Conditions:
 
 Resources:
 
-  BackupVault:
+  ProdBackupVault:
+    Condition: IsProd
     Type: AWS::Backup::BackupVault
-    DeletionPolicy: Retain
+    DeletionPolicy: Retain #Prod vaults are retained
     Properties:
       BackupVaultName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], vault]]
       BackupVaultTags:
@@ -76,29 +77,40 @@ Resources:
         Environment: !Ref EnvName
         Organization: !Ref OrgName
 
-  BackupPlan:
-    DependsOn: BackupVault
+  NonProdBackupVault:
+    Condition: IsNotProd #No retention for non-prod
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], vault]]
+      BackupVaultTags:
+        Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+  ProdBackupPlan:
+    Condition: IsProd
+    DependsOn: ProdBackupVault
     Type: AWS::Backup::BackupPlan
     Properties:
       BackupPlan:
-        BackupPlanName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-plan]]
+        BackupPlanName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup,plan]]
         BackupPlanRule:
           - RuleName: DailyBackup
-            TargetBackupVault: !Ref BackupVault
+            TargetBackupVault: !Ref ProdBackupVault
             ScheduleExpression: "cron(0 15 ? * * *)"
             StartWindowMinutes: 480
             CompletionWindowMinutes: 10080
             Lifecycle:
               DeleteAfterDays: 35
           - RuleName: WeeklyBackup
-            TargetBackupVault: !Ref BackupVault
+            TargetBackupVault: !Ref ProdBackupVault
             ScheduleExpression: "cron(0 15 ? * 7 *)"
             StartWindowMinutes: 480
             CompletionWindowMinutes: 10080
             Lifecycle:
               DeleteAfterDays: 90
           - RuleName: MonthlyBackup
-            TargetBackupVault: !Ref BackupVault
+            TargetBackupVault: !Ref ProdBackupVault
             ScheduleExpression: "cron(0 15 1 * ? *)"
             StartWindowMinutes: 480
             CompletionWindowMinutes: 10080
@@ -106,7 +118,27 @@ Resources:
               MoveToColdStorageAfterDays: 90
               DeleteAfterDays: 1825
       BackupPlanTags:
-        Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-plan]]
+        Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup, plan]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+  NonProdBackupPlan:
+    Condition: IsNotProd
+    DependsOn: NonProdBackupVault
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup,plan]]
+        BackupPlanRule: #only simple daily backup for non prod
+          - RuleName: DailyBackup
+            TargetBackupVault: !Ref NonProdBackupVault
+            ScheduleExpression: "cron(0 9 ? * * *)" #Non prod usually only open during day time
+            StartWindowMinutes: 480
+            CompletionWindowMinutes: 10080
+            Lifecycle:
+              DeleteAfterDays: 35
+      BackupPlanTags:
+        Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup, plan]]
         Environment: !Ref EnvName
         Organization: !Ref OrgName
           
@@ -128,11 +160,10 @@ Resources:
        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
 
   BackupSelection:
-    DependsOn: BackupPlan  
     Type: AWS::Backup::BackupSelection
     Properties:
-      BackupPlanId: !Ref BackupPlan
+      BackupPlanId: !If [IsProd, !Ref ProdBackupPlan, !Ref NonProdBackupPlan]
       BackupSelection:
         SelectionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-selection]]
         IamRoleArn: !GetAtt BackupRole.Arn
-        Resources: !Ref BackupARNList        
+        Resources: !Ref BackupARNList
