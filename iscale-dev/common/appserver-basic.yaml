@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: This  template provisions a basic EC2 instance on Amazon Linux with all surrounding objects
+Description: This  template provisions a basic EC2 instance with just simple env set
 
 Metadata:
   AWS::CloudFormation::Interface: 
@@ -166,7 +166,7 @@ Resources:
       Location: s3://iscale-dev-cloudformation/include/appserver.yaml
 
 ####
-# SES Section (Need to make this optional)
+# SES Section (Need to make this optional - move it to appserver.yaml in include)
 ####
 
   SESUser:
@@ -211,72 +211,8 @@ Resources:
         configSets: 
           Basic: 
             - InstallCustomData
-        InstallLogAgent:
-          packages:
-            yum: 
-              awslogs: []
-          commands:
-            command01:
-              command: cp -fv /etc/awslogs/awscli.region /etc/awslogs/awscli.conf
-            command02:
-              command: rm -fv /etc/awslogs/awscli.region
-            command03:
-              command: service awslogs start
-            command04:
-              command: chkconfig awslogs on
-          files:
-            /etc/awslogs/config/cfn-init.conf:
-              content: !Sub
-                |
-                [/var/log/cfn-init.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/cfn-init.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/cfn-init.log
-            /etc/awslogs/config/cfn-init-cmd.conf:
-              content: !Sub
-                |
-                [/var/log/cfn-init-cmd.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/cfn-init-cmd.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/cfn-init-cmd.log
-            /etc/awslogs/config/ssm.conf:
-              content: !Sub
-                |
-                [/var/log/amazon/ssm/amazon-ssm-agent.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/amazon/ssm/amazon-ssm-agent.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/amazon/ssm/amazon-ssm-agent.log
-            /etc/awslogs/config/deployments.conf:
-              content: !Sub
-                |
-                [codedeploy-agent-deployments.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /opt/codedeploy-agent/deployment-root/deployment-logs/codedeploy-agent-deployments.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/codedeploy-agent-deployments.log
-            /etc/awslogs/awscli.region:
-              content: !Sub
-                |
-                [plugins]
-                cwlogs = cwlogs
-                [default]
-                region = ${AWS::Region}
-            
+            # - ExecuteCustomInit
         InstallCustomData:
-          packages:
-            yum: 
-              jq: []
           files:
             /var/lib/cloud/instance/custom-data.sh: 
               content: !Sub
@@ -309,73 +245,11 @@ Resources:
               permissions: 0700
               owner: root
               group: root
-        
-        InstallCodeDeployAgent:
-          packages:
-            yum: 
-              wget: []
-              ruby: []
-          files:
-            /etc/awslogs/config/codedeploy.conf:
-              content: !Sub
-                |
-                [/var/log/aws/codedeploy-agent/codedeploy-agent.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/aws/codedeploy-agent/codedeploy-agent.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/aws/codedeploy-agent/codedeploy-agent.log
-          commands:
-            command01:
-              command: service awslogs restart # To pickup the log file and troubleshoot issues
-            command03:
-              command: wget https://$BUCKETNAME.s3.$REGION.amazonaws.com/latest/install
-              cwd: /home/ec2-user
-              env:
-                BUCKETNAME: !Join ['-', ['aws-codedeploy', !Ref 'AWS::Region']]
-                REGION: !Ref 'AWS::Region'
-            command04:
-              command: chmod u+x install
-              cwd: /home/ec2-user
-            command05:
-              command: ./install auto
-              cwd: /home/ec2-user
-            command06:
-              command: chkconfig codedeploy-agent on
-            command07:
-              command: rm -fv ./install
-              cwd: /home/ec2-user
+        # ExecuteCustomInit:
+        #   commands:
+        #     command01:
+        #       command:
 
-        MountEFS:
-          packages:
-            yum: 
-              amazon-efs-utils: []
-          commands:
-            command02:
-              command: mkdir -p /mnt/efs
-            command03:
-              command: mkdir -p /var/magento/import
-            command04:
-              command: mkdir -p /var/magento/pub/
-            command05:
-              command: mkdir -p /var/magento/import/
-            command06:
-              command: mount -t efs -o tls,iam $EFS_ID /mnt/efs
-              env:
-                EFS_ID: !Ref AppServerFileSystem
-            command07:
-              command: echo '$EFS_ID:/ /mnt/efs efs _netdev,tls,iam 0 0' >> /etc/fstab
-              env:
-                EFS_ID: !Ref AppServerFileSystem
-            command08:
-              command: mkdir -p /mnt/efs/pub/media
-            command09:
-              command: mkdir -p /mnt/efs/import/product_images
-            command10:
-              command: ln -s /mnt/efs/pub/media /var/magento/pub/media
-            command11:
-              command: ln -s /mnt/efs/import/product_images /var/magento/import/product_images
     Properties:
       KeyName: !If [HasInstanceKey, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref InstanceAMI
@@ -436,7 +310,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /
+      HealthCheckPath: / #Need to be a parameter
       HealthCheckProtocol: HTTP
       HealthCheckTimeoutSeconds: 10
       HealthyThresholdCount: 2
