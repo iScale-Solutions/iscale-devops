@@ -30,6 +30,7 @@ Metadata:
         Parameters:
           - ClientDomainName
           - LoadBalancerPriority
+          - LoadBalancerPriority2
       -
         Label:
           default: Scheduler Configuration
@@ -56,7 +57,9 @@ Metadata:
       InstanceAMI:
         default: Instance AMI
       LoadBalancerPriority:
-        default: Load Balancer Rule Priority
+        default: Load Balancer Rule 1 Priority
+      LoadBalancerPriority2:
+        default: Load Balancer Rule 2 Priority
       LoadBalancerStackName:
         default: Load Balancer Stack Name
       NetworkStackName:
@@ -112,9 +115,15 @@ Parameters:
     Type: String
     Default: ''
   LoadBalancerPriority:
-    Description: The priority for ELB Listener.
+    Description: The priority for ELB Listener (first rule).
     Type: Number
     Default: 300
+    MinValue: 1
+    MaxValue: 50000
+  LoadBalancerPriority2:
+    Description: The priority for ELB Listener (second rule).
+    Type: Number
+    Default: 301
     MinValue: 1
     MaxValue: 50000
   LoadBalancerStackName:
@@ -173,7 +182,6 @@ Resources:
         Port: 5432
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
-        #SnapshotIdentifier: !If [IsStaging, arn:aws:rds:us-west-2:338284463834:cluster-snapshot:bowtie-with-staging-data, !Ref 'AWS::NoValue']
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
@@ -192,7 +200,6 @@ Resources:
   AppServerStack: 
     DependsOn: 
       - DBStack
-      # - DeployStack
     Type: AWS::CloudFormation::Stack
     Properties: 
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
@@ -232,14 +239,6 @@ Resources:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        # BackupARNList: !Join
-        #   - ','
-        #   - - Fn::GetAtt:
-        #       - DBStack
-        #       - Outputs.DBClusterARN
-        #     - Fn::GetAtt:
-        #       - AppServerStack
-        #       - Outputs.AppServerEFSArn
         BackupARNList: 
           Fn::GetAtt:
             - DBStack
@@ -271,6 +270,66 @@ Resources:
           Fn::GetAtt:
             - DeployStack
             - Outputs.CodeDeployDeploymentGroupName
+
+
+  #####
+  # In addition, create a special bowtieduck.staging.iscale-software.com record
+  #####
+
+  BTDStagingELBDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsStaging
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - bowtieduck 
+                - Fn::FindInMap:
+                  - EnvLowerCase
+                  - Ref: EnvName
+                  - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  BTDStagingSSLListenerRule:
+    Condition: IsStaging
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions:
+        - Type: forward
+          TargetGroupArn: 
+            Fn::GetAtt:
+              - AppServerStack
+              - Outputs.AppServerTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values:
+            - Fn::Join:
+              - '.'
+              - - bowtieduck 
+                - Fn::FindInMap:
+                  - EnvLowerCase
+                  - Ref: EnvName
+                  - Name
+                - Ref: ClientDomainName
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority:
+        Ref: LoadBalancerPriority2
         
 Outputs:
   DeploymentUserGroup:
