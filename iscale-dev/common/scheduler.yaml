@@ -16,6 +16,7 @@ Metadata:
           default: Scheduled Objects
         Parameters:
           - DatabaseClusterArn
+          - DatabaseKInstanceArn
           - CodeDeployApplicationName
           - CodeDeployDeploymentGroupName
 
@@ -38,6 +39,8 @@ Metadata:
         default: CodeDeploy Deployment Group name
       DatabaseClusterArn:
         default: Database Cluster ARN
+      DatabaseInstanceArn:
+        default: Database Instance ARN
       StartScheduleExpression:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
@@ -74,7 +77,11 @@ Parameters:
     Type: String
     Default: ""
   DatabaseClusterArn:
-    Description: The name of the database cluster
+    Description: The name of a database cluster
+    Type: String
+    Default: ""
+  DatabaseInstanceArn:
+    Description: The name of a database instance
     Type: String
     Default: ""
   StartScheduleExpression:
@@ -106,9 +113,12 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasStartSchedule: !Not [!Equals [!Ref StartScheduleExpression, ""]]
   HasStopSchedule: !Not [!Equals [!Ref StopScheduleExpression, ""]]
-  HasDB: !Not [!Equals [!Ref DatabaseClusterArn, ""]]
-  HasDBAndStartSchedule: !And [Condition: HasDB, Condition: HasStartSchedule]
-  HasDBAndStopSchedule: !And [Condition: HasDB, Condition: HasStopSchedule]
+  HasDBCluster: !Not [!Equals [!Ref DatabaseClusterArn, ""]]
+  HasDBInstance: !Not [!Equals [!Ref DatabaseInstanceArn, ""]]
+  HasDBClusterAndStartSchedule: !And [Condition: HasDBCluster, Condition: HasStartSchedule]
+  HasDBInstanceAndStartSchedule: !And [Condition: HasDBInstance, Condition: HasStartSchedule]
+  HasDBClusterAndStopSchedule: !And [Condition: HasDBCluster, Condition: HasStopSchedule]
+  HasDBInstanceAndStopSchedule: !And [Condition: HasDBInstance, Condition: HasStopSchedule]
   HasCodeDeploy: !And [!Not [!Equals [!Ref CodeDeployApplicationName, ""]], !Not [!Equals [!Ref CodeDeployDeploymentGroupName, ""]]]
   HasCodeDeployAndStartSchedule: !And [Condition: HasCodeDeploy, Condition: HasStartSchedule]
   HasCodeDeployAndStopSchedule: !And [Condition: HasCodeDeploy, Condition: HasStopSchedule]
@@ -121,7 +131,7 @@ Resources:
 ####
 
   LambdaScheduleDBClusterRole:
-    Condition: HasDB
+    Condition: HasDBCluster
     Type: AWS::IAM::Role
     Properties:
       Path: /
@@ -133,24 +143,60 @@ Resources:
             Principal:
               Service:
                 - lambda.amazonaws.com
-            Action: 
+            Action:
               - sts:AssumeRole
       Policies:
-        - 
+        -
           PolicyName: ScheduleDBClusterPolicy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              - 
+              -
                 Effect: Allow
-                Action: 
+                Action:
                   - rds:DescribeDBClusters
                   - rds:StopDBCluster
                   - rds:StartDBCluster
                 Resource: !Ref DatabaseClusterArn
-              - 
+              -
                 Effect: Allow
-                Action: 
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  LambdaScheduleDBInstanceRole:
+    Condition: HasDBInstance
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        -
+          PolicyName: ScheduleDBClusterPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:StopDBInstance
+                  - rds:StartDBInstance
+                Resource: !Ref DatabaseInstanceArn
+              -
+                Effect: Allow
+                Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
@@ -169,22 +215,22 @@ Resources:
             Principal:
               Service:
                 - lambda.amazonaws.com
-            Action: 
+            Action:
               - sts:AssumeRole
       Policies:
-        - 
+        -
           PolicyName: ScheduleAutoScalingPolicy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              - 
+              -
                 Effect: Allow
-                Action: 
+                Action:
                   - codedeploy:GetDeploymentGroup
                 Resource: !Join [":", ["arn:aws:codedeploy", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "deploymentgroup", !Join ['/', [!Ref CodeDeployApplicationName, !Ref CodeDeployDeploymentGroupName]]]]
-              - 
+              -
                 Effect: Allow
-                Action: 
+                Action:
                   - autoscaling:SetDesiredCapacity
                   #the auto scaling group name will change dynamically with blue green and needs to be made a bit wide here. However client name should still be there
                 Resource: !Join [":", ["arn:aws:autoscaling", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "autoScalingGroup", '*', !Join ['', ['autoScalingGroupName/', !Join ['', ['*', !Ref Name, '*']]]]]]
@@ -194,12 +240,12 @@ Resources:
 ####
 
   StartDBClusterFunction:
-    Condition: HasDBAndStartSchedule
+    Condition: HasDBClusterAndStartSchedule
     Type: AWS::Lambda::Function
     Properties:
-      Description: Lambda Function starting a DB cluster on a given schedule
+      Description: Lambda Function starting a DB cluster
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaScheduleDBClusterRole.Arn 
+      Role: !GetAtt LambdaScheduleDBClusterRole.Arn
       Runtime: python3.6
       Timeout: 60
       Environment:
@@ -223,19 +269,55 @@ Resources:
             try:
               rds = boto3.client('rds',region_name=region)
 
-              logger.info('Starting Cluster : ' + str(ClusterID))
+              logger.info('Starting DB Cluster : ' + str(ClusterID))
               rds.start_db_cluster(DBClusterIdentifier=ClusterID)
 
             except Exception:
               logger.exception('Error Encountered')
 
-  StopDBClusterFunction:
-    Condition: HasDBAndStopSchedule
+  StartDBInstanceFunction:
+    Condition: HasDBInstanceAndStartSchedule
     Type: AWS::Lambda::Function
     Properties:
-      Description: Lambda Function stopping a DB cluster on a given schedule
+      Description: Lambda Function starting a DB instance
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaScheduleDBClusterRole.Arn 
+      Role: !GetAtt LambdaScheduleDBInstanceRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_ID: !Ref DatabaseInstanceArn
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            InstanceID=os.environ['INSTANCE_ID']
+            
+            try:
+              rds = boto3.client('rds',region_name=region)
+
+              logger.info('Starting DB Instance : ' + str(InstanceID))
+              rds.start_db_Instance(DBInstanceIdentifier=InstanceID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopDBClusterFunction:
+    Condition: HasDBClusterAndStopSchedule
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function stopping a DB cluster
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleDBClusterRole.Arn
       Runtime: python3.6
       Timeout: 60
       Environment:
@@ -259,8 +341,44 @@ Resources:
             try:
               rds = boto3.client('rds',region_name=region)
 
-              logger.info('Stopping Cluster : ' + str(ClusterID))
+              logger.info('Stopping DB Cluster : ' + str(ClusterID))
               rds.stop_db_cluster(DBClusterIdentifier=ClusterID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+  
+  StopDBInstanceFunction:
+    Condition: HasDBInstanceAndStopSchedule
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function stopping a DB instance
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleDBInstanceRole.Arn 
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_ID: !Ref DatabaseInstanceArn
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            InstanceID=os.environ['INSTANCE_ID']
+            
+            try:
+              rds = boto3.client('rds',region_name=region)
+
+              logger.info('Stopping DB Instance : ' + str(InstanceID))
+              rds.stop_db_cluster(DBInstanceIdentifier=InstanceID)
 
             except Exception:
               logger.exception('Error Encountered')
@@ -271,7 +389,7 @@ Resources:
     Properties:
       Description: Lambda Function bringing an autoscaling group size to 0
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaScheduleAutoScalingRole.Arn 
+      Role: !GetAtt LambdaScheduleAutoScalingRole.Arn
       Runtime: python3.6
       Timeout: 60
       Environment:
@@ -300,7 +418,7 @@ Resources:
               logger.info('Retrieving Deployment Group details for : ' + str(appName) + '/' + str(groupName))
               response = codedeploy.get_deployment_group(
                             applicationName=appName,
-                            deploymentGroupName=groupName 
+                            deploymentGroupName=groupName
                           )
               
               logger.info(response)
@@ -327,7 +445,7 @@ Resources:
     Properties:
       Description: Lambda Function bringing an autoscaling group size to 1
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaScheduleAutoScalingRole.Arn 
+      Role: !GetAtt LambdaScheduleAutoScalingRole.Arn
       Runtime: python3.6
       Timeout: 60
       Environment:
@@ -356,7 +474,7 @@ Resources:
               logger.info('Retrieving Deployment Group details for : ' + str(appName) + '/' + str(groupName))
               response = codedeploy.get_deployment_group(
                             applicationName=appName,
-                            deploymentGroupName=groupName 
+                            deploymentGroupName=groupName
                           )
               
               logger.info(response)
@@ -383,7 +501,7 @@ Resources:
 
   StartScheduledDBEventRule:
     Type: AWS::Events::Rule
-    Condition: HasDBAndStartSchedule
+    Condition: HasDBClusterAndStartSchedule
     Properties:
       Name: !If
         - UseFriendlyNames
@@ -393,8 +511,8 @@ Resources:
       ScheduleExpression: !Ref StartScheduleExpression
       State:  ENABLED
       Targets:
-      - 
-        Arn: !GetAtt StartDBClusterFunction.Arn 
+      -
+        Arn: !GetAtt StartDBClusterFunction.Arn
         Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstart]]
       
   StartScheduledASGEventRule:
@@ -409,12 +527,12 @@ Resources:
       ScheduleExpression: !Ref StartScheduleExpression
       State:  ENABLED
       Targets:
-      - 
+      -
         Arn: !GetAtt StartDeploymentASGFunction.Arn
         Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscalingstart]]
 
   ScheduledEventPermissionToStartCluster:
-    Condition: HasDBAndStartSchedule
+    Condition: HasDBClusterAndStartSchedule
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref StartDBClusterFunction
@@ -433,7 +551,7 @@ Resources:
 
   StopScheduledDBEventRule:
     Type: AWS::Events::Rule
-    Condition: HasDBAndStopSchedule
+    Condition: HasDBClusterAndStopSchedule
     Properties:
       Name: !If
         - UseFriendlyNames
@@ -441,7 +559,7 @@ Resources:
         - !Ref 'AWS::NoValue'
       Description: !Join [' ',[ "Stop", !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], "at a specified time"]]
       ScheduleExpression: !Ref StopScheduleExpression
-      State:  ENABLED
+      State: ENABLED
       Targets:
       - 
         Arn: !GetAtt StopDBClusterFunction.Arn
@@ -459,17 +577,17 @@ Resources:
       ScheduleExpression: !Ref StopScheduleExpression
       State:  ENABLED
       Targets:
-      - 
+      -
         Arn: !GetAtt StopDeploymentASGFunction.Arn
         Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscalingstop]]
 
   ScheduledEventPermissionToStopCluster:
-    Condition: HasDBAndStopSchedule
+    Condition: HasDBClusterAndStopSchedule
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref StopDBClusterFunction
-      Action:  lambda:InvokeFunction
-      Principal:  events.amazonaws.com
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
       SourceArn: !GetAtt StopScheduledDBEventRule.Arn
 
   ScheduledEventPermissionToReduceAutoScalingGroup:
