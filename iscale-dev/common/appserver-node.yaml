@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: This template provisions a raw EC2 AMI without any inside setup. AMI will take care of itself
+Description: Magento EC2 instance using Amazon Linux with all surrounding objects
 
 Metadata:
   AWS::CloudFormation::Interface: 
@@ -19,16 +19,16 @@ Metadata:
           - SNSStackName
       -
         Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+          - InstancePort
+      -
+        Label:
           default: Load Balancer Configuration
         Parameters:
           - LoadBalancerPriority
-      -
-        Label:
-          default: Instance Configuration
-        Parameters:
-          - InstanceOS
-          - InstanceAMI
-          - InstanceKeyName
       -
         Label:
           default: Domain Configuration
@@ -55,6 +55,12 @@ Metadata:
         default: Database Port
       DatabaseSecurityGroupId:
         default: Database Security Group
+      InstanceAMI:
+        default: Instance AMI ID
+      InstancePort:
+        default: Instance Application Port
+      InstanceKeyName:
+        default: Instance Key Name
       LoadBalancerStackName:
         default: Load Balancer Stack Name
       NetworkStackName:
@@ -63,12 +69,6 @@ Metadata:
         default: SNS Topic Stack Name
       ClientDomainName:
         default: Domain Name
-      InstanceAMI:
-        default: Instance AMI ID
-      InstanceKeyName:
-        default: Instance Key Name
-      InstanceOS:
-        default: Instance Operating System
 
 Parameters:
   OrgName:
@@ -112,12 +112,12 @@ Parameters:
     Description: Instance Key Name
     Type: String
     Default: ''
-  InstanceOS:
-    Description: Instance Operating System
-    Type: String
-    AllowedValues:
-      - Amazon
-      - Ubuntu
+  InstancePort:
+    Description: Database Port Number
+    Type: Number
+    Default: 80 #Assume HTTP port as default on port 80
+    MinValue: 1
+    MaxValue: 65535
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
     Type: Number
@@ -132,7 +132,7 @@ Parameters:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
     MinLength: 3
-    MaxLength: 9
+    MaxLength: 8
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
@@ -155,8 +155,6 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
-  IsAmazonLinux: !Equals [InstanceOS, Amazon]
-  IsUbuntu: !Equals [InstanceOS, Ubuntu]
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
 
 Resources:
@@ -166,7 +164,7 @@ Resources:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/appserver.yaml
-
+  
 ####
 # AutoScaling Group 
 ####
@@ -176,41 +174,33 @@ Resources:
     Metadata: 
       AWS::CloudFormation::Init: 
         configSets: 
-          Raw: 
+          NodeJS: 
+            - InstallLogAgent
             - InstallCustomData
-        InstallCustomData:
-          packages:
-            yum: 
-              jq: []
-          files:
-            /var/lib/cloud/instance/custom-data.sh: 
-              content: !Sub
-                - |
-                  STACK_NAME=${AWS::StackName}
-                  AWS_REGION=${AWS::Region}
-                  DOMAIN=${DOMAIN}
-                  ENVIRONMENT=${ENVIRONMENT}
-                  CLIENT_NAME=${CLIENT_NAME}
-                  APPLICATION_SITE=${APPLICATION_SITE}
-                  INSTANCE_ROLE=${INSTANCE_ROLE}
-                  SECRET_ID=${SECRET_ID}
-                  BASE_URL=https://${DOMAIN}/
-                  BUCKET_NAME=${BUCKET_NAME}
-                  DB_HOST=${DB_HOST}
-                  DB_PORT=${DB_PORT}
-                - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
-                  ENVIRONMENT: !Ref EnvName
-                  CLIENT_NAME: !Ref Name
-                  APPLICATION_SITE: !Ref OrgName
-                  INSTANCE_ROLE: !Ref AppServerIamRole
-                  SECRET_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-                  BUCKET_NAME: !Ref DataS3Bucket
-                  DB_HOST: !Ref DatabaseEndpoint
-                  DB_PORT: !Ref DatabasePort
-              permissions: 0700
-              owner: root
-              group: root
+            - InstallEFS
+            - InstallCodeDeployAgent
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://iscale-dev-cloudformation/include/installLogAgent.yaml
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://iscale-dev-cloudformation/include/installCustomData.yaml
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://iscale-dev-cloudformation/include/installCodeDeploy.yaml
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://iscale-dev-cloudformation/include/installEFS.yaml
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://iscale-dev-cloudformation/include/installMySQLClient.yaml
         
+
     Properties:
       KeyName: !If [HasInstanceKey, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref InstanceAMI
@@ -225,12 +215,12 @@ Resources:
             #!/bin/bash -xe
             # yum update -y
             # Install the files and packages from the metadata
-            # yum install -y aws-cfn-bootstrap
-            /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c Raw --region ${AWS::Region} --role ${ROLE}
+            yum install -y aws-cfn-bootstrap
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c NodeJS --region ${AWS::Region} --role ${ROLE}
             # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
-             /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
             # Signal the status from cfn-init
-             /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
           - ROLE: !Ref AppServerIamRole
 
   AppServerAutoScalingGroup:
@@ -238,11 +228,18 @@ Resources:
     UpdatePolicy:
       AutoScalingReplacingUpdate:
         WillReplace: true
+    # CreationPolicy:
+    #   AutoScalingCreationPolicy:
+    #     MinSuccessfulInstancesPercent: 100
+      # ResourceSignal:
+      #   Count: 1
+      #   Timeout: PT5M
     Properties:
       Cooldown: 60
       MaxSize: 1
       MinSize: 0
-      DesiredCapacity: 1
+      DesiredCapacity: 0 #Make it zero as it will be taken away by blue green
+      AutoScalingGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, default, ASG]]
       VPCZoneIdentifier:
         -
           Fn::ImportValue:
@@ -271,13 +268,14 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /
+      HealthCheckPath: /health.php
       HealthCheckProtocol: HTTP
       HealthCheckTimeoutSeconds: 10
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
       Matcher: 
-        HttpCode: 200,302
+        HttpCode: 200
+      Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
       Port: 80
       Protocol: HTTP
       VpcId:  
