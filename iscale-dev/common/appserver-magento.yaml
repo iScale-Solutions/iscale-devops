@@ -23,6 +23,7 @@ Metadata:
         Parameters:
           - InstanceKeyName
           - InstanceAMI
+          - InstancePort
       -
         Label:
           default: Load Balancer Configuration
@@ -64,6 +65,8 @@ Metadata:
         default: Instance AMI ID
       InstanceKeyName:
         default: Instance Key Name
+      InstancePort:
+        default: Instance Application Port
       LoadBalancerStackName:
         default: Load Balancer Stack Name
       NetworkStackName:
@@ -119,6 +122,12 @@ Parameters:
     Description: Instance Key Name
     Type: String
     Default: ''
+  InstancePort:
+    Description: Database Port Number
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 65535
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
     Type: Number
@@ -188,72 +197,15 @@ Resources:
           Magento: 
             - InstallLogAgent
             - InstallCustomData
-            - MountEFS
-            - SetupMySQLClient
+            - InstallEFS
+            - InstallMySQLClient
             - SetupApache
             - SetupComposer
             - InstallCodeDeployAgent
-        InstallLogAgent:
-          packages:
-            yum: 
-              awslogs: []
-          commands:
-            command01:
-              command: cp -fv /etc/awslogs/awscli.region /etc/awslogs/awscli.conf
-            command02:
-              command: rm -fv /etc/awslogs/awscli.region
-            command03:
-              command: service awslogs start
-            command04:
-              command: chkconfig awslogs on
-          files:
-            /etc/awslogs/config/cfn-init.conf:
-              content: !Sub
-                |
-                [/var/log/cfn-init.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/cfn-init.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/cfn-init.log
-            /etc/awslogs/config/cfn-init-cmd.conf:
-              content: !Sub
-                |
-                [/var/log/cfn-init-cmd.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/cfn-init-cmd.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/cfn-init-cmd.log
-            /etc/awslogs/config/ssm.conf:
-              content: !Sub
-                |
-                [/var/log/amazon/ssm/amazon-ssm-agent.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/amazon/ssm/amazon-ssm-agent.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/amazon/ssm/amazon-ssm-agent.log
-            /etc/awslogs/config/deployments.conf:
-              content: !Sub
-                |
-                [codedeploy-agent-deployments.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /opt/codedeploy-agent/deployment-root/deployment-logs/codedeploy-agent-deployments.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/codedeploy-agent-deployments.log
-            /etc/awslogs/awscli.region:
-              content: !Sub
-                |
-                [plugins]
-                cwlogs = cwlogs
-                [default]
-                region = ${AWS::Region}
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://iscale-dev-cloudformation/include/installLogAgent.yaml
             
         InstallCustomData:
           packages:
@@ -292,69 +244,20 @@ Resources:
               owner: root
               group: root
         
-        InstallCodeDeployAgent:
-          packages:
-            yum: 
-              wget: []
-              ruby: []
-          files:
-            /etc/awslogs/config/codedeploy.conf:
-              content: !Sub
-                |
-                [/var/log/aws/codedeploy-agent/codedeploy-agent.log]
-                datetime_format = %b %d %H:%M:%S
-                file = /var/log/aws/codedeploy-agent/codedeploy-agent.log
-                buffer_duration = 5000
-                log_stream_name = {instance_id}
-                initial_position = start_of_file
-                log_group_name = /var/log/aws/codedeploy-agent/codedeploy-agent.log
-          commands:
-            command01:
-              command: service awslogs restart # To pickup the log file and troubleshoot issues
-            command03:
-              command: wget https://$BUCKETNAME.s3.$REGION.amazonaws.com/latest/install
-              cwd: /home/ec2-user
-              env:
-                BUCKETNAME: !Join ['-', ['aws-codedeploy', !Ref 'AWS::Region']]
-                REGION: !Ref 'AWS::Region'
-            command04:
-              command: chmod u+x install
-              cwd: /home/ec2-user
-            command05:
-              command: ./install auto
-              cwd: /home/ec2-user
-            command06:
-              command: chkconfig codedeploy-agent on
-            command07:
-              command: rm -fv ./install
-              cwd: /home/ec2-user
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://iscale-dev-cloudformation/include/installCodeDeploy.yaml
 
-        MountEFS:
-          packages:
-            yum: 
-              amazon-efs-utils: []
-          commands:
-            command01:
-              command: mkdir -p /var/www/html/pub
-            command02:
-              command: mkdir -p /mnt/efs
-            command06:
-              command: mount -t efs -o tls,iam $EFS_ID /mnt/efs
-              env:
-                EFS_ID: !Ref AppServerFileSystem
-            command07:
-              command: echo '$EFS_ID:/ /mnt/efs efs _netdev,tls,iam 0 0' >> /etc/fstab
-              env:
-                EFS_ID: !Ref AppServerFileSystem
-            command08:
-              command: mkdir -p /mnt/efs/pub/media
-            command10:
-              command: ln -s /mnt/efs/pub/media /var/www/html/pub
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://iscale-dev-cloudformation/include/installEFS.yaml
 
-        SetupMySQLClient:
-          packages:
-              yum:
-                mysql57: []
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://iscale-dev-cloudformation/include/installMySQLClient.yaml
 
         SetupApache:
           files:
