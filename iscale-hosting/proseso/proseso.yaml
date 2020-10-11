@@ -127,9 +127,10 @@ Parameters:
     Type: String
     Default: www
   StaticCertificateArn:
-    Description: ARN of the SSL Certificate for CloudFront
+    Description: ARN of the SSL Certificate for CloudFront (must be in us-east-1)
     Type: String
-    Default: arn:aws:acm:us-west-2:178070162686:certificate/34da5e32-0311-45a7-b5c5-41e3361f19d8
+    # AllowedPattern: "^arn\:aws\:acm\:us-east-1\:"
+    Default: arn:aws:acm:us-east-1:178070162686:certificate/c730162d-d269-4e85-9b33-42423db7eba1
   InstanceAMI:
     Description: AMI image used by the EC2 instance.
     Type: String
@@ -271,7 +272,7 @@ Resources:
       UnhealthyThresholdCount: 3
       Matcher:
         HttpCode: 200,301
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, "webadmin"]]
       Port: !Ref InstancePort
       Protocol: HTTP
       VpcId:
@@ -280,7 +281,7 @@ Resources:
       Tags:
         - 
           Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, "webadmin"]]
         - 
           Key: Environment
           Value: !Ref EnvName
@@ -559,33 +560,6 @@ Resources:
           Fn::ImportValue:
             !Sub "${SNSStackName}-TopicArn"
 
-  UnhealthyHostCountCloudWatchAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], unhealthy-host-count] ]
-      MetricName: UnHealthyHostCount
-      Namespace: AWS/ApplicationELB
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Maximum
-      Threshold: 1
-      AlarmActions:
-        - 
-          Fn::ImportValue:
-            !Sub "${SNSStackName}-TopicArn"
-      OKActions:
-        - 
-          Fn::ImportValue:
-            !Sub "${SNSStackName}-TopicArn"
-      Dimensions:
-        - Name: LoadBalancer
-          Value: 
-            Fn::ImportValue:
-              !Sub "${LoadBalancerStackName}-LoadBalancerFullName"
-        - Name: TargetGroup
-          Value: !GetAtt WebAdminTargetGroup.TargetGroupFullName
-
   DiskSpaceUtilizationCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -638,48 +612,48 @@ Resources:
       CloudFrontOriginAccessIdentityConfig:
         Comment: CloudFront Access to the S3 static origin
  
-  # StaticWebsiteCloudFront:
-  #   Type: AWS::CloudFront::Distribution
-  #   Properties:
-  #     DistributionConfig:
-  #       Origins:
-  #       - DomainName: !GetAtt [StaticWebsiteS3Bucket, DomainName]
-  #         Id: StaticWebsiteS3BucketOrigin
-  #         S3OriginConfig:
-  #           OriginAccessIdentity: !Join ["", ['origin-access-identity/cloudfront/', !Ref CloudFrontOriginAccessIdentity]]
-  #       Enabled: 'true'
-  #       Comment: !Join [" ", [ "Static website for", !Join [".", [!Ref ClientStaticHostName, !Ref ClientDomainName]]]]
-  #       HttpVersion: http2
-  #       DefaultRootObject: index.html
-  #       Aliases:
-  #       - !Join [".", [!Ref ClientStaticHostName, !Ref ClientDomainName]]
-  #       DefaultCacheBehavior:
-  #         AllowedMethods:
-  #           - GET
-  #           - HEAD
-  #         CachedMethods:
-  #           - GET
-  #           - HEAD
-  #         TargetOriginId: StaticWebsiteS3BucketOrigin
-  #         LambdaFunctionAssociations:
-  #         - EventType: origin-request
-  #           IncludeBody: false
-  #           LambdaFunctionARN: !Ref LambdaDefaultIndexARN
-  #         - EventType: origin-response
-  #           IncludeBody: false
-  #           LambdaFunctionARN: !Ref LambdaStaticSiteCachingARN
-  #         ForwardedValues:
-  #           QueryString: true
-  #           Cookies:
-  #             Forward: all
-  #         Compress: true
-  #         ViewerProtocolPolicy: redirect-to-https
-  #         MinTTL: 3600
-  #         MaxTTL: 86400
-  #       PriceClass: PriceClass_All
-  #       ViewerCertificate: 
-  #         SslSupportMethod: sni-only
-  #         AcmCertificateArn: !Ref StaticCertificateArn
+  StaticWebsiteCloudFront:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !GetAtt [StaticWebsiteS3Bucket, DomainName]
+          Id: StaticWebsiteS3BucketOrigin
+          S3OriginConfig:
+            OriginAccessIdentity: !Join ["", ['origin-access-identity/cloudfront/', !Ref CloudFrontOriginAccessIdentity]]
+        Enabled: 'true'
+        Comment: !Join [" ", [ "Static website for", !Join [".", [!Ref ClientStaticHostName, !Ref ClientDomainName]]]]
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        Aliases:
+        - !Join [".", [!Ref ClientStaticHostName, !Ref ClientDomainName]]
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          TargetOriginId: StaticWebsiteS3BucketOrigin
+          LambdaFunctionAssociations:
+          - EventType: origin-request
+            IncludeBody: false
+            LambdaFunctionARN: !Ref LambdaDefaultIndexARN
+          - EventType: origin-response
+            IncludeBody: false
+            LambdaFunctionARN: !Ref LambdaStaticSiteCachingARN
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: all
+          Compress: true
+          ViewerProtocolPolicy: redirect-to-https
+          MinTTL: 3600
+          MaxTTL: 86400
+        PriceClass: PriceClass_All
+        ViewerCertificate: 
+          SslSupportMethod: sni-only
+          AcmCertificateArn: !Ref StaticCertificateArn
 
 Outputs:
 
