@@ -132,13 +132,14 @@ Parameters:
     # AllowedPattern: "^arn\:aws\:acm\:us-east-1\:"
     Default: arn:aws:acm:us-east-1:178070162686:certificate/c730162d-d269-4e85-9b33-42423db7eba1
   InstanceAMI:
-    Description: AMI image used by the EC2 instance.
+    Description: AMI image for EC2.
     Type: String
-    Default: ami-0cdfde001e26fba6e
+    Default: ami-01fee56b22f308154 #Default AWS Linux
+    # Default: ami-0cdfde001e26fba6e #iScale Hosting image
   InstanceType:
-    Description: The instnace type of the EC2 instance (e.g. t2.micro, t2.small, c4.large, etc).
+    Description: The EC2 instance type (t3.micro, t3.small, t3.large, etc).
     Type: String
-    Default: t3.micro
+    Default: t3.small
   KeyName:
     Description: Name of the Key Pair to use.
     Type: String
@@ -219,7 +220,7 @@ Resources:
 # EFS Section
 ####
 
-  WebAdminFileSystem:
+  AppServerFileSystem:
     Type: AWS::EFS::FileSystem
     DeletionPolicy: Retain
     Properties:
@@ -240,7 +241,7 @@ Resources:
   EfsMountTargetPublicSubnet1: 
     Type: AWS::EFS::MountTarget
     Properties: 
-      FileSystemId: !Ref WebAdminFileSystem
+      FileSystemId: !Ref AppServerFileSystem
       SubnetId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-PublicSubnetId1"
@@ -250,7 +251,7 @@ Resources:
   EfsMountTargetPublicSubnet2: 
     Type: AWS::EFS::MountTarget
     Properties: 
-      FileSystemId: !Ref WebAdminFileSystem
+      FileSystemId: !Ref AppServerFileSystem
       SubnetId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-PublicSubnetId2"
@@ -272,9 +273,12 @@ Resources:
       UnhealthyThresholdCount: 3
       Matcher:
         HttpCode: 200,301
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, "webadmin"]]
+      # Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, "webadmin"]]
       Port: !Ref InstancePort
       Protocol: HTTP
+      TargetType: instance
+      Targets:
+        - Id: !Ref WebAdminInstance2
       VpcId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-VpcId"
@@ -289,7 +293,6 @@ Resources:
           Key: Organization
           Value: !Ref OrgName
 
-  # These listeners are for SSL
   AdminHTTPSURLListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
@@ -326,41 +329,54 @@ Resources:
           !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
       Priority: !Ref StaticRulePriority
 
-  WedAdminLaunchConfig: 
-    Type: AWS::AutoScaling::LaunchConfiguration
+  WebAdminInstance2:
+    Type: AWS::EC2::Instance
     Properties:
-      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref InstanceAMI
-      SecurityGroups: [!GetAtt WebAdminSecurityGroup.GroupId]
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
       InstanceType: !Ref InstanceType
-      IamInstanceProfile: !GetAtt WebAdminIamInstanceProfile.Arn
-      InstanceMonitoring: true
+      IamInstanceProfile: !Ref WebAdminIamInstanceProfile
+      DisableApiTermination: false
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: [!GetAtt WebAdminSecurityGroup.GroupId] 
+          SubnetId: 
+            Fn::ImportValue:
+              !Sub "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
       UserData:
-        # #cloud-config 
-        #     runcmd:
-        #       - cfn-signal -e 0 --stack ${AWS::StackName} --resource ${ASG_LOGICAL_ID} --region ${AWS::Region}
         Fn::Base64: !Sub
           - |
-            write_files:
-              - path: /var/lib/cloud/instance/custom-data.sh
-                permissions: 0700
-                owner: root:root
-                content: |
-                  STACK_NAME=${AWS::StackName}
-                  AWS_REGION=${AWS::Region}
-                  DOMAIN=${DOMAIN}
-                  ENVIRONMENT=${ENVIRONMENT}
-                  CLIENT_NAME=${CLIENT_NAME}
-                  APPLICATION_SITE=${APPLICATION_SITE}
-                  INSTANCE_ROLE=${INSTANCE_ROLE}
-                  EFS_NAME=${EFS_NAME}
-          - DOMAIN: !Join [".", ["wwwv", !Ref ClientDomainName]]
-            ENVIRONMENT: !Ref EnvName
-            CLIENT_NAME: !Ref Name
-            APPLICATION_SITE: !Ref OrgName
-            INSTANCE_ROLE: !Ref WebAdminIamRole
-            EFS_NAME: !Join ['.',[!Ref WebAdminFileSystem, efs, !Ref 'AWS::Region', amazonaws.com]]
-            IS_ASG: true
+            #!/bin/bash -xe
+            # yum update -y
+            # Install the files and packages from the metadata
+            yum install -y aws-cfn-bootstrap
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebAdminInstance2 -c WebAdmin --region ${AWS::Region} --role ${ROLE}
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+            /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebAdminInstance2  --region ${AWS::Region}
+          - ROLE: !Ref WebAdminIamRole      
+    Metadata: 
+      AWS::CloudFormation::Init:
+        configSets: 
+          WebAdmin: 
+            - InstallLogAgent
+            - InstallEFS
+        InstallLogAgent:
+          Fn::Transform:
+            Name: AWS::Include
+            Parameters:
+              Location: s3://iscale-dev-cloudformation/include/installLogAgent.yaml
+        InstallEFS:
+          Fn::Transform:
+            Name: AWS::Include
+            Parameters:
+              Location: s3://iscale-dev-cloudformation/include/installEFS.yaml
 
 ####
 # VPC Section
@@ -379,9 +395,9 @@ Resources:
           Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
-  WebAdminSecurityGroupIngress:
+  WebAdminSecurityGroupHTTPIngress:
     Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
+    Properties:
       GroupId: !GetAtt WebAdminSecurityGroup.GroupId
       IpProtocol: TCP
       FromPort: !Ref InstancePort
@@ -389,6 +405,15 @@ Resources:
       SourceSecurityGroupId:
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-SecurityGroupId"
+
+  WebAdminSecurityGroupSSHIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt WebAdminSecurityGroup.GroupId
+      CidrIp: 0.0.0.0/0
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
   
   WebAdminSecurityGroupEgress:
     Type: AWS::EC2::SecurityGroupEgress
@@ -457,8 +482,7 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
         - arn:aws:iam::aws:policy/AWSForWordPressPluginPolicy
       Policies:
-        - 
-          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
           PolicyDocument:
             Version: 2012-10-17
             Statement:
@@ -478,13 +502,21 @@ Resources:
                 Resource: 
                   - !Join ['/', [!GetAtt [StaticWebsiteS3Bucket, Arn], '*']]
                   - !GetAtt [StaticWebsiteS3Bucket, Arn]
-              # -
-              #   Effect: Allow
-              #   Action:
-              #     - cloudfront:CreateInvalidation
-              #     - cloudfront:ListInvalidations
-              #   Resource:
-              #     - !Join ['',['arn:aws:cloudfront::', !Ref 'AWS::AccountId', ':distribution/', !Ref StaticWebsiteCloudFront]]
+              -
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:ListInvalidations
+                Resource:
+                  - !Join ['',['arn:aws:cloudfront::', !Ref 'AWS::AccountId', ':distribution/', !Ref StaticWebsiteCloudFront]]
+        - PolicyName: StackResourcesAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                Resource: '*'
 
   StaticWebsiteUser:
     Type: AWS::IAM::User
@@ -502,13 +534,13 @@ Resources:
                 Resource:
                   - !Join ['/', [!GetAtt [StaticWebsiteS3Bucket, Arn], '*']]
                   - !GetAtt [StaticWebsiteS3Bucket, Arn]
-              # -
-              #   Effect: Allow
-              #   Action:
-              #     - cloudfront:CreateInvalidation
-              #     - cloudfront:ListInvalidations
-              #   Resource:
-              #     - !Join ['',['arn:aws:cloudfront::', !Ref 'AWS::AccountId', ':distribution/', !Ref StaticWebsiteCloudFront]]
+              -
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:ListInvalidations
+                Resource:
+                  - !Join ['',['arn:aws:cloudfront::', !Ref 'AWS::AccountId', ':distribution/', !Ref StaticWebsiteCloudFront]]
 
   StaticWebsiteUserAccessKey:
     Type: AWS::IAM::AccessKey
@@ -655,6 +687,22 @@ Resources:
           SslSupportMethod: sni-only
           AcmCertificateArn: !Ref StaticCertificateArn
 
+  WebAdminDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']] 
+      Comment: WebAdmin Record
+      RecordSets:
+        - Name: !Join [".", [!Ref ClientAdminHostName, !Ref ClientDomainName]]
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-PublicELBCanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-PublicELBDNS"
+
 Outputs:
 
   SecurityGroupId:
@@ -672,9 +720,11 @@ Outputs:
   S3StaticBucket:
     Description: The S3 bucket holding the static website
     Value: !Ref StaticWebsiteS3Bucket
+
   StaticWebsiteUserAccessKeyId:
     Description: Access Key Id for the static S3 bucket
     Value: !Ref StaticWebsiteUserAccessKey
+  
   StaticWebsiteUserAccessKeySecret:
     Description: Secret Key for the static S3 bucket
     Value: !GetAtt [StaticWebsiteUserAccessKey, SecretAccessKey]
