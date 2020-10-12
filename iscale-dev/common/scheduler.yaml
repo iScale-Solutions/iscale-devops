@@ -34,13 +34,15 @@ Metadata:
       EnvName:
         default: Environment Name
       CodeDeployApplicationName:
-        default: CodeDeploy Application name
+        default: CodeDeploy Application name (for autoscale)
       CodeDeployDeploymentGroupName:
-        default: CodeDeploy Deployment Group name
+        default: CodeDeploy Deployment Group name (for autoscale)
       DatabaseClusterArn:
         default: Database Cluster ARN
       DatabaseInstanceArn:
         default: Database Instance ARN
+      EC2InstanceId:
+        default: EC2 Instance Id
       StartScheduleExpression:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
@@ -69,11 +71,11 @@ Parameters:
       - Development
       - Test
   CodeDeployApplicationName:
-    Description: Name of the CodeDeploy Application
+    Description: Name of the CodeDeploy Application (for autoscale)
     Type: String
     Default: ""
   CodeDeployDeploymentGroupName:
-    Description: Name of the CodeDeploy Deployment Group for the application
+    Description: Name of the CodeDeploy Deployment Group (for autoscale)
     Type: String
     Default: ""
   DatabaseClusterArn:
@@ -82,6 +84,10 @@ Parameters:
     Default: ""
   DatabaseInstanceArn:
     Description: The name of a database instance
+    Type: String
+    Default: ""
+  EC2InstanceId:
+    Description: Id of EC2 instance
     Type: String
     Default: ""
   StartScheduleExpression:
@@ -119,6 +125,9 @@ Conditions:
   HasDBInstanceAndStartSchedule: !And [Condition: HasDBInstance, Condition: HasStartSchedule]
   HasDBClusterAndStopSchedule: !And [Condition: HasDBCluster, Condition: HasStopSchedule]
   HasDBInstanceAndStopSchedule: !And [Condition: HasDBInstance, Condition: HasStopSchedule]
+  HasEC2Instance: !Not [!Equals [!Ref EC2InstanceId, ""]]
+  HasEC2InstanceAndStartSchedule: !And [Condition: HasEC2Instance, Condition: HasStartSchedule]
+  HasEC2InstanceAndStopSchedule: !And [Condition: HasEC2Instance, Condition: HasStopSchedule]
   HasCodeDeploy: !And [!Not [!Equals [!Ref CodeDeployApplicationName, ""]], !Not [!Equals [!Ref CodeDeployDeploymentGroupName, ""]]]
   HasCodeDeployAndStartSchedule: !And [Condition: HasCodeDeploy, Condition: HasStartSchedule]
   HasCodeDeployAndStopSchedule: !And [Condition: HasCodeDeploy, Condition: HasStopSchedule]
@@ -202,6 +211,42 @@ Resources:
                   - logs:PutLogEvents
                 Resource: "arn:aws:logs:*:*:*"
 
+  LambdaScheduleEC2InstanceRole:
+    Condition: HasEC2Instance
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        -
+          PolicyName: ScheduleEC2InstancePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                Resource: !Join [":", ["arn", "aws", "ec2", !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref EC2InstanceId]]]]
+              -
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
   LambdaScheduleAutoScalingRole:
     Condition: HasCodeDeploy
     Type: AWS::IAM::Role
@@ -261,11 +306,11 @@ Resources:
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-              
+
           def lambda_handler(event, context):
             region=os.environ['REGION']
             ClusterID=os.environ['CLUSTER_ID']
-            
+
             try:
               rds = boto3.client('rds',region_name=region)
 
@@ -297,16 +342,52 @@ Resources:
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-              
+
           def lambda_handler(event, context):
             region=os.environ['REGION']
             InstanceID=os.environ['INSTANCE_ID']
-            
+
             try:
               rds = boto3.client('rds',region_name=region)
 
               logger.info('Starting DB Instance : ' + str(InstanceID))
               rds.start_db_Instance(DBInstanceIdentifier=InstanceID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StartEC2InstanceFunction:
+    Condition: HasEC2InstanceAndStartSchedule
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function starting an EC2 instance
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleEC2InstanceRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_ID: !Ref EC2InstanceId
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            InstanceID=os.environ['INSTANCE_ID']
+
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+
+              logger.info('Starting EC2 Instance : ' + str(InstanceID))
+              ec2.start_instances(InstanceIds=[str(InstanceID)])
 
             except Exception:
               logger.exception('Error Encountered')
@@ -333,11 +414,11 @@ Resources:
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-              
+
           def lambda_handler(event, context):
             region=os.environ['REGION']
             ClusterID=os.environ['CLUSTER_ID']
-            
+
             try:
               rds = boto3.client('rds',region_name=region)
 
@@ -369,16 +450,52 @@ Resources:
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-              
+
           def lambda_handler(event, context):
             region=os.environ['REGION']
             InstanceID=os.environ['INSTANCE_ID']
-            
+
             try:
               rds = boto3.client('rds',region_name=region)
 
               logger.info('Stopping DB Instance : ' + str(InstanceID))
               rds.stop_db_cluster(DBInstanceIdentifier=InstanceID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopEC2InstanceFunction:
+    Condition: HasEC2InstanceAndStopSchedule
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function stopping an EC2 instance
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleEC2InstanceRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_ID: !Ref EC2InstanceId
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            InstanceID=os.environ['INSTANCE_ID']
+
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+
+              logger.info('Stopping EC2 Instance : ' + str(InstanceID))
+              ec2.stop_instances(InstanceIds=[str(InstanceID)])
 
             except Exception:
               logger.exception('Error Encountered')
@@ -406,12 +523,12 @@ Resources:
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-              
+
           def lambda_handler(event, context):
             region=os.environ['REGION']
             appName=os.environ['CODEDEPLOY_APP']
             groupName=os.environ['CODEDEPLOY_GROUP']
-            
+
             try:
               codedeploy = boto3.client('codedeploy',region_name=region)
 
@@ -462,12 +579,12 @@ Resources:
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-              
+
           def lambda_handler(event, context):
             region=os.environ['REGION']
             appName=os.environ['CODEDEPLOY_APP']
             groupName=os.environ['CODEDEPLOY_GROUP']
-            
+
             try:
               codedeploy = boto3.client('codedeploy',region_name=region)
 
@@ -531,6 +648,22 @@ Resources:
         Arn: !GetAtt StartDBInstanceFunction.Arn
         Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstart]]
 
+  StartScheduledEC2InstanceEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasEC2InstanceAndStartSchedule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, start]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ "Start", !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], "at a specified time"]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  ENABLED
+      Targets:
+      -
+        Arn: !GetAtt StartEC2InstanceFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2start]]
+
   StartScheduledASGEventRule:
     Type: AWS::Events::Rule
     Condition: HasCodeDeployAndStartSchedule
@@ -564,6 +697,15 @@ Resources:
       Action:  lambda:InvokeFunction
       Principal:  events.amazonaws.com
       SourceArn: !GetAtt StartScheduledDBInstanceEventRule.Arn
+
+  ScheduledEventPermissionToStartDBInstance:
+    Condition: HasEC2InstanceAndStartSchedule
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartEC2InstanceFunction
+      Action:  lambda:InvokeFunction
+      Principal:  events.amazonaws.com
+      SourceArn: !GetAtt StartScheduledEC2InstanceEventRule.Arn
 
   ScheduledEventPermissionToAugmentAutoScalingGroup:
     Condition: HasCodeDeployAndStartSchedule
@@ -606,6 +748,22 @@ Resources:
         Arn: !GetAtt StopDBInstanceFunction.Arn
         Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstop]]
 
+  StopScheduledEC2InstanceEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasEC2InstanceAndStopSchedule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, stop]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ "Stop", !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], "at a specified time"]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State: ENABLED
+      Targets:
+      - 
+        Arn: !GetAtt StopEC2InstanceFunction.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2stop]]
+
   StopScheduledASGEventRule:
     Type: AWS::Events::Rule
     Condition: HasCodeDeployAndStopSchedule
@@ -639,6 +797,15 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt StopScheduledDBInstanceEventRule.Arn
+
+  ScheduledEventPermissionToStopEC2Instance:
+    Condition: HasEC2InstanceAndStopSchedule
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopEC2InstanceFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopScheduledEC2InstanceEventRule.Arn
 
   ScheduledEventPermissionToReduceAutoScalingGroup:
     Condition: HasCodeDeployAndStopSchedule

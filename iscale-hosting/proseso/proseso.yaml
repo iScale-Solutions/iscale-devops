@@ -134,8 +134,7 @@ Parameters:
   InstanceAMI:
     Description: AMI image for EC2.
     Type: String
-    Default: ami-01fee56b22f308154 #Default AWS Linux
-    # Default: ami-0cdfde001e26fba6e #iScale Hosting image
+    Default: ami-0380fc7f53e90279f #empty proseso site
   InstanceType:
     Description: The EC2 instance type (t3.micro, t3.small, t3.large, etc).
     Type: String
@@ -278,7 +277,7 @@ Resources:
       Protocol: HTTP
       TargetType: instance
       Targets:
-        - Id: !Ref WebAdminInstance2
+        - Id: !Ref WebAdminInstance
       VpcId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-VpcId"
@@ -329,7 +328,7 @@ Resources:
           !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
       Priority: !Ref StaticRulePriority
 
-  WebAdminInstance2:
+  WebAdminInstance:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -355,11 +354,11 @@ Resources:
             # yum update -y
             # Install the files and packages from the metadata
             yum install -y aws-cfn-bootstrap
-            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebAdminInstance2 -c WebAdmin --region ${AWS::Region} --role ${ROLE}
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebAdminInstance -c WebAdmin --region ${AWS::Region} --role ${ROLE}
             # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
             /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
             # Signal the status from cfn-init
-            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebAdminInstance2  --region ${AWS::Region}
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebAdminInstance  --region ${AWS::Region}
           - ROLE: !Ref WebAdminIamRole      
     Metadata: 
       AWS::CloudFormation::Init:
@@ -731,20 +730,40 @@ Resources:
           ResourceRecords:
             - !GetAtt [StaticWebsiteCloudFront, DomainName]
 
+####
+# Backup Section
+####
+
+  BackupStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - !GetAtt [AppServerFileSystem, Arn]
+
+####
+# Scheduler Section - machine does not start automatically but is forced stopped everyday
+####
+
+  SchedulerStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: ""
+        StopScheduleExpression: cron(0 10 ? * * *) #Make sure it stops everyday unless started by hand
+        UseFriendlyNames: TRUE
+        EC2InstanceId: !Ref WebAdminInstance
 
 Outputs:
-
-  SecurityGroupId:
-    Description: The security group id of the EC2 instance
-    Value: !GetAtt WebAdminSecurityGroup.GroupId
-    Export: 
-      Name: !Sub ${AWS::StackName}-SecurityGroupId
-
-  InstanceRoleArn:
-    Description: The instance role arn attached to the EC2 Instance
-    Value: !GetAtt WebAdminIamRole.Arn
-    Export: 
-      Name: !Sub ${AWS::StackName}-InstanceRoleArn
 
   S3StaticBucket:
     Description: The S3 bucket holding the static website
