@@ -272,7 +272,111 @@ Resources:
         #   Fn::GetAtt:
         #     - DeployStack
         #     - Outputs.CodeDeployDeploymentGroupName
-        
+
+  ####
+  #  Maintenance section
+  ####
+  MaintenanceBucket:
+    Condition: IsProd
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        ErrorDocument: index.html
+        IndexDocument: index.html
+      Tags:
+        -
+          Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance]]
+        -
+          Key: Organization
+          Value: !Ref OrgName
+
+  MaintenanceBucketPolicy:
+    Condition: IsProd
+    Type: AWS::S3::BucketPolicy
+    Properties: 
+      Bucket: !Ref MaintenanceBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForMaintenance
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Join ["/",[!GetAtt MaintenanceBucket.Arn,"*"]]
+
+####
+# CloudFront Section
+####
+
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Condition: IsProd
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: "CloudFront Access to the S3 static origin"
+
+  MaintenanceWebsiteCloudFront:
+    Type: AWS::CloudFront::Distribution
+    Condition: IsProd
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !GetAtt [MaintenanceBucket, DomainName]
+          Id: S3MaintenanceBucketOrigin
+          S3OriginConfig:
+            OriginAccessIdentity: !Join ["", ['origin-access-identity/cloudfront/', !Ref CloudFrontOriginAccessIdentity]]
+        Enabled: 'true'
+        Comment: !Join [" ", [ "Maintenance page for", !Ref ClientDomainName]]
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        Aliases:
+        - !Join [".", ["maintenance", !Ref ClientDomainName]]
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          TargetOriginId: S3MaintenanceBucketOrigin
+          ForwardedValues:
+            QueryString: false
+          Compress: true
+          ViewerProtocolPolicy: redirect-to-https
+          MinTTL: 3600
+          MaxTTL: 86400
+        PriceClass: PriceClass_All
+        ViewerCertificate:
+          SslSupportMethod: sni-only
+          AcmCertificateArn: arn:aws:acm:us-east-1:880804344419:certificate/61fe97b2-2645-4112-825d-51b69e5c8f58
+
+  MaintenanceCNAMERecord:
+    Type: AWS::Route53::RecordSet
+    Condition: IsProd
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
+      Name: !Join [".", ["maintenance", !Ref ClientDomainName]]
+      Type: CNAME
+      TTL: 300
+      Comment: "Maintenance Site"
+      ResourceRecords:
+        - Fn::GetAtt:
+          - MaintenanceWebsiteCloudFront
+          - DomainName
+
 # Outputs:
 #   DeploymentUserGroup:
 #     Description: Add the BitBucket user into this group
