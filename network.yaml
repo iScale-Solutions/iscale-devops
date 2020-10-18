@@ -4,18 +4,18 @@ Description: Network Resources
 Parameters:
   SetupName:
     Description: Setup Name (E.g 'ABC Production')
-    MinLength: '1'
+    MinLength: 1
     Type: String
     AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
     ConstraintDescription: Setup Name cannot be empty
   InstanceKeyName:
     Description: EC2 KeyPair Name
-    MinLength: '1'
+    MinLength: 1
     Type: 'AWS::EC2::KeyPair::KeyName'
     ConstraintDescription: Must be the name of an existing EC2 KeyPair.
   LocalDomainName:
     Description: Local VPC domain name (E.g 'hosting.prod')
-    MinLength: '1'
+    MinLength: 1
     Type: String
     ConstraintDescription: Domain Name cannot be empty
 
@@ -27,33 +27,14 @@ Mappings:
       PublicSubnetAZ2: 10.0.0.64/26
       PrivateSubnetAZ1: 10.0.0.128/26
       PrivateSubnetAZ2: 10.0.0.192/26
-  AWSRegionArch2AMI:
-    us-east-1:
-      HVM64: ami-97785bed
-    us-west-2:
-      HVM64: ami-8786c6b7
-    us-west-1:
-      HVM64: ami-cfa8a18a
-    eu-west-1:
-      HVM64: ami-748e2903
-    ap-southeast-1:
-      HVM64: ami-d6e1c584
-    ap-northeast-1:
-      HVM64: ami-35072834
-    ap-southeast-2:
-      HVM64: ami-fd4724c7
-    sa-east-1:
-      HVM64: ami-956cc688
-    eu-central-1:
-      HVM64: ami-b43503a9
 
 Resources:
   
   VPC:
-    Type: 'AWS::EC2::VPC'
+    Type: AWS::EC2::VPC
     Properties:
-      EnableDnsSupport: 'true'
-      EnableDnsHostnames: 'true'
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
       CidrBlock: !FindInMap 
         - Network
         - VPC
@@ -63,7 +44,7 @@ Resources:
           Value: !Ref SetupName
   
   VPCFlowLogRole:
-    Type: 'AWS::IAM::Role'
+    Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Version: 2012-10-17
@@ -73,7 +54,7 @@ Resources:
               Service:
                 - vpc-flow-logs.amazonaws.com
             Action:
-              - 'sts:AssumeRole'
+              - sts:AssumeRole
       Path: /
       Policies:
         - PolicyName: VPCFlowLogsAccess
@@ -82,26 +63,23 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - 'logs:CreateLogGroup'
-                  - 'logs:CreateLogStream'
-                  - 'logs:DescribeLogGroups'
-                  - 'logs:DescribeLogStreams'
-                  - 'logs:PutLogEvents'
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
                 Resource:
                   - '*'
   
   VPCFlowLogsGroup:
-    Type: 'AWS::Logs::LogGroup'
+    Type: AWS::Logs::LogGroup
     DeletionPolicy: Retain
     Properties:
-      LogGroupName: !Join 
-        - '-'
-        - - !Ref VPC
-          - FlowLogs
+      LogGroupName: !Join ['-', [!Ref VPC, 'FlowLogs']]
       RetentionInDays: 365
   
   VPCFlowLog:
-    Type: 'AWS::EC2::FlowLog'
+    Type: AWS::EC2::FlowLog
     Properties:
       DeliverLogsPermissionArn: !GetAtt 
         - VPCFlowLogRole
@@ -113,25 +91,22 @@ Resources:
   
   InternetGateway:
     DependsOn: VPC
-    Type: 'AWS::EC2::InternetGateway'
+    Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
-          Value: !Join 
-            - ' '
-            - - !Ref SetupName
-              - Internet Gateway
+          Value: !Join [' ', [!Ref SetupName, 'Internet Gateway']]
   
   GatewayToInternet:
     DependsOn: VPC
-    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
   
   NATGatewayAZ1:
     DependsOn: GatewayToInternet
-    Type: 'AWS::EC2::NatGateway'
+    Type: AWS::EC2::NatGateway
     Properties:
       AllocationId: !GetAtt 
         - NATGatewayEIP1
@@ -150,11 +125,9 @@ Resources:
   
   NATGatewayAZ2:
     DependsOn: GatewayToInternet
-    Type: 'AWS::EC2::NatGateway'
+    Type: AWS::EC2::NatGateway
     Properties:
-      AllocationId: !GetAtt 
-        - NATGatewayEIP2
-        - AllocationId
+      AllocationId: !GetAtt [NATGatewayEIP2, AllocationId]
       SubnetId: !Ref PublicSubnetAZ2
       Tags:
         - Key: Name
@@ -168,35 +141,32 @@ Resources:
                   Ref: 'AWS::Region'
   
   NATGatewayEIP1:
-    Type: 'AWS::EC2::EIP'
+    Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
   
   NATGatewayEIP2:
-    Type: 'AWS::EC2::EIP'
+    Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
   
   PublicRouteTable:
-    Type: 'AWS::EC2::RouteTable'
+    Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Join 
-            - ' - '
-            - - !Ref SetupName
-              - Public Route Table
+          Value: !Join [' - ', [!Ref SetupName, 'Public Route Table']]
   
   PublicRoute:
-    Type: 'AWS::EC2::Route'
+    Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
   
   PublicSubnetAZ1:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       MapPublicIpOnLaunch: true
@@ -219,13 +189,13 @@ Resources:
                   Ref: 'AWS::Region'
   
   PublicSubnetAZ1RouteTableAssociation:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnetAZ1
       RouteTableId: !Ref PublicRouteTable
   
   PublicSubnetAZ2:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       MapPublicIpOnLaunch: true
@@ -248,13 +218,13 @@ Resources:
                   Ref: 'AWS::Region'
   
   PublicSubnetAZ2RouteTableAssociation:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnetAZ2
       RouteTableId: !Ref PublicRouteTable
   
   PrivateRouteTableAZ1:
-    Type: 'AWS::EC2::RouteTable'
+    Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
       Tags:
@@ -268,20 +238,20 @@ Resources:
               - Private Route Table
   
   PrivateRouteAZ1ToInternet:
-    Type: 'AWS::EC2::Route'
+    Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PrivateRouteTableAZ1
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NATGatewayAZ1
   
   PrivateSubnetAZ1RouteTableAssociation:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnetAZ1
       RouteTableId: !Ref PrivateRouteTableAZ1
   
   PrivateSubnetAZ1:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: !FindInMap 
@@ -303,7 +273,7 @@ Resources:
                   Ref: 'AWS::Region'
   
   PrivateSubnetAZ2:
-    Type: 'AWS::EC2::Subnet'
+    Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: !FindInMap 
@@ -325,7 +295,7 @@ Resources:
                   Ref: 'AWS::Region'
   
   PrivateRouteTableAZ2:
-    Type: 'AWS::EC2::RouteTable'
+    Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
       Tags:
@@ -339,20 +309,20 @@ Resources:
               - Private Route Table
   
   PrivateRouteAZ2ToInternet:
-    Type: 'AWS::EC2::Route'
+    Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PrivateRouteTableAZ2
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NATGatewayAZ2
   
   PrivateSubnetAZ2RouteTableAssociation:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnetAZ2
       RouteTableId: !Ref PrivateRouteTableAZ2
   
   PublicNetworkAcl:
-    Type: 'AWS::EC2::NetworkAcl'
+    Type: AWS::EC2::NetworkAcl
     Properties:
       VpcId: !Ref VPC
       Tags:
@@ -362,7 +332,7 @@ Resources:
           Value: VPC Network Acl
   
   BastionSecurityGroup:
-    Type: 'AWS::EC2::SecurityGroup'
+    Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Bastion access on SSH port
       VpcId: !Ref VPC
@@ -379,7 +349,7 @@ Resources:
               - Bastion Security Group
   
   BastionEC2Policy:
-    Type: 'AWS::IAM::Policy'
+    Type: AWS::IAM::Policy
     Properties:
       PolicyName: BastionEC2AccessPolicy
       PolicyDocument:
@@ -395,7 +365,7 @@ Resources:
         - !Ref BastionEC2Role
   
   BastionEC2Role:
-    Type: 'AWS::IAM::Role'
+    Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Version: 2012-10-17
@@ -409,25 +379,25 @@ Resources:
       Path: /
   
   BastionEC2InstanceProfile:
-    Type: 'AWS::IAM::InstanceProfile'
+    Type: AWS::IAM::InstanceProfile
     Properties:
       Path: /
       Roles:
         - !Ref BastionEC2Role
   
   BastionLaunchConfig:
-    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Type: AWS::AutoScaling::LaunchConfiguration
     Properties:
       ImageId: ami-0a7f9edf06fe7e4cf
       KeyName: !Ref InstanceKeyName
-      AssociatePublicIpAddress: 'true'
+      AssociatePublicIpAddress: true
       InstanceType: t3.nano
       IamInstanceProfile: !Ref BastionEC2InstanceProfile
       SecurityGroups:
         - !Ref BastionSecurityGroup
   
   BastionAutoScalingGroup:
-    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       LaunchConfigurationName: !Ref BastionLaunchConfig
       Cooldown: '60'
@@ -444,10 +414,10 @@ Resources:
             - ' '
             - - !Ref SetupName
               - Bastion
-          PropagateAtLaunch: 'true'
+          PropagateAtLaunch: true
         - Key: Retention
           Value: '7'
-          PropagateAtLaunch: 'true'
+          PropagateAtLaunch: true
       MetricsCollection:
         - Granularity: 1Minute
           Metrics:
@@ -455,23 +425,17 @@ Resources:
             - GroupMaxSize
   
   LocalDNS:
-    Type: 'AWS::Route53::HostedZone'
+    Type: AWS::Route53::HostedZone
     Properties:
       HostedZoneConfig:
-        Comment: !Join 
-          - ''
-          - - 'Local domain for :'
-            - !Ref VPC
+        Comment: !Join [' ', ['Local domain for', !Ref VPC]]
       Name: !Ref LocalDomainName
       VPCs:
         - VPCId: !Ref VPC
           VPCRegion: !Ref 'AWS::Region'
       HostedZoneTags:
         - Key: Name
-          Value: !Join 
-            - ''
-            - - 'Local domain for :'
-              - !Ref VPC
+          Value: !Join [' ', ['Local domain for', !Ref VPC]]
 
 Outputs:
   Region:
