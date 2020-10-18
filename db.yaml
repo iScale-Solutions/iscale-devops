@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Hosting DB Deployment
+Parameters:
+  NetworkStack:
+    Description: Name of the Network Stack
+    MinLength: '1'
+    Type: String
+    ConstraintDescription: Network stack Name cannot be null
+
+Resources:
+  DBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: !Join 
+        - ' '
+        - - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-SetupName'
+          - DB Subnet Group
+      SubnetIds:
+        - !ImportValue 
+          'Fn::Sub': '${NetworkStack}-PrivateSubnetAZ1'
+        - !ImportValue 
+          'Fn::Sub': '${NetworkStack}-PrivateSubnetAZ2'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ' '
+            - - !ImportValue 
+                'Fn::Sub': '${NetworkStack}-SetupName'
+              - DB Subnet Group
+  DBParameterGroup:
+    Type: 'AWS::RDS::DBParameterGroup'
+    DeletionPolicy: Delete
+    Properties:
+      Description: !Join 
+        - ' '
+        - - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-SetupName'
+          - DB Parameter Group
+      Family: MySQL5.7
+      Parameters:
+        sql_mode: IGNORE_SPACE
+  AuroraDBParameterGroup:
+    Type: 'AWS::RDS::DBClusterParameterGroup'
+    DeletionPolicy: Delete
+    Properties:
+      Description: !Join 
+        - ' '
+        - - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-SetupName'
+          - DB Parameter Group
+      Family: aurora-mysql5.7
+      Parameters:
+        character_set_database: utf32
+  Aurora56DBParameterGroup:
+    Type: 'AWS::RDS::DBClusterParameterGroup'
+    DeletionPolicy: Delete
+    Properties:
+      Description: !Join 
+        - ' '
+        - - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-SetupName'
+          - DB5.6 Parameter Group
+      Family: aurora5.6
+      Parameters:
+        character_set_database: utf32
+  DBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-VPC'
+      GroupDescription: !Join 
+        - ' '
+        - - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-SetupName'
+          - DB Security Group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          CidrIp: 0.0.0.0/0
+          Description: Access from AppServer
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ' '
+            - - !ImportValue 
+                'Fn::Sub': '${NetworkStack}-SetupName'
+              - DB Security Group
+  DBInstanceMonitoringRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'
+      Path: /
+  AuroraDBCluster:
+    Type: 'AWS::RDS::DBCluster'
+    DeletionPolicy: Snapshot
+    Properties:
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBClusterParameterGroupName: !Ref AuroraDBParameterGroup
+      SnapshotIdentifier: >-
+        arn:aws:rds:us-west-2:178070162686:cluster-snapshot:hosting-aurora-09222018
+      Engine: aurora-mysql
+      EngineMode: provisioned
+      EngineVersion: 5.7.12
+      BackupRetentionPeriod: '30'
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ' '
+            - - !ImportValue 
+                'Fn::Sub': '${NetworkStack}-SetupName'
+              - DB
+  AuroraDBInstance:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      Engine: aurora-mysql
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      PubliclyAccessible: 'false'
+      DBInstanceClass: db.t3.small
+      MonitoringInterval: '10'
+      MonitoringRoleArn: !GetAtt 
+        - DBInstanceMonitoringRole
+        - Arn
+      CopyTagsToSnapshot: 'true'
+  Aurora56DBCluster:
+    Type: 'AWS::RDS::DBCluster'
+    DeletionPolicy: Snapshot
+    Properties:
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBClusterParameterGroupName: !Ref Aurora56DBParameterGroup
+      Engine: aurora
+      EngineVersion: 5.6.10a
+      BackupRetentionPeriod: '30'
+      MasterUsername: root
+      MasterUserPassword: password
+      StorageEncrypted: 'true'
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ' '
+            - - !ImportValue 
+                'Fn::Sub': '${NetworkStack}-SetupName'
+              - DB56
+  Aurora56DBInstance:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      Engine: aurora
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBClusterIdentifier: !Ref Aurora56DBCluster
+      PubliclyAccessible: 'false'
+      DBInstanceClass: db.t3.small
+      MonitoringInterval: '10'
+      MonitoringRoleArn: !GetAtt 
+        - DBInstanceMonitoringRole
+        - Arn
+      CopyTagsToSnapshot: 'true'
+  DBRoute53Record:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-LocalDNSHostedZoneId'
+      Comment: Local DNS for DB
+      Name: !Join 
+        - ''
+        - - db.
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-LocalDomainName'
+      Type: CNAME
+      TTL: '3600'
+      ResourceRecords:
+        - !GetAtt 
+          - AuroraDBCluster
+          - Endpoint.Address
+  DB56Route53Record:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-LocalDNSHostedZoneId'
+      Comment: Local DNS for DB 5.6
+      Name: !Join 
+        - ''
+        - - db56.
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-LocalDomainName'
+      Type: CNAME
+      TTL: '3600'
+      ResourceRecords:
+        - !GetAtt 
+          - Aurora56DBCluster
+          - Endpoint.Address
+  DB57Route53Record:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-LocalDNSHostedZoneId'
+      Comment: Local DNS for DB 5.7
+      Name: !Join 
+        - ''
+        - - db57.
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-LocalDomainName'
+      Type: CNAME
+      TTL: '3600'
+      ResourceRecords:
+        - !GetAtt 
+          - AuroraDBCluster
+          - Endpoint.Address
+Outputs:
+  Region:
+    Value: !Ref 'AWS::Region'
