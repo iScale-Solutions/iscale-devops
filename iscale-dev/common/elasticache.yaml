@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Elasticache Instance
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+          - UseFriendlyNames
+      -
+        Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      -
+        Label:
+          default: Cache Configuration
+        Parameters:
+          - Port
+          - NodeType
+          - NumCacheClusters
+          - AccessFromAnywhere
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      Port:
+        default: Port Number
+      NetworkStackName:
+        default: Network Stack Name
+      NodeType:
+        default: Cache Node Type
+      NumCacheClusters:
+        default: Number of Cache Clusters
+      SNSStackName:
+        default: SNS Topic Stack Name
+      UseFriendlyNames:
+        default: Use Friendly Resource Names
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  AccessFromAnywhere:
+    Description: Set to TRUE to allow access to the cache from anywhere
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: FALSE
+  NodeType:
+    Description: The compute and memory capacity of the nodes in the node group (shard).
+    Type: String
+    Default: cache.t3.micro
+  NumCacheClusters:
+    Description: The number of clusters this replication group initially has.
+    Type: Number
+    Default: 1
+  Port:
+    Description: The port number on which the database accepts connections.
+    Type: Number
+    Default: 6379
+    MinValue: 1
+    MaxValue: 65535
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+    MinLength: 1
+  UseFriendlyNames:
+    Description: Set to TRUE to have nice formatted resource names
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: TRUE
+
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
+  AllowAccessFromAnywhere: !Equals [!Ref AccessFromAnywhere, TRUE]
+
+Resources:
+
+  ElasticacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+        - !Ref 'AWS::NoValue'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+
+  CacheSecurityGroupAllowFromAnywhere:
+    Condition: AllowAccessFromAnywhere
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt ElasticacheSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: !Ref Port
+      ToPort: !Ref Port
+      CidrIp: 0.0.0.0/0
+
+  Redis50CacheParameterGroup:
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      CacheParameterGroupFamily: redis5.0
+
+  ElasticacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      SubnetIds:
+        - Fn::ImportValue:
+            !Sub "${NetworkStackName}-InternalSubnetId1"
+        - Fn::ImportValue:
+            !Sub "${NetworkStackName}-InternalSubnetId2"  
+
+  ElasticacheReplicationGroup:
+    DeletionPolicy: Delete
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+        - !Ref 'AWS::NoValue'
+      ReplicationGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+      NumCacheClusters: !Ref NumCacheClusters
+      AutomaticFailoverEnabled: false
+      CacheNodeType: !Ref NodeType
+      CacheParameterGroupName: !Ref Redis50CacheParameterGroup
+      Port: !Ref Port
+      CacheSubnetGroupName: !Ref ElasticacheSubnetGroup
+      SecurityGroupIds: [!GetAtt ElasticacheSecurityGroup.GroupId]
+      NotificationTopicArn:
+        Fn::ImportValue:
+          !Sub "${SNSStackName}-TopicArn"
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: true
+      Engine: redis
+      EngineVersion: 5.0.6
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+Outputs:
+  
+  CachePrimaryEndpoint:
+    Description: The DNS address of the primary read-write cache node.
+    Value: 
+      Fn::GetAtt: [ ElasticacheReplicationGroup, PrimaryEndPoint.Address ]
+  
+  SecurityGroupId:
+    Description: The security group id of the Cache instance
+    Value: !GetAtt ElasticacheSecurityGroup.GroupId
+
+  ClusterPort:
+    Description: The port number of the cache cluster
+    Value: !Ref Port
