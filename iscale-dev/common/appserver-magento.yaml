@@ -25,6 +25,7 @@ Metadata:
           - InstanceAMI
           - InstancePort
           - InstanceType
+          - InstanceOS
       -
         Label:
           default: Load Balancer Configuration
@@ -80,6 +81,8 @@ Metadata:
         default: Instance AMI ID
       InstanceKeyName:
         default: Instance Key Name
+      InstanceOS:
+        default: Instance OS
       InstancePort:
         default: Instance Application Port
       InstanceType:
@@ -126,6 +129,7 @@ Parameters:
     Type: Number
     MinValue: 1
     MaxValue: 65535
+    Default: 6379
   CacheSecurityGroupId:
     Description: Cache Security Group
     Type: String
@@ -156,6 +160,13 @@ Parameters:
     Description: Instance Key Name
     Type: String
     Default: ''
+  InstanceOS:
+    Description: The OS of the EC2 instance
+    Type: String
+    Default: Linux
+    AllowedValues:
+      - Linux
+      - CentOS
   InstancePort:
     Description: Database Port Number
     Type: Number
@@ -210,6 +221,13 @@ Parameters:
     Type: String
     Default: iscale-dev-dev-uw2-sns
     MinLength: 1
+  UseFriendlyNames:
+    Description: Set to TRUE to have nice object names
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: TRUE
 
 Mappings: 
   Fn::Transform:
@@ -225,6 +243,10 @@ Conditions:
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
   HasCache: !Not [!Equals [!Ref CacheEndpoint, '']]
+  UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
+  IsLinux: !Equals [!Ref InstanceOS, 'Linux']
+  IsCentOS: !Equals [!Ref InstanceOS, 'CentOS']
+  
 
 Resources:
   
@@ -243,21 +265,39 @@ Resources:
     Metadata: 
       AWS::CloudFormation::Init: 
         configSets: 
-          Magento: 
-            - InstallLogAgent
+          Linux: 
+            - InstallLogAgent_Linux
             - InstallCustomData
-            - InstallEFS
-            - InstallMySQLClient
+            - InstallEFS_Linux
+            - InstallMySQLClient_Linux
+            - InstallPHP_Linux
             - SetupApache
             - SetupComposer
             - InstallCodeDeployAgent
+          CentOS: 
+            # - InstallLogAgent_Centos
+            - InstallCustomData
+            - InstallEFS_Centos
+            - InstallMySQLClient_Centos
+            - InstallLAMP_Centos
+            - SetupApache
+            - SetupComposer
+            - InstallCodeDeployAgent
+          Test:
+            - InstallLAMP_Centos
             
-        InstallLogAgent:
+        InstallLogAgent_Linux:
           Fn::Transform:
             Name: AWS::Include
             Parameters:
               Location: s3://iscale-dev-cloudformation/include/installLogAgent.yaml
-            
+
+        InstallLogAgent_Centos:
+          Fn::Transform:
+            Name: AWS::Include
+            Parameters:
+              Location: s3://iscale-dev-cloudformation/include/centos/installLogAgent.yaml
+
         InstallCustomData:
           packages:
             yum: 
@@ -294,21 +334,94 @@ Resources:
               permissions: 0700
               owner: root
               group: root
+        
         InstallCodeDeployAgent:
           Fn::Transform:
             Name: AWS::Include
             Parameters:
               Location: s3://iscale-dev-cloudformation/include/installCodeDeploy.yaml
-        InstallEFS:
+        
+        InstallEFS_Centos:
+          Fn::Transform:
+            Name: AWS::Include
+            Parameters:
+              Location: s3://iscale-dev-cloudformation/include/centos/installEFS.yaml
+        
+        InstallEFS_Linux:
           Fn::Transform:
             Name: AWS::Include
             Parameters:
               Location: s3://iscale-dev-cloudformation/include/installEFS.yaml
-        InstallMySQLClient:
+        
+        InstallMySQLClient_Centos:
+          Fn::Transform:
+            Name: AWS::Include
+            Parameters:
+              Location: s3://iscale-dev-cloudformation/include/centos/installMySQLClient.yaml
+
+        InstallMySQLClient_Linux:
           Fn::Transform:
             Name: AWS::Include
             Parameters:
               Location: s3://iscale-dev-cloudformation/include/installMySQLClient.yaml
+        
+        InstallLAMP_Centos:
+          packages:
+            yum: 
+              epel-release: []
+              yum-utils: []
+          commands:
+            01_UseRemi_RPM:
+              command: yum install -y http://rpms.remirepo.net/enterprise/remi-release-7.rpm
+            02_Disable_Remi54:
+              command: yum-config-manager --disable remi-php54
+            03_Enable_Remi73:
+              command: yum-config-manager --enable remi-php73        
+            04_PHP:
+              command: yum install -y php
+            05_PHP_CLI:
+              command: yum install -y php-cli
+            06_PHP_FPM:
+              command: yum install -y php-fpm
+            07_PHP_Mysqlnd:
+              command: yum install -y php-mysqlnd
+            08_PHP_Devel:
+              command: yum install -y php-devel
+            09_PHP_Gd:
+              command: yum install -y php-gd
+            10_PHP_Curl: 
+              command: yum install -y php-curl
+            11_PHP_ZIP: 
+              command: yum install -y php-zip
+            12_PHP_Mcrypt: 
+              command: yum install -y php-mcrypt
+            13_PHP_MbString: 
+              command: yum install -y php-mbstring
+            14_PHP_XML: 
+              command: yum install -y php-xml
+            15_PHP_Pear: 
+              command: yum install -y php-pear
+            16_PHP_BcMath: 
+              command: yum install -y php-bcmath
+            17_PHP_JSON: 
+              command: yum install -y php-json
+            18_HTTPD: 
+              command: yum install -y httpd
+
+        InstallPHP_Linux:
+          packages:
+            yum: 
+              php73: []
+              php73-bcmath: []
+              php73-gd: []
+              php73-intl: []
+              php73-mbstring: []
+              php73-mysqlnd: []
+              php73-xml: []
+              php73-soap: []
+              httpd24: []
+              mod24_security.x86_64: []
+
         SetupApache:
           files:
             /var/www/html/pub/health.php:
@@ -372,34 +485,20 @@ Resources:
                 log_stream_name = {instance_id}
                 initial_position = start_of_file
                 log_group_name = /var/log/httpd/access.log
-          packages:
-            yum: 
-              php73: []
-              php73-bcmath: []
-              php73-gd: []
-              php73-intl: []
-              php73-mbstring: []
-              php73-mysqlnd: []
-              php73-xml: []
-              php73-soap: []
-              httpd24: []
-              mod24_security.x86_64: []
           commands:
-            command01:
-              command: chown -f apache:apache /mnt/efs/
-            command02:
+            01_Chown_Html_Apache:
               command: chown -Rf apache:apache /var/www/html/
             # command03: #quote escape error - will need to rework this
             #   command: "sed -i 's/LogFormat \"%h %l %u %t \\"%r\\" %>s %b \\"%{Referer}i\\" \\"%{User-Agent}i\\"\" combined/LogFormat \"%a %l %u %t \\"%r\\" %>s %O \\"%{Referer}i\\" \\"%{User-Agent}i\\"\" combined/' /etc/httpd/conf/httpd.conf"
-            command04: 
+            02_Set_Memory_Limit: 
               command: sed -i 's,^memory_limit =.*$,memory_limit = 4096M,' /etc/php.ini
-            command05: 
+            03_Set_Post_Max_Size: 
               command: sed -i 's,^post_max_size =.*$,post_max_size = 50M,' /etc/php.ini
-            command06: 
+            04_Set_Upload_Max_Size:
               command: sed -i 's,^upload_max_filesize =.*$,upload_max_filesize = 10M,' /etc/php.ini
-            command07:
+            05_Start_HTTPD:
               command: service httpd start
-            command08:
+            06_ChkConfig_HTTPD:
               command: chkconfig httpd on
 
         SetupComposer:
@@ -431,13 +530,18 @@ Resources:
             #!/bin/bash -xe
             # yum update -y
             # Install the files and packages from the metadata
-            yum install -y aws-cfn-bootstrap
-            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c Magento --region ${AWS::Region} --role ${ROLE}
+            ${BOOT_INSTALL}
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c ${OSTYPE} --region ${AWS::Region} --role ${ROLE}
             # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
             /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
             # Signal the status from cfn-init
             /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
           - ROLE: !Ref AppServerIamRole
+            OSTYPE: !Ref InstanceOS
+            BOOT_INSTALL: !If
+              - IsLinux
+              - yum install -y aws-cfn-bootstrap
+              - yum install -y epel-release && yum install -y https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.amzn1.noarch.rpm && ln -s /usr/local/lib/python2.7/site-packages/cfnbootstrap /usr/lib/python2.7/site-packages/cfnbootstrap
 
   AppServerAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -455,7 +559,10 @@ Resources:
       MaxSize: 1
       MinSize: 0
       DesiredCapacity: 0 #Make it zero as it will be taken away by blue green
-      AutoScalingGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, default, ASG]]
+      AutoScalingGroupName: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, default, ASG]]
+        - !Ref 'AWS::NoValue'
       VPCZoneIdentifier:
         -
           Fn::ImportValue:
@@ -502,7 +609,7 @@ Resources:
           Key: Name
           Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
   
-  # When the setup has a cache, allow the cache access only from the AppServer
+  # When the setup has a cache, allow the cache access from the AppServer
   AllowCacheAccessFromAppServer:
     Condition: HasCache
     Type: AWS::EC2::SecurityGroupIngress
@@ -518,3 +625,7 @@ Outputs:
   AppServerEFSArn:
     Description: ARN of the AppServer EFS
     Value: !GetAtt AppServerFileSystem.Arn
+
+  AppServerTargetGroup:
+    Description: Target Group for the AppServer
+    Value: !Ref AppServerTargetGroup

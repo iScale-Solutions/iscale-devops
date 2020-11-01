@@ -1,0 +1,105 @@
+  # AppServerLaunchConfig: 
+  #   Type: AWS::AutoScaling::LaunchConfiguration
+  #   Metadata: 
+  #     AWS::CloudFormation::Init: 
+  #       configSets: 
+  #         MyConfigset: 
+  #           - InstallLogAgent
+        # InstallLogAgent:
+          packages:
+            yum:
+              wget: []
+              gcc: []
+              sqlite-devel: []
+          commands:
+            # 01_Wget_Python35:
+            #   command: wget https://www.python.org/ftp/python/3.5.9/Python-3.5.9.tgz
+            #   cwd: /usr/src
+            # 02_Expand_TGZ:
+            #   command: tar xzf Python-3.5.9.tgz
+            #   cwd: /usr/src
+            # 03_Configure_Python35:
+            #   command: ./configure --enable-optimizations
+            #   cwd: /usr/src/Python-3.5.9
+            # 04_Make_Install_Python35:
+            #   command: make altinstall
+            #   cwd: /usr/src/Python-3.5.9
+            05_Curl_Agent:
+              command: curl https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py -O
+              cwd: /tmp
+            06_Curl_Deps:
+              command: curl https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/AgentDependencies.tar.gz -O
+              cwd: /tmp
+            07_Expand_Deps_TGZ:
+              command: tar xvf AgentDependencies.tar.gz -C /tmp/
+              cwd: /tmp
+            08_Setup_Config:
+              command: cp -fv /tmp/awscli.region /var/awslogs/etc/aws.conf
+            09_Change_Agent_Code:
+              command: sed -i 's,^subprocess.call\(\[\'service\', \'awslogs\', \'stop\'\],# subprocess.call\(\[\'service\', \'awslogs\', \'stop\'\],' ./awslogs-agent-setup.py
+              cwd: /tmp
+            10_Setup_Agent:
+              command: python ./awslogs-agent-setup.py -r us-west-2 --dependency-path /tmp/AgentDependencies -n -c /var/awslogs/etc/aws.conf
+              cwd: /tmp
+              env:
+                REGION:
+                  Ref: 'AWS::Region'
+            11_Start_Service:
+              command: service awslogs start
+            12_Keep_Service_On:
+              command: chkconfig awslogs on
+            13_Cleanup:
+              command: rm -fv /tmp/awscli.region
+          files:
+            /var/awslogs/etc/config/cfn-init.conf:
+              content: 
+                Fn::Sub:
+                  |
+                  [/var/log/cfn-init.log]
+                  datetime_format = %b %d %H:%M:%S
+                  file = /var/log/cfn-init.log
+                  buffer_duration = 5000
+                  log_stream_name = {instance_id}
+                  initial_position = start_of_file
+                  log_group_name = /var/log/cfn-init.log
+            /var/awslogs/etc/config/cfn-init-cmd.conf:
+              content:
+                Fn::Sub:
+                  |
+                  [/var/log/cfn-init-cmd.log]
+                  datetime_format = %b %d %H:%M:%S
+                  file = /var/log/cfn-init-cmd.log
+                  buffer_duration = 5000
+                  log_stream_name = {instance_id}
+                  initial_position = start_of_file
+                  log_group_name = /var/log/cfn-init-cmd.log
+            /var/awslogs/etc/config/ssm.conf:
+              content:
+                Fn::Sub:
+                  |
+                  [/var/log/amazon/ssm/amazon-ssm-agent.log]
+                  datetime_format = %b %d %H:%M:%S
+                  file = /var/log/amazon/ssm/amazon-ssm-agent.log
+                  buffer_duration = 5000
+                  log_stream_name = {instance_id}
+                  initial_position = start_of_file
+                  log_group_name = /var/log/amazon/ssm/amazon-ssm-agent.log
+            /var/awslogs/etc/config/deployments.conf:
+              content:
+                Fn::Sub:
+                  |
+                  [codedeploy-agent-deployments.log]
+                  datetime_format = %b %d %H:%M:%S
+                  file = /opt/codedeploy-agent/deployment-root/deployment-logs/codedeploy-agent-deployments.log
+                  buffer_duration = 5000
+                  log_stream_name = {instance_id}
+                  initial_position = start_of_file
+                  log_group_name = /var/log/codedeploy-agent-deployments.log
+            /tmp/awscli.region:
+              content:
+                Fn::Sub:
+                  |
+                  [plugins]
+                  cwlogs = cwlogs
+                  [default]
+                  region = ${AWS::Region}
