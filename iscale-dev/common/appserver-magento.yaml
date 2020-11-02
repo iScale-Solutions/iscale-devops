@@ -206,6 +206,9 @@ Parameters:
     Description: Magento Repository Private Key
     Type: String
     MinLength: 1
+  MagentoRepoSecrets: 
+    Description: Magento Repository Secrets Manager ARN
+    Type: String
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
@@ -243,6 +246,7 @@ Conditions:
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
   HasCache: !Not [!Equals [!Ref CacheEndpoint, '']]
+  HasMagentoRepoSecrets: !Not [!Equals [!Ref MagentoRepoSecrets, '']]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
   IsLinux: !Equals [!Ref InstanceOS, 'Linux']
   IsCentOS: !Equals [!Ref InstanceOS, 'CentOS']
@@ -280,6 +284,7 @@ Resources:
             - InstallEFS_Centos
             - InstallMySQLClient_Centos
             - InstallLAMP_Centos
+            - InstallAWSCLI_Centos
             - SetupApache
             - SetupComposer
             - InstallCodeDeployAgent
@@ -318,6 +323,7 @@ Resources:
                   BUCKET_NAME=${BUCKET_NAME}
                   MAGENTO_PUB_KEY=${MAGENTO_PUB_KEY}
                   MAGENTO_PRIVATE_KEY=${MAGENTO_PRIVATE_KEY}
+                  MAGENTO_REPOS_SECRET_ARN=${MAGENTO_REPOS_SECRET_ARN}
                   DB_HOST=${DB_HOST}
                   DB_PORT=${DB_PORT}
                 - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
@@ -329,6 +335,10 @@ Resources:
                   BUCKET_NAME: !Ref DataS3Bucket
                   MAGENTO_PUB_KEY: !Ref MagentoPublicKey
                   MAGENTO_PRIVATE_KEY: !Ref MagentoPrivateKey
+                  MAGENTO_REPOS_SECRET_ARN: !If 
+                    - HasMagentoRepoSecrets
+                    - !Ref MagentoRepoSecrets
+                    - !Ref 'AWS::NoValue'
                   DB_HOST: !Ref DatabaseEndpoint
                   DB_PORT: !Ref DatabasePort
               permissions: 0700
@@ -389,23 +399,27 @@ Resources:
               command: yum install -y php-devel
             09_PHP_Gd:
               command: yum install -y php-gd
-            10_PHP_Curl: 
+            10_PHP_Curl:
               command: yum install -y php-curl
-            11_PHP_ZIP: 
+            11_PHP_ZIP:
               command: yum install -y php-zip
-            12_PHP_Mcrypt: 
+            12_PHP_Mcrypt:
               command: yum install -y php-mcrypt
-            13_PHP_MbString: 
+            13_PHP_MbString:
               command: yum install -y php-mbstring
-            14_PHP_XML: 
+            14_PHP_XML:
               command: yum install -y php-xml
-            15_PHP_Pear: 
+            15_PHP_Pear:
               command: yum install -y php-pear
-            16_PHP_BcMath: 
+            16_PHP_BcMath:
               command: yum install -y php-bcmath
-            17_PHP_JSON: 
+            17_PHP_JSON:
               command: yum install -y php-json
-            18_HTTPD: 
+            18_PHP_Intl:
+              command: yum install -y php-intl
+            19_PHP_SOAP:
+              command: yum install -y php-soap
+            20_HTTPD:
               command: yum install -y httpd
 
         InstallPHP_Linux:
@@ -421,6 +435,12 @@ Resources:
               php73-soap: []
               httpd24: []
               mod24_security.x86_64: []
+
+        InstallAWSCLI_Centos:
+          Fn::Transform:
+            Name: AWS::Include
+            Parameters:
+              Location: s3://iscale-dev-cloudformation/include/centos/installAWSCLI.yaml
 
         SetupApache:
           files:
@@ -503,18 +523,20 @@ Resources:
 
         SetupComposer:
           commands:
-            command01:
-              command: curl -sS https://getcomposer.org/installer | php
+            01_Curl_Installer:
+              command: php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+              cwd: /tmp
+            02_Execute_Installer:
+              command: php ./composer-setup.php --version=1.10.17
               env: 
-                HOME: /root
-                COMPOSER_HOME: /root
-              cwd: /root
-            command02:
+                HOME: /tmp
+                COMPOSER_HOME: /tmp
+              cwd: /tmp
+            03_Move_Local_Bin:
               command: mv composer.phar /usr/local/bin/composer
-              cwd: /root
-            command03:
+              cwd: /tmp
+            04_Setup_Symlink:
               command: ln -s /usr/local/bin/composer /usr/bin/composer
-              cwd: /root
 
     Properties:
       KeyName: !If [HasInstanceKey, !Ref InstanceKeyName, !Ref 'AWS::NoValue']

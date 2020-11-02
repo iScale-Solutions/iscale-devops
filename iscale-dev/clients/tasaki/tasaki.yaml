@@ -38,25 +38,24 @@ Metadata:
           - StopScheduleExpression
       -
         Label:
-          default: IAM configuration
-        Parameters:
-          - BitBucketUserArn
-      -
-        Label:
           default: Magento Repository Access
         Parameters:
           - MagentoPublicKey
           - MagentoPrivateKey
+          - AmastyUsername
+          - AmastyPassword
 
     ParameterLabels:
-      BitBucketUserArn:
-        default: ARN of BitBucket IAM user
       Name:
         default: Resource Name
       OrgName:
         default: Organization Name
       EnvName:
         default: Environment Name
+      AmastyUsername:
+        default: Amasty Repository Username
+      AmastyPassword:
+        default: Amasty Repository Password
       LoadBalancerPriority:
         default: Load Balancer Rule Priority
       LoadBalancerStackName:
@@ -102,10 +101,15 @@ Parameters:
       - Staging
       - Development
       - Test
-  BitBucketUserArn:
-    Description: The ARN of the BitBucket deployment user
+  AmastyUsername: 
+    NoEcho: true
+    Description: Amasty Repository Username
     Type: String
-    Default: arn:aws:iam::338284463834:user/bitbucket-edia
+    MinLength: 1
+  AmastyPassword: 
+    NoEcho: true
+    Description: Amasty Repository Password
+    Type: String
     MinLength: 1
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
@@ -116,7 +120,7 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-003d8924a33dc0fd7 #Centos 7.7 AMI
+    Default: ami-0bc06212a56393ee1 #Centos 7
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -172,8 +176,30 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasAmasty: !And [!Not [!Equals [!Ref AmastyUsername, '']], !Not [!Equals [!Ref AmastyPassword, '']]]
       
 Resources:
+
+  RepoSecrets:
+    Condition: HasAmasty
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, repos]]
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, Repositories Secrets]]
+      GenerateSecretString:
+        SecretStringTemplate: !Sub
+          - |
+            {
+              "MAGENTO_USERNAME": "${MAGENTO_USERNAME}",
+              "MAGENTO_PASSWORD": "${MAGENTO_PASSWORD}",
+              "AMASTY_USERNAME": "${AMASTY_USERNAME}",
+              "AMASTY_PASSWORD": "${AMASTY_PASSWORD}"
+            }
+          - AMASTY_USERNAME: !Ref AmastyUsername
+            AMASTY_PASSWORD: !Ref AmastyPassword
+            MAGENTO_USERNAME: !Ref MagentoPublicKey
+            MAGENTO_PASSWORD: !Ref MagentoPrivateKey
+        GenerateStringKey: MagentoRepos
 
   DBStack: 
     Type: AWS::CloudFormation::Stack
@@ -219,7 +245,6 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        BitBucketUserArn: !Ref BitBucketUserArn
   
   AppServerStack: 
     DependsOn: 
@@ -261,12 +286,16 @@ Resources:
         LoadBalancerStackName: !Ref LoadBalancerStackName
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
+        InstanceOS: CentOS
         InstanceType: t3.medium
         SNSStackName: !Ref SNSStackName
         NetworkStackName: !Ref NetworkStackName
         ClientDomainName: !Ref ClientDomainName
+        LoadBalancerHostName: 'tasaki'
         MagentoPublicKey: !Ref MagentoPublicKey
         MagentoPrivateKey: !Ref MagentoPrivateKey
+        UseFriendlyNames: FALSE
+        MagentoRepoSecrets: !Ref RepoSecrets
 
   BackupStack:
     DependsOn: 
@@ -314,10 +343,341 @@ Resources:
           Fn::GetAtt:
             - DeployStack
             - Outputs.CodeDeployDeploymentGroupName
-        
+
+  # Additional language Specific DNS Records
+
+  DevSSLListenerRuleCNFRHKJPKR:
+    Condition: IsDev
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions:
+        - Type: forward
+          TargetGroupArn: 
+            Fn::GetAtt:
+              - AppServerStack
+              - Outputs.AppServerTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values:
+            - Fn::Join:
+              - '.'
+              - - tasaki-cn
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - tasaki-fr
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - tasaki-hk
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - tasaki-jp
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - tasaki-kr
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority: 732
+
+  DevSSLListenerRuleSGTWUK:
+    Condition: IsDev
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions:
+        - Type: forward
+          TargetGroupArn: 
+            Fn::GetAtt:
+              - AppServerStack
+              - Outputs.AppServerTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values:
+            - Fn::Join:
+              - '.'
+              - - tasaki-sg
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - tasaki-tw
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - tasaki-uk
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority: 733
+
+
+#####
+# Route53 Extra records
+#####
+
+  DevCNDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsDev
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - tasaki-cn #can be made dynamic if needed
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  DevFRDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsDev
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - tasaki-fr #can be made dynamic if needed
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  DevKRDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsDev
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - tasaki-kr #can be made dynamic if needed
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  DevSGDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsDev
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - tasaki-sg #can be made dynamic if needed
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  DevHKDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsDev
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - tasaki-hk #can be made dynamic if needed
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+  
+  DevJPDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsDev
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - tasaki-jp #can be made dynamic if needed
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  DevTWDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsDev
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - tasaki-tw #can be made dynamic if needed
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  DevUKDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsDev
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - tasaki-uk #can be made dynamic if needed
+                # - Fn::FindInMap:
+                #   - EnvLowerCase
+                #   - Ref: EnvName
+                #   - Name
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
 Outputs:
   DeploymentUserGroup:
-    Description: Add the BitBucket user into this group
+    Description: Add your BitBucket user into this group
     Value: 
       Fn::GetAtt:
         - DeployStack
