@@ -29,6 +29,7 @@ Metadata:
           default: Load Balancer Configuration
         Parameters:
           - LoadBalancerPriority
+          - LoadBalancerHostName
       -
         Label:
           default: Domain Configuration
@@ -63,6 +64,10 @@ Metadata:
         default: Instance Key Name
       LoadBalancerStackName:
         default: Load Balancer Stack Name
+      LoadBalancerHostName:
+        default: Load Balancer Hostname
+      LoadBalancerPriority:
+        default: Load Balancer Priority
       NetworkStackName:
         default: Network Stack Name
       SNSStackName:
@@ -118,6 +123,19 @@ Parameters:
     Default: 80 #Assume HTTP port as default on port 80
     MinValue: 1
     MaxValue: 65535
+  InstanceType:
+    Description: The type of EC2 instance
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: ''
+    MaxLength: 12
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
     Type: Number
@@ -156,6 +174,7 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
+  HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
 
 Resources:
   
@@ -178,7 +197,7 @@ Resources:
             - InstallLogAgent
             - InstallCustomData
             - InstallEFS
-            - InstallNodeJS
+            # - InstallNodeJS
             - InstallCodeDeployAgent
             # - InstallHardening
         InstallLogAgent:
@@ -217,7 +236,7 @@ Resources:
       KeyName: !If [HasInstanceKey, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref InstanceAMI
       SecurityGroups: [!GetAtt AppServerSecurityGroup.GroupId]
-      InstanceType: t3.small #Iannis - make param
+      InstanceType: !Ref InstanceType
       AssociatePublicIpAddress: true
       IamInstanceProfile: !GetAtt AppServerIamProfile.Arn
       InstanceMonitoring: true
@@ -280,13 +299,13 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /health.php
+      HealthCheckPath: /
       HealthCheckProtocol: HTTP
       HealthCheckTimeoutSeconds: 10
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
       Matcher: 
-        HttpCode: 200
+        HttpCode: 200,302
       Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
       Port: !Ref InstancePort
       Protocol: HTTP
