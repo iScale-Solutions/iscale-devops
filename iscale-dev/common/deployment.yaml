@@ -75,6 +75,134 @@ Resources:
       ApplicationName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, application]]
       ComputePlatform: Server
 
+  NotifyTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Protocol: lambda
+          Endpoint: !GetAtt  NotifyFunction.Arn
+  
+  NotifyFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        -
+          PolicyName: AccessToDeploySetup
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - codedeploy:GetDeployment
+                Resource: !Join [":", ["arn:aws:codedeploy", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "deploymentgroup:*"]]
+              -
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                #Resource: !Join [":", ["arn:aws:ec2", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "instance/*"]]
+                Resource: '*'
+
+  NotifyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function starting an EC2 instance
+      Handler: index.lambda_handler
+      Role: !GetAtt  NotifyFunctionRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          SNS_TOPIC_ARN: 
+            Fn::ImportValue:
+              !Sub "${SNSStackName}-TopicArn"
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+          import json
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            # logger.info(event)
+            # logger.info(context)
+            
+            eventSubject=event[0]['Sns']['Subject']
+            eventSubject = eventSubject.split()
+            
+            deploymentId=eventSubject[3]
+            instanceId=eventSubject[8]
+            
+            logger.info(deploymentId)
+            logger.info(instanceId)
+            
+            codedeploy=boto3.client('codedeploy')
+            deployment_details=codedeploy.get_deployment(deploymentId=deploymentId)
+            
+            application_name=deployment_details['deploymentInfo']['applicationName']
+
+            region=os.environ['REGION']
+            client=boto3.client('ec2',region_name=region)
+            instance_details=client.describe_instances(
+              InstanceIds=[instanceId]
+            )
+            publicIp=instance_details['Reservations'][0]['Instances'][0]['PublicIpAddress']
+            message=application_name + ' - Instance '+ instanceId + 'is ready with IP ' +  publicIp
+            # logger.info(instance_details)
+  
+            sns = boto3.client('sns')
+            logger.info(message)
+            
+            topic=os.environ['SNS_TOPIC_ARN']
+            sns.publish(
+              TopicArn=topic,    
+              Message=message
+            )
+
+  NotifyFunctionInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref NotifyFunction
+      Principal: sns.amazonaws.com   
+
+  NotifyTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      Topics:
+        - !Ref  NotifyTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'sns:Publish'
+            Resource: !Ref NotifyTopic
+            Principal:
+              AWS: '*'
+            Condition:
+              ArnLike:
+                AWS:SourceArn: !Sub 'arn:aws:*:*:${AWS::AccountId}:*'
+
   CodeDeployDeploymentGroup:
     Type: AWS::CodeDeploy::DeploymentGroup
     Properties:
@@ -86,11 +214,15 @@ Resources:
           TriggerEvents:
             - DeploymentSuccess
             - DeploymentFailure
-            - InstanceReady
           TriggerName: Deployment
           TriggerTargetArn:
             Fn::ImportValue:
               !Sub "${SNSStackName}-TopicArn"
+        - 
+          TriggerEvents:
+            - InstanceReady
+          TriggerName: InstanceReady
+          TriggerTargetArn: !Ref  NotifyTopic
       AutoRollbackConfiguration:
         Enabled: true
         Events:
