@@ -48,6 +48,7 @@ Metadata:
         Label:
           default: Database Configuration
         Parameters:
+          - DatabaseClusterARN
           - DatabaseEndpoint
           - DatabasePort
           - DatabaseSecurityGroupId
@@ -71,6 +72,8 @@ Metadata:
         default: Elasticache Port
       CacheSecurityGroupId:
         default: Elasticache Security Group
+      DatabaseClusterARN:
+        default: Database Cluster ARN
       DatabaseEndpoint:
         default: Database Endpoint
       DatabasePort:
@@ -138,6 +141,10 @@ Parameters:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
     Type: String
     Default: iscale-software.com
+    MinLength: 1
+  DatabaseClusterARN:
+    Description: Database Cluster ARN
+    Type: String
     MinLength: 1
   DatabaseEndpoint:
     Description: Database Endpoint
@@ -209,6 +216,7 @@ Parameters:
   MagentoRepoSecrets: 
     Description: Magento Repository Secrets Manager ARN
     Type: String
+    Default: ''
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
@@ -273,7 +281,7 @@ Resources:
             - InstallLogAgent_Linux
             - InstallCustomData
             - InstallEFS_Linux
-            - InstallMySQLClient_Linux
+            - InstallMySQLClient
             - InstallPHP_Linux
             - SetupApache
             - SetupComposer
@@ -282,7 +290,7 @@ Resources:
             # - InstallLogAgent_Centos
             - InstallCustomData
             - InstallEFS_Centos
-            - InstallMySQLClient_Centos
+            - InstallMySQLClient
             - InstallLAMP_Centos
             - InstallAWSCLI_Centos
             - SetupApache
@@ -324,6 +332,7 @@ Resources:
                   MAGENTO_PUB_KEY=${MAGENTO_PUB_KEY}
                   MAGENTO_PRIVATE_KEY=${MAGENTO_PRIVATE_KEY}
                   MAGENTO_REPOS_SECRET_ARN=${MAGENTO_REPOS_SECRET_ARN}
+                  DB_CLUSTER_ARN=${DB_CLUSTER_ARN}
                   DB_HOST=${DB_HOST}
                   DB_PORT=${DB_PORT}
                 - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
@@ -338,7 +347,8 @@ Resources:
                   MAGENTO_REPOS_SECRET_ARN: !If 
                     - HasMagentoRepoSecrets
                     - !Ref MagentoRepoSecrets
-                    - !Ref 'AWS::NoValue'
+                    - ''
+                  DB_CLUSTER_ARN: !Ref DatabaseClusterARN
                   DB_HOST: !Ref DatabaseEndpoint
                   DB_PORT: !Ref DatabasePort
               permissions: 0700
@@ -363,13 +373,7 @@ Resources:
             Parameters:
               Location: s3://iscale-dev-cloudformation/include/installEFS.yaml
         
-        InstallMySQLClient_Centos:
-          Fn::Transform:
-            Name: AWS::Include
-            Parameters:
-              Location: s3://iscale-dev-cloudformation/include/centos/installMySQLClient.yaml
-
-        InstallMySQLClient_Linux:
+        InstallMySQLClient:
           Fn::Transform:
             Name: AWS::Include
             Parameters:
@@ -423,18 +427,32 @@ Resources:
               command: yum install -y httpd
 
         InstallPHP_Linux:
-          packages:
-            yum: 
-              php73: []
-              php73-bcmath: []
-              php73-gd: []
-              php73-intl: []
-              php73-mbstring: []
-              php73-mysqlnd: []
-              php73-xml: []
-              php73-soap: []
-              httpd24: []
-              mod24_security.x86_64: []
+          commands:
+            01_Intall_Extras:
+              command: yum install -y amazon-linux-extras
+            02_Enable_PHP_73:
+              command: amazon-linux-extras enable php7.3
+            03_Clean_Metadata:
+              command: yum clean metadata
+            04_Install_PHP:
+              command: yum install -y php
+            05_Install_BcMath:
+              command: yum install -y php-bcmath
+            06_Install_Gd:
+              command: yum install -y php-gd
+            07_Install_PHP_Intl:
+              command: yum install -y php-intl
+            08_Install_PHP_MbString:
+              command: yum install -y php-mbstring
+            09_Install_PHP_Mysqlnd:
+              command: yum install -y php-mysqlnd
+            10_Install_PHP_XML:
+              command: yum install -y php-xml
+            11_Install_PHP_SOAP:
+              command: yum install -y php-soap
+            12_Install_HTTPD:
+              command: yum install -y httpd
+              # mod24_security.x86_64: []
 
         InstallAWSCLI_Centos:
           Fn::Transform:
