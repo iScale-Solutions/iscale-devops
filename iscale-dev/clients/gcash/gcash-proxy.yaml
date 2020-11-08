@@ -99,11 +99,19 @@ Resources:
       StageName: 'v0'
 
   APIGatewayDeployment:
-    DependsOn: [CreateActivationKeyPostMethod]
+    DependsOn: 
+      - CreateActivationKeyPostMethod
+      - OrderCreatePostMethod
     Type: AWS::ApiGateway::Deployment
     Properties:
       Description: "Deployment v0"
       RestApiId: !Ref APIGatewayRestApi
+
+  APIGatewayRequestValidator:
+    Type: AWS::ApiGateway::RequestValidator
+    Properties:
+      RestApiId: !Ref APIGatewayRestApi
+      ValidateRequestBody: True
 
   APIGatewayIamRole:
     Type: AWS::IAM::Role
@@ -128,12 +136,84 @@ Resources:
                 Action: 'lambda:InvokeFunction'
                 Resource:
                   - !GetAtt CreateActivationKeyFunction.Arn
+                  - !GetAtt APIGatewayAuthorizerFunction.Arn
+                  - !GetAtt OrderCreateFunction.Arn
+
+  APIGatewayAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    DependsOn: APIGatewayAuthorizerFunction
+    Properties:
+      AuthorizerCredentials: !GetAtt APIGatewayIamRole.Arn
+      AuthorizerResultTtlInSeconds: 300
+      AuthorizerUri: !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', ':lambda:path/2015-03-31/functions/', !GetAtt APIGatewayAuthorizerFunction.Arn, '/invocations']]
+      Type: REQUEST
+      IdentitySource: method.request.header.AuthActivationKey
+      Name: ActivationKeyAuthorizer
+      RestApiId: !Ref APIGatewayRestApi
+
+  APIGatewayAuthorizerFunction:
+    DependsOn: ActivationKeysDBTable
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile:
+          !Sub
+            - |
+              def handler(event, context):
+                import boto3
+                import json
+                
+                header_params = json.loads(event["header"])
+                activationKeyToTest = header_params['AuthActivationKey']
+                
+                dynamodb_client = boto3.client('dynamodb')
+                result = dynamodb_client.query(
+                  TableName='${table_name}',
+                  IndexName='ActivationKey-Status-index'
+                  Select='Çount'
+                  KeyConditions={
+                    'ActivationKey': { 'S': activationKeyToTest },
+                    'Status': { 'N': '1' }
+                  }
+                )
+
+                console.log(result)
+
+                return {
+                  "principalId": "gcash", // The principal user identification associated with the token sent by the client.
+                  "policyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                      "Action": "execute-api:Invoke",
+                      "Effect": "Allow",
+                      "Resource": event.routeArn
+                    }]
+                  },
+                  "context": {}
+                }
+                # response = {
+                #   'isBase64Encoded': False,
+                #   'statusCode': statusCode,
+                #   'headers': {
+                #     "Access-Control-Allow-Origin" : "*"
+                #   },
+                #   'multiValueHeaders': {},
+                #   'body': return_body
+                # }
+                # return response
+            - table_name: !Ref ActivationKeysDBTable
+      Description: "Authenticates via the Activation Key"
+      Handler: index.handler
+      MemorySize: 256
+      Role: !GetAtt ManageActivationKeysLamdbaRole.Arn
+      Runtime: python3.7
+      Timeout: 20
 
 ####
 # CreateActivationKey API
 ####
 
-  CreateActivationKeyModel:
+  CreateActivationKeyRequestModel:
     Type: AWS::ApiGateway::Model
     Properties:
       ContentType: application/json
@@ -152,12 +232,6 @@ Resources:
         required:
           - domain
           - email
-  
-  CreateActivationKeyRequestValidator:
-    Type: AWS::ApiGateway::RequestValidator
-    Properties:
-      RestApiId: !Ref APIGatewayRestApi
-      ValidateRequestBody: True
 
   CreateActivationKeyResource:
     Type: AWS::ApiGateway::Resource
@@ -220,7 +294,7 @@ Resources:
                 
                 dynamodb_client = boto3.client('dynamodb')
                 result = dynamodb_client.put_item(
-                  TableName='iscale-dev-uw2-gcash-ActivationKeysDBTable-SNSW980F3GRE',
+                  TableName='${table_name}',
                   Item={
                     'ActivationKey': { 'S': random_key},
                     'Status': { 'N': '1' },
@@ -262,7 +336,6 @@ Resources:
       HttpMethod: POST
       Integration:
         ConnectionType: INTERNET
-        # Credentials: !GetAtt ManageActivationKeysLamdbaRole.Arn
         Credentials: !GetAtt APIGatewayIamRole.Arn
         IntegrationHttpMethod: POST
         PassthroughBehavior: WHEN_NO_MATCH
@@ -271,10 +344,151 @@ Resources:
         Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CreateActivationKeyFunction.Arn}/invocations'
       OperationName: activate
       RequestModels: 
-        application/json: !Ref CreateActivationKeyModel
-      RequestValidatorId: !Ref CreateActivationKeyRequestValidator
+        application/json: !Ref CreateActivationKeyRequestModel
+      RequestValidatorId: !Ref APIGatewayRequestValidator
       ResourceId: !Ref CreateActivationKeyResource
       RestApiId: !Ref APIGatewayRestApi
+
+####
+# OrderCreateAPI
+####
+
+  GCashResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt APIGatewayRestApi.RootResourceId
+      PathPart: gcash
+      RestApiId: !Ref APIGatewayRestApi
+
+  AcquiringResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !Ref GCashResource
+      PathPart: acquiring
+      RestApiId: !Ref APIGatewayRestApi
+
+  OrderResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !Ref AcquiringResource
+      PathPart: order
+      RestApiId: !Ref APIGatewayRestApi
+
+  OrderCreateRequestModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: application/json
+      RestApiId: !Ref APIGatewayRestApi
+      Description: Model for POST OrderCreate method
+      Schema:
+        $schema: http://json-schema.org/draft-07/schema#
+        type: object
+        properties:
+          order:
+            type: string
+            description: Order
+          merchantId:
+            type: string
+            description: Merchant Id
+          subMerchantId:
+            type: string
+            description: SubMerchant Id
+          subMerchantName:
+            type: string
+            description: SubMerchant Name
+          productCode:
+            type: string
+            description: Product Code
+        required:
+          - order
+          - merchantId
+  
+  OrderCreateResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !Ref OrderResource
+      PathPart: create
+      RestApiId: !Ref APIGatewayRestApi
+
+  OrderCreateOptionMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      RestApiId: !Ref APIGatewayRestApi
+      ResourceId: !Ref OrderCreateResource
+      HttpMethod: OPTIONS
+      OperationName: OrderCreate
+      Integration:
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        Type: MOCK
+      MethodResponses:
+      - StatusCode: 200
+        ResponseModels:
+          application/json: 'Empty'
+        ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  OrderCreateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile:
+          !Sub
+            - |
+              def handler(event, context):
+                
+                response = {
+                  'isBase64Encoded': False,
+                  'statusCode': 200,
+                  'headers': {
+                    "Access-Control-Allow-Origin" : "*"
+                  },
+                  'multiValueHeaders': {},
+                  'body': 'OK'
+                }
+                return response
+            - table_name: !Ref ActivationKeysDBTable #Need to see if we need substitution
+      Description: "Does nothing for now"
+      Handler: index.handler
+      MemorySize: 256
+      Role: !GetAtt ManageActivationKeysLamdbaRole.Arn
+      Runtime: python3.7
+      Timeout: 20
+
+  OrderCreatePostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref APIGatewayAuthorizer
+      HttpMethod: POST
+      Integration:
+        ConnectionType: INTERNET
+        Credentials: !GetAtt APIGatewayIamRole.Arn
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_MATCH
+        TimeoutInMillis: 20000
+        Type: AWS_PROXY
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OrderCreateFunction.Arn}/invocations'
+      OperationName: OrderCreate
+      RequestModels: 
+        application/json: !Ref OrderCreateRequestModel
+      RequestValidatorId: !Ref APIGatewayRequestValidator
+      ResourceId: !Ref OrderCreateResource
+      RestApiId: !Ref APIGatewayRestApi
+
 
 ####
 # DynamoDB Resources
