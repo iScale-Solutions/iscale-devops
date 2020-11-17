@@ -289,13 +289,13 @@ Resources:
           CentOS: 
             # - InstallLogAgent_Centos
             - InstallCustomData
-            - InstallEFS_Centos
-            - InstallMySQLClient
-            - InstallLAMP_Centos
-            - InstallAWSCLI_Centos
-            - SetupApache
-            - SetupComposer
-            - InstallCodeDeployAgent
+            # # - InstallEFS_Centos
+            # - InstallMySQLClient
+            # - InstallLAMP_Centos
+            # - InstallAWSCLI_Centos
+            # #- SetupApache
+            # - SetupComposer
+            # - InstallCodeDeployAgent
           Test:
             - InstallLAMP_Centos
             
@@ -329,6 +329,7 @@ Resources:
                   SECRET_ID=${SECRET_ID}
                   BASE_URL=https://${DOMAIN}/
                   BUCKET_NAME=${BUCKET_NAME}
+                  EFS_ID=${EFS_ID}
                   MAGENTO_PUB_KEY=${MAGENTO_PUB_KEY}
                   MAGENTO_PRIVATE_KEY=${MAGENTO_PRIVATE_KEY}
                   MAGENTO_REPOS_SECRET_ARN=${MAGENTO_REPOS_SECRET_ARN}
@@ -340,6 +341,7 @@ Resources:
                   CLIENT_NAME: !Ref Name
                   APPLICATION_SITE: !Ref OrgName
                   INSTANCE_ROLE: !Ref AppServerIamRole
+                  EFS_ID: !Ref AppServerFileSystem
                   SECRET_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
                   BUCKET_NAME: !Ref DataS3Bucket
                   MAGENTO_PUB_KEY: !Ref MagentoPublicKey
@@ -399,8 +401,8 @@ Resources:
               command: yum install -y php-fpm
             07_PHP_Mysqlnd:
               command: yum install -y php-mysqlnd
-            08_PHP_Devel:
-              command: yum install -y php-devel
+            # 08_PHP_Devel:
+            #   command: yum install -y php-devel
             09_PHP_Gd:
               command: yum install -y php-gd
             10_PHP_Curl:
@@ -423,8 +425,10 @@ Resources:
               command: yum install -y php-intl
             19_PHP_SOAP:
               command: yum install -y php-soap
-            20_HTTPD:
-              command: yum install -y httpd
+            20_Set_Memory_Limit: 
+              command: sed -i 's,^memory_limit =.*$,memory_limit = 2048M,' /etc/php.ini
+            # 20_HTTPD:
+            #   command: yum install -y httpd
 
         InstallPHP_Linux:
           commands:
@@ -572,16 +576,21 @@ Resources:
             # Install the files and packages from the metadata
             ${BOOT_INSTALL}
             /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c ${OSTYPE} --region ${AWS::Region} --role ${ROLE}
+            ${BOOT_AFTER_CFN}
             # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
-            /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
-            # Signal the status from cfn-init
-            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
+            # /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signals the status from cfn-init
+            # /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchConfig  --region ${AWS::Region}
           - ROLE: !Ref AppServerIamRole
             OSTYPE: !Ref InstanceOS
             BOOT_INSTALL: !If
               - IsLinux
               - yum install -y aws-cfn-bootstrap
               - yum install -y epel-release && yum install -y https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.amzn1.noarch.rpm && ln -s /usr/local/lib/python2.7/site-packages/cfnbootstrap /usr/lib/python2.7/site-packages/cfnbootstrap
+            BOOT_AFTER_CFN: !If
+              - IsLinux
+              - service codedeploy-agent status
+              - service codedeploy-agent start
 
   AppServerAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
