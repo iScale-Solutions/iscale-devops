@@ -75,14 +75,14 @@ Resources:
       ApplicationName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, application]]
       ComputePlatform: Server
 
-  NotifyTopic:
+  NotifyReadyTopic:
     Type: AWS::SNS::Topic
     Properties:
       Subscription:
         - Protocol: lambda
-          Endpoint: !GetAtt  NotifyFunction.Arn
+          Endpoint: !GetAtt  NotifyReadyFunction.Arn
   
-  NotifyFunctionRole:
+  NotifyReadyFunctionRole:
     Type: AWS::IAM::Role
     Properties:
       Path: /
@@ -115,26 +115,25 @@ Resources:
                 Effect: Allow
                 Action:
                   - ec2:DescribeInstances
-                #Resource: !Join [":", ["arn:aws:ec2", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "instance/*"]]
                 Resource: '*'
 
-  NotifyFunction:
+  NotifyReadyFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Description: Lambda Function starting an EC2 instance
+      Description: Give the IP address of a ready EC2 instance in an AutoScaling group
       Handler: index.lambda_handler
-      Role: !GetAtt  NotifyFunctionRole.Arn
+      Role: !GetAtt  NotifyReadyFunctionRole.Arn
       Runtime: python3.6
       Timeout: 60
       Environment:
         Variables:
+          ENV_NAME: !Ref EnvName
           REGION: !Ref AWS::Region
           SNS_TOPIC_ARN: 
             Fn::ImportValue:
               !Sub "${SNSStackName}-TopicArn"
       Code:
         ZipFile: |
-
           import boto3
           import logging
           import os
@@ -158,18 +157,15 @@ Resources:
             
             codedeploy=boto3.client('codedeploy')
             deployment_details=codedeploy.get_deployment(deploymentId=deploymentId)
-            
             application_name=deployment_details['deploymentInfo']['applicationName']
 
             region=os.environ['REGION']
+            environment=os.environ['ENV_NAME']
             client=boto3.client('ec2',region_name=region)
-            instance_details=client.describe_instances(
-              InstanceIds=[instanceId]
-            )
+            instance_details=client.describe_instances(InstanceIds=[instanceId])
             publicIp=instance_details['Reservations'][0]['Instances'][0]['PublicIpAddress']
-            message=application_name + ' - Instance '+ instanceId + 'is ready with IP ' +  publicIp
-            # logger.info(instance_details)
-  
+            message='Deployment ID:' + deploymentId + '\nEC2 ready for '+ application_name + '(' + environment + '). \nInstance ' + instanceId + ' IP address:' +  publicIp
+            
             sns = boto3.client('sns')
             logger.info(message)
             
@@ -179,24 +175,24 @@ Resources:
               Message=message
             )
 
-  NotifyFunctionInvokePermission:
+  NotifyReadyFunctionInvokePermission:
     Type: 'AWS::Lambda::Permission'
     Properties:
       Action: 'lambda:InvokeFunction'
-      FunctionName: !Ref NotifyFunction
+      FunctionName: !Ref NotifyReadyFunction
       Principal: sns.amazonaws.com   
 
-  NotifyTopicPolicy:
+  NotifyReadyTopicPolicy:
     Type: 'AWS::SNS::TopicPolicy'
     Properties:
       Topics:
-        - !Ref  NotifyTopic
+        - !Ref NotifyReadyTopic
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Action: 'sns:Publish'
-            Resource: !Ref NotifyTopic
+            Resource: !Ref NotifyReadyTopic
             Principal:
               AWS: '*'
             Condition:
@@ -214,7 +210,7 @@ Resources:
           TriggerEvents:
             - DeploymentSuccess
             - DeploymentFailure
-          TriggerName: Deployment
+          TriggerName: DeploymentState
           TriggerTargetArn:
             Fn::ImportValue:
               !Sub "${SNSStackName}-TopicArn"
@@ -222,7 +218,7 @@ Resources:
           TriggerEvents:
             - InstanceReady
           TriggerName: InstanceReady
-          TriggerTargetArn: !Ref  NotifyTopic
+          TriggerTargetArn: !Ref  NotifyReadyTopic
       AutoRollbackConfiguration:
         Enabled: true
         Events:
@@ -254,6 +250,11 @@ Resources:
     Type: AWS::S3::Bucket
     Properties: 
       BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, code-deploy]]
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
       Tags:
         - 
           Key: Name
@@ -321,6 +322,10 @@ Outputs:
   DeploymentBucketArn:
     Description: The Arn of the Deployment Bucket
     Value: !GetAtt DeploymentBucket.Arn
+
+  DeploymentBucketName:
+    Description: The Name of the Deployment S3 Bucket
+    Value: !Ref DeploymentBucket
 
   DeploymentUserAccessKey:
     Condition: HasCreateDeployUser
