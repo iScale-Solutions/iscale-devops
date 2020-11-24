@@ -1,0 +1,581 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Odoo Image Builder
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      -
+        Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      -
+        Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      InstanceKeyName:
+        default: Instance Key Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: 'Iannis-dev-key'
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+    MinLength: 1
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml      
+
+Resources:
+
+  ImageInfrastructureConfig:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties: 
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      InstanceProfileName: EC2InstanceProfileForImageBuilder
+      InstanceTypes: 
+        - t3.micro
+        - t3.small
+        - t3.medium
+      KeyPair: !Ref InstanceKeyName
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      SecurityGroupIds: 
+        - !Ref ImageSecurityGroup
+      SnsTopicArn: 
+        Fn::ImportValue:
+          !Sub "${SNSStackName}-TopicArn"
+      SubnetId:
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      TerminateInstanceOnFailure: true
+
+  ImageDistributionConfiguration:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Distributions:
+        - Region: !Ref 'AWS::Region'
+          AmiDistributionConfiguration:
+            Name: 'odoo-base-image {{ imagebuilder:buildDate }}'
+            Description: 'description'
+      Tags:
+        Name: Odoo Base Image
+
+  ImageSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, image-builder]]
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, image-builder]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  ImageSecurityGroupAllowSSH:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !Ref ImageSecurityGroup
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+
+  CodeDeployComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: CodeDeploy
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.2
+      Description: Installs the CodeDeploy Agent
+      ChangeDescription: Initial version
+      Data: |
+        name: CodeDeploy - InlineData
+        description: Installation of CodeDeploy Agent
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: YumInstallWgetRuby
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y wget
+                    - sudo yum install -y ruby
+              - name: CreateCodeDeployconfig
+                action: CreateFile
+                inputs:
+                  - path: /opt/odoo14/odoo14.conf
+                    content: |
+                      [/var/log/aws/codedeploy-agent/codedeploy-agent.log]
+                      datetime_format = %b %d %H:%M:%S
+                      file = /var/log/aws/codedeploy-agent/codedeploy-agent.log
+                      buffer_duration = 5000
+                      log_stream_name = {instance_id}
+                      initial_position = start_of_file
+                      log_group_name = /var/log/aws/codedeploy-agent/codedeploy-agent.log
+              - name: WGetInstall
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - wget -P /tmp https://aws-codedeploy-us-west-2.s3.us-west-2.amazonaws.com/latest/install
+              - name: SetInstallPermissions
+                action: SetFilePermissions
+                inputs:
+                  - path: /tmp/install
+                    permissions: 700
+              - name: ExecuteInstall
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - /tmp/install auto
+              - name: CleanupInstall
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - rm -fr /tmp/install
+              - name: LinkCFNInit
+                action: CreateSymlink
+                inputs:
+                  - path: /usr/local/bin/cfn-init
+                    target: /opt/aws/bin/cfn-init
+                    force: true
+              - name: LinkCFNHup
+                action: CreateSymlink
+                inputs:
+                  - path: /usr/local/bin/cfn-hup
+                    target: /opt/aws/bin/cfn-hup
+                    force: true
+              - name: LinkCFNSignal
+                action: CreateSymlink
+                inputs:
+                  - path: /usr/local/bin/
+                    target: /opt/aws/bin/cfn-signal
+                    force: true
+
+  EPELRepoComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: EPEL
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.1
+      Description: Installs EPEL repository
+      ChangeDescription: Initial version
+      Data: |
+        name: InstallGit - InlineData
+        description: This is the EPEL installation
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: EPELInstall
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo amazon-linux-extras install -y epel
+              - name: YumUpdate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum -y update
+
+  GitComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Git
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs Git client via yum
+      ChangeDescription: Initial version
+      Data: |
+        name: InstallGit - InlineData
+        description: This is the yum installation for Git
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: YumInstall
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y git
+  
+  NginxComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: NginX
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.2
+      Description: Installs NginX
+      ChangeDescription: Initial version
+      Data: |
+        name: NginX - InlineData
+        description: Installation of NginX
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: YumInstallNginx
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo amazon-linux-extras install -y nginx1
+  
+  Odoo14Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Odoo 14
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.2
+      Description: Installs Odoo 14
+      ChangeDescription: Initial version
+      Data: |
+        name: Odoo 14 - InlineData
+        description: Installation of Odoo 14
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateDirs
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - mkdir -p /opt/odoo14
+                    - mkdir -p /var/log/odoo14
+              - name: DownloadOdoo14
+                action: WebDownload
+                maxAttempts: 3
+                inputs:
+                  - source: https://github.com/odoo/odoo/archive/14.0.zip
+                    destination: /tmp/14.0.zip
+              - name: UnzipOdoo14
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - unzip /tmp/14.0.zip -d /opt/odoo14
+                    - mv -fv /opt/odoo14/odoo-14.0/* /opt/odoo14/
+                    - rm -fr /opt/odoo14/odoo-14.0/
+              - name: InstallOdoo14Requirements
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo pip3 install -r /opt/odoo14/requirements.txt
+              - name: CreateOdoo14config
+                action: CreateFile
+                inputs:
+                  - path: /opt/odoo14/odoo14.conf
+                    content: |
+                      [options]
+                      addons_path = /opt/odoo14/odoo/addons,/opt/odoo14/addons
+                      admin_passwd = admin
+                      csv_internal_sep = ,
+                      data_dir = /home/ec2-user/.local/share/Odoo
+                      db_host = False
+                      db_maxconn = 64
+                      db_name = False
+                      db_password = False
+                      db_port = False
+                      db_sslmode = prefer
+                      db_template = template0
+                      db_user = False
+                      dbfilter =
+                      demo = {}
+                      email_from = False
+                      # geoip_database = /usr/share/GeoIP/GeoLite2-City.mmdb
+                      http_enable = True
+                      http_interface =
+                      http_port = 8069
+                      import_partial =
+                      limit_memory_hard = 2684354560
+                      limit_memory_soft = 2147483648
+                      limit_request = 8192
+                      limit_time_cpu = 60
+                      limit_time_real = 120
+                      limit_time_real_cron = -1
+                      list_db = True
+                      log_db = False
+                      log_db_level = warning
+                      log_handler = :INFO
+                      log_level = info
+                      logfile =
+                      longpolling_port = 8072
+                      max_cron_threads = 2
+                      osv_memory_age_limit = False
+                      osv_memory_count_limit = False
+                      pg_path =
+                      pidfile =
+                      proxy_mode = True
+                      reportgz = False
+                      screencasts =
+                      screenshots = /tmp/odoo_tests
+                      server_wide_modules = base,web
+                      smtp_password = False
+                      smtp_port = 25
+                      smtp_server = localhost
+                      smtp_ssl = False
+                      smtp_user = False
+                      syslog = False
+                      test_enable = False
+                      test_file =
+                      test_tags = None
+                      transient_age_limit = 1.0
+                      translate_modules = ['all']
+                      unaccent = False
+                      upgrade_path =
+                      without_demo = False
+                      workers = 0
+                    overwrite: true
+              - name: SetOdoo14Permissions
+                action: SetFolderOwner
+                inputs:
+                  - path: /opt/odoo14
+                    owner: ec2-user
+                    group: ec2-user
+              - name: SetOdoo14LogPermissions
+                action: SetFolderOwner
+                inputs:
+                  - path: /var/log/odoo14
+                    owner: ec2-user
+                    group: ec2-user
+              - name: CreateOdoo14Service
+                action: CreateFile
+                inputs:
+                  - path: /lib/systemd/system/odoo14.service
+                    content: |
+                      [Unit]
+                      Description=Odoo14 Server
+                          
+                      [Service]
+                      Type=simple
+                      PermissionsStartOnly=true
+                      SyslogIdentifier=odoo14-server
+                      User=ec2-user
+                      Group=ec2-user
+                      ExecStart=/opt/odoo14/odoo-bin -c /opt/odoo14/odoo14.conf
+                      WorkingDirectory=/opt/odoo14/
+                          
+                      [Install]
+                      WantedBy=multi-user.target
+                    overwrite: true
+
+  OpenLDAPDevelComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: OpenLDAP Devel
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs OpenLDAP Development packages
+      ChangeDescription: Initial version
+      Data: |
+        name: InstallOpenLDAPDevel - InlineData
+        description: This is the yum installation for OpenLDAP Devel
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: YumInstallOpenLDAPDevel
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y openldap-devel
+
+  PostgreSQLClientComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PostgreSQL 11 Client
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs PostgreSQL 11 Client
+      ChangeDescription: Initial version
+      Data: |
+        name: InstallPostgreSQL11 - InlineData
+        description: This is the PostgreSQL 11 installation
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallPostgreSQL11
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo amazon-linux-extras install -y postgresql11
+              - name: YumUpdate
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum -y update
+
+  Python3DevelComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Python 3 Devel
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs Python 3 Development packages
+      ChangeDescription: Initial version
+      Data: |
+        name: InstallPython3Devel - InlineData
+        description: This is the yum installation for Python 3 Devel
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: YumInstallPythonDevel
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y gcc python3-devel.x86_64
+  
+  WkHTMLToPDFComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: WkHTMLToPDF 0-12-5
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs WkHTMLToPDF
+      ChangeDescription: Initial version
+      Data: |
+        name: WkHTMLToPDF - InlineData
+        description: This is the yum installation for WkHTMLToPDF
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: YumInstallWkHTMLToPDF
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y --nogpgcheck https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox-0.12.5-1.centos7.x86_64.rpm
+
+
+  Odoo14ImagePipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Name: Odoo 14 Image Pipeline
+      Description: Odoo 14 Image Pipeline
+      ImageRecipeArn: !Ref Odoo14ImageRecipe
+      InfrastructureConfigurationArn: !Ref ImageInfrastructureConfig
+      DistributionConfigurationArn: !Ref ImageDistributionConfiguration
+      ImageTestsConfiguration:
+        ImageTestsEnabled: true
+        TimeoutMinutes: 60
+      Status: ENABLED
+
+  Odoo14ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: Odoo14 Image Recipe
+      Version: 1.0.5
+      ParentImage: arn:aws:imagebuilder:us-west-2:aws:image/amazon-linux-2-x86/2019.11.21
+      WorkingDirectory: /tmp
+      Description: Base image for Odoo 14
+      Components:
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/amazon-cloudwatch-agent-linux/1.0.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-linux/1.0.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux-kernel-mainline/1.0.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux/1.0.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/python-3-linux/1.0.2/1']]
+        - ComponentArn: !Ref EPELRepoComponent
+        - ComponentArn: !Ref PostgreSQLClientComponent
+        - ComponentArn: !Ref CodeDeployComponent
+        - ComponentArn: !Ref GitComponent
+        - ComponentArn: !Ref Python3DevelComponent
+        - ComponentArn: !Ref OpenLDAPDevelComponent
+        - ComponentArn: !Ref WkHTMLToPDFComponent
+        - ComponentArn: !Ref Odoo14Component
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/stig-build-linux-high/2.8.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/reboot-linux/1.0.1/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/chrony-time-configuration-test/1.0.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/validate-ssh-host-key-generation-linux/1.0.1/1']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            KmsKeyId: !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]
+            VolumeType: gp2
+            VolumeSize: 8
