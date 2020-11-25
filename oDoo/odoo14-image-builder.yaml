@@ -152,7 +152,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.2
+      Version: 1.0.3
       Description: Installs the CodeDeploy Agent
       ChangeDescription: Initial version
       Data: |
@@ -215,23 +215,23 @@ Resources:
               - name: LinkCFNSignal
                 action: CreateSymlink
                 inputs:
-                  - path: /usr/local/bin/
+                  - path: /usr/local/bin/cfn-signal
                     target: /opt/aws/bin/cfn-signal
                     force: true
 
-  EPELRepoComponent:
+  AWSLinuxUtilitiesComponent:
     Type: AWS::ImageBuilder::Component
     Properties:
-      Name: EPEL
+      Name: AWS Linux Utilities
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.1
-      Description: Installs EPEL repository
+      Version: 1.0.0
+      Description: Installs EPEL repository, Git, JQuery, EFS, CFN, Telnet, wget
       ChangeDescription: Initial version
       Data: |
-        name: InstallGit - InlineData
-        description: This is the EPEL installation
+        name: AWWS Linux Utilities - InlineData
+        description: Linux Utilities Installation
         schemaVersion: 1.0
         phases:
           - name: build
@@ -246,29 +246,36 @@ Resources:
                 inputs:
                   commands:
                     - sudo yum -y update
-
-  GitComponent:
-    Type: AWS::ImageBuilder::Component
-    Properties:
-      Name: Git
-      Platform: Linux
-      SupportedOsVersions:
-        - Amazon Linux 2
-      Version: 1.0.0
-      Description: Installs Git client via yum
-      ChangeDescription: Initial version
-      Data: |
-        name: InstallGit - InlineData
-        description: This is the yum installation for Git
-        schemaVersion: 1.0
-        phases:
-          - name: build
-            steps:
-              - name: YumInstall
+              - name: InstallGit
                 action: ExecuteBash
                 inputs:
                   commands:
                     - sudo yum install -y git
+              - name: InstallJQuery
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y jq
+              - name: InstallEFS
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y amazon-efs-utils
+              - name: InstallCloudFormation
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y aws-cfn-bootstrap
+              - name: InstallTelnet
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y telnet
+              - name: InstallWget
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y wget
   
   NginxComponent:
     Type: AWS::ImageBuilder::Component
@@ -310,6 +317,11 @@ Resources:
         phases:
           - name: build
             steps:
+              - name: InstallWkHTMLToPDF
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y --nogpgcheck https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox-0.12.5-1.centos7.x86_64.rpm
               - name: CreateDirs
                 action: ExecuteBash
                 inputs:
@@ -506,30 +518,6 @@ Resources:
                   commands:
                     - sudo yum install -y gcc python3-devel.x86_64
   
-  WkHTMLToPDFComponent:
-    Type: AWS::ImageBuilder::Component
-    Properties:
-      Name: WkHTMLToPDF 0-12-5
-      Platform: Linux
-      SupportedOsVersions:
-        - Amazon Linux 2
-      Version: 1.0.0
-      Description: Installs WkHTMLToPDF
-      ChangeDescription: Initial version
-      Data: |
-        name: WkHTMLToPDF - InlineData
-        description: This is the yum installation for WkHTMLToPDF
-        schemaVersion: 1.0
-        phases:
-          - name: build
-            steps:
-              - name: YumInstallWkHTMLToPDF
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo yum install -y --nogpgcheck https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox-0.12.5-1.centos7.x86_64.rpm
-
-
   Odoo14ImagePipeline:
     Type: AWS::ImageBuilder::ImagePipeline
     Properties:
@@ -547,23 +535,21 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: Odoo14 Image Recipe
-      Version: 1.0.5
+      Version: 1.0.9
       ParentImage: arn:aws:imagebuilder:us-west-2:aws:image/amazon-linux-2-x86/2019.11.21
       WorkingDirectory: /tmp
       Description: Base image for Odoo 14
-      Components:
+      Components: #Max 20
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/amazon-cloudwatch-agent-linux/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-linux/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux-kernel-mainline/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/python-3-linux/1.0.2/1']]
-        - ComponentArn: !Ref EPELRepoComponent
+        - ComponentArn: !Ref AWSLinuxUtilitiesComponent
         - ComponentArn: !Ref PostgreSQLClientComponent
         - ComponentArn: !Ref CodeDeployComponent
-        - ComponentArn: !Ref GitComponent
         - ComponentArn: !Ref Python3DevelComponent
         - ComponentArn: !Ref OpenLDAPDevelComponent
-        - ComponentArn: !Ref WkHTMLToPDFComponent
         - ComponentArn: !Ref Odoo14Component
         - ComponentArn: !Ref NginxComponent
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/stig-build-linux-high/2.8.0/1']]
