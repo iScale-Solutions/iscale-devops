@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Odoo Image Builder
+Description: Base Image Builder for Amazon Linux
 
 Metadata:
   AWS::CloudFormation::Interface: 
@@ -17,11 +17,6 @@ Metadata:
         Parameters:
           - NetworkStackName
           - SNSStackName
-      -
-        Label:
-          default: Instance Configuration
-        Parameters:
-          - InstanceKeyName
 
     ParameterLabels:
       Name:
@@ -34,35 +29,28 @@ Metadata:
         default: Network Stack Name
       SNSStackName:
         default: SNS Topic Stack Name
-      InstanceKeyName:
-        default: Instance Key Name
 
 Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
-    MinLength: 3
-    MaxLength: 9
+    Default: image-builder
   OrgName:
     Description: The name of the organization.
     Type: String
-    Default: iscale
+    Default: iscale-dev
     AllowedPattern: "^[a-z]+(-[a-z]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
     MaxLength: 10
   EnvName:
     Description: The name of the environment
     Type: String
-    Default: Development
+    Default: Production
     AllowedValues:
       - Production
       - Staging
       - Development
       - Test
-  InstanceKeyName:
-    Description: Instance Key Name
-    Type: String
-    Default: 'Iannis-dev-key'
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
@@ -88,62 +76,9 @@ Conditions:
 
 Resources:
 
-  ImageInfrastructureConfig:
-    Type: AWS::ImageBuilder::InfrastructureConfiguration
-    Properties: 
-      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-      InstanceProfileName: EC2InstanceProfileForImageBuilder
-      InstanceTypes: 
-        - t3.micro
-        - t3.small
-        - t3.medium
-      KeyPair: !Ref InstanceKeyName
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-      SecurityGroupIds: 
-        - !Ref ImageSecurityGroup
-      SnsTopicArn: 
-        Fn::ImportValue:
-          !Sub "${SNSStackName}-TopicArn"
-      SubnetId:
-        Fn::ImportValue:
-          Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
-      TerminateInstanceOnFailure: true
-
-  ImageDistributionConfiguration:
-    Type: AWS::ImageBuilder::DistributionConfiguration
-    Properties:
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-      Distributions:
-        - Region: !Ref 'AWS::Region'
-          AmiDistributionConfiguration:
-            Name: 'odoo-base-image {{ imagebuilder:buildDate }}'
-            Description: 'description'
-      Tags:
-        Name: Odoo Base Image
-
-  ImageSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, image-builder]]
-      VpcId:
-        Fn::ImportValue:
-          Fn::Sub: "${NetworkStackName}-VpcId"
-      Tags:
-        - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, image-builder]]
-        - Key: Environment
-          Value: !Ref EnvName
-        - Key: Organization
-          Value: !Ref OrgName
-
-  ImageSecurityGroupAllowSSH:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
-      GroupId: !Ref ImageSecurityGroup
-      IpProtocol: TCP
-      FromPort: 22
-      ToPort: 22
-      CidrIp: 0.0.0.0/0
+###
+# Common components
+###
 
   CodeDeployComponent:
     Type: AWS::ImageBuilder::Component
@@ -152,7 +87,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.3
+      Version: 1.0.0
       Description: Installs the CodeDeploy Agent
       ChangeDescription: Initial version
       Data: |
@@ -284,7 +219,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.2
+      Version: 1.0.0
       Description: Installs NginX
       ChangeDescription: Initial version
       Data: |
@@ -300,150 +235,6 @@ Resources:
                   commands:
                     - sudo amazon-linux-extras install -y nginx1
   
-  Odoo14Component:
-    Type: AWS::ImageBuilder::Component
-    Properties:
-      Name: Odoo 14
-      Platform: Linux
-      SupportedOsVersions:
-        - Amazon Linux 2
-      Version: 1.0.2
-      Description: Installs Odoo 14
-      ChangeDescription: Initial version
-      Data: |
-        name: Odoo 14 - InlineData
-        description: Installation of Odoo 14
-        schemaVersion: 1.0
-        phases:
-          - name: build
-            steps:
-              - name: InstallWkHTMLToPDF
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo yum install -y --nogpgcheck https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox-0.12.5-1.centos7.x86_64.rpm
-              - name: CreateDirs
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - mkdir -p /opt/odoo14
-                    - mkdir -p /var/log/odoo14
-              - name: DownloadOdoo14
-                action: WebDownload
-                maxAttempts: 3
-                inputs:
-                  - source: https://github.com/odoo/odoo/archive/14.0.zip
-                    destination: /tmp/14.0.zip
-              - name: UnzipOdoo14
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - unzip /tmp/14.0.zip -d /opt/odoo14
-                    - mv -fv /opt/odoo14/odoo-14.0/* /opt/odoo14/
-                    - rm -fr /opt/odoo14/odoo-14.0/
-              - name: InstallOdoo14Requirements
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo pip3 install -r /opt/odoo14/requirements.txt
-              - name: CreateOdoo14config
-                action: CreateFile
-                inputs:
-                  - path: /opt/odoo14/odoo14.conf
-                    content: |
-                      [options]
-                      addons_path = /opt/odoo14/odoo/addons,/opt/odoo14/addons
-                      admin_passwd = admin
-                      csv_internal_sep = ,
-                      data_dir = /home/ec2-user/.local/share/Odoo
-                      db_host = False
-                      db_maxconn = 64
-                      db_name = False
-                      db_password = False
-                      db_port = False
-                      db_sslmode = prefer
-                      db_template = template0
-                      db_user = False
-                      dbfilter =
-                      demo = {}
-                      email_from = False
-                      # geoip_database = /usr/share/GeoIP/GeoLite2-City.mmdb
-                      http_enable = True
-                      http_interface =
-                      http_port = 8069
-                      import_partial =
-                      limit_memory_hard = 2684354560
-                      limit_memory_soft = 2147483648
-                      limit_request = 8192
-                      limit_time_cpu = 60
-                      limit_time_real = 120
-                      limit_time_real_cron = -1
-                      list_db = True
-                      log_db = False
-                      log_db_level = warning
-                      log_handler = :INFO
-                      log_level = info
-                      logfile =
-                      longpolling_port = 8072
-                      max_cron_threads = 2
-                      osv_memory_age_limit = False
-                      osv_memory_count_limit = False
-                      pg_path =
-                      pidfile =
-                      proxy_mode = True
-                      reportgz = False
-                      screencasts =
-                      screenshots = /tmp/odoo_tests
-                      server_wide_modules = base,web
-                      smtp_password = False
-                      smtp_port = 25
-                      smtp_server = localhost
-                      smtp_ssl = False
-                      smtp_user = False
-                      syslog = False
-                      test_enable = False
-                      test_file =
-                      test_tags = None
-                      transient_age_limit = 1.0
-                      translate_modules = ['all']
-                      unaccent = False
-                      upgrade_path =
-                      without_demo = False
-                      workers = 0
-                    overwrite: true
-              - name: SetOdoo14Permissions
-                action: SetFolderOwner
-                inputs:
-                  - path: /opt/odoo14
-                    owner: ec2-user
-                    group: ec2-user
-              - name: SetOdoo14LogPermissions
-                action: SetFolderOwner
-                inputs:
-                  - path: /var/log/odoo14
-                    owner: ec2-user
-                    group: ec2-user
-              - name: CreateOdoo14Service
-                action: CreateFile
-                inputs:
-                  - path: /lib/systemd/system/odoo14.service
-                    content: |
-                      [Unit]
-                      Description=Odoo14 Server
-                          
-                      [Service]
-                      Type=simple
-                      PermissionsStartOnly=true
-                      SyslogIdentifier=odoo14-server
-                      User=ec2-user
-                      Group=ec2-user
-                      ExecStart=/opt/odoo14/odoo-bin -c /opt/odoo14/odoo14.conf
-                      WorkingDirectory=/opt/odoo14/
-                          
-                      [Install]
-                      WantedBy=multi-user.target
-                    overwrite: true
-
   OpenLDAPDevelComponent:
     Type: AWS::ImageBuilder::Component
     Properties:
@@ -517,41 +308,27 @@ Resources:
                 inputs:
                   commands:
                     - sudo yum install -y gcc python3-devel.x86_64
-  
-  Odoo14ImagePipeline:
-    Type: AWS::ImageBuilder::ImagePipeline
-    Properties:
-      Name: Odoo 14 Image Pipeline
-      Description: Odoo 14 Image Pipeline
-      ImageRecipeArn: !Ref Odoo14ImageRecipe
-      InfrastructureConfigurationArn: !Ref ImageInfrastructureConfig
-      DistributionConfigurationArn: !Ref ImageDistributionConfiguration
-      ImageTestsConfiguration:
-        ImageTestsEnabled: true
-        TimeoutMinutes: 60
-      Status: ENABLED
 
-  Odoo14ImageRecipe:
+  
+###
+# Amazon Linux Base Image
+###
+
+  AmazonLinuxImageRecipe:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
-      Name: Odoo14 Image Recipe
-      Version: 1.0.9
+      Name: !Join [' ', [!Ref OrgName, 'amazon-linux']]
+      Version: 1.0.0
       ParentImage: arn:aws:imagebuilder:us-west-2:aws:image/amazon-linux-2-x86/2019.11.21
       WorkingDirectory: /tmp
-      Description: Base image for Odoo 14
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'amazon-linux']]
       Components: #Max 20
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/amazon-cloudwatch-agent-linux/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-linux/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux-kernel-mainline/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux/1.0.0/1']]
-        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/python-3-linux/1.0.2/1']]
         - ComponentArn: !Ref AWSLinuxUtilitiesComponent
-        - ComponentArn: !Ref PostgreSQLClientComponent
         - ComponentArn: !Ref CodeDeployComponent
-        - ComponentArn: !Ref Python3DevelComponent
-        - ComponentArn: !Ref OpenLDAPDevelComponent
-        - ComponentArn: !Ref Odoo14Component
-        - ComponentArn: !Ref NginxComponent
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/stig-build-linux-high/2.8.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/reboot-linux/1.0.1/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/chrony-time-configuration-test/1.0.0/1']]
@@ -565,3 +342,15 @@ Resources:
             KmsKeyId: !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]
             VolumeType: gp2
             VolumeSize: 8
+
+  AmazonLinuxBuilder: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters: 
+        Name: 'amazon-linux'
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref AmazonLinuxImageRecipe
+        SNSStackName: !Ref SNSStackName

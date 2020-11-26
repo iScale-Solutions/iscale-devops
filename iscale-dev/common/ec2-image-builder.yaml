@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: EC2 Image Builder
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      -
+        Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      ImageRecipeARN:
+        default: Recipe ARN
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (e.g. amazon-linux).
+    Type: String
+    Default: image-builder
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ImageRecipeARN:
+    Description: Image Recipe ARN
+    Type: String
+    MinLength: 1
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+    MinLength: 1
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml      
+
+Resources:
+
+  ImageInfrastructureConfig:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties: 
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      InstanceProfileName: EC2InstanceProfileForImageBuilder #Can be made a parameter
+      InstanceTypes: 
+        - t3.micro
+        - t3.small
+        - t3.medium
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      SecurityGroupIds: 
+        - !Ref ImageSecurityGroup
+      SnsTopicArn: 
+        Fn::ImportValue:
+          !Sub "${SNSStackName}-TopicArn"
+      SubnetId:
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      TerminateInstanceOnFailure: true
+
+  ImageSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  ImageSecurityGroupAllowSSH:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !Ref ImageSecurityGroup
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+
+  ImageDistributionConfiguration:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !Ref Name]]
+      Description: !Join [' ',['Distribution for', !Ref OrgName, !Ref Name]]
+      Distributions:
+        - Region: !Ref 'AWS::Region'
+          AmiDistributionConfiguration:
+            Name: !Join ['-', [!Ref OrgName, !Ref Name, 'base-image {{ imagebuilder:buildDate }}']]
+            Description: !Join ['-', [!Ref OrgName, !Ref Name, 'base-image {{ imagebuilder:buildDate }}']]
+            # Target_account_ids:
+            #   - 178070162686 #iScale Hosting
+      Tags:
+        Name: !Ref Name
+
+  ImagePipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, !Ref Name]]
+      Description: !Join [' ', [!Ref OrgName, !Ref Name, 'Pipeline']]
+      ImageRecipeArn: !Ref ImageRecipeARN
+      InfrastructureConfigurationArn: !Ref ImageInfrastructureConfig
+      DistributionConfigurationArn: !Ref ImageDistributionConfiguration
+      ImageTestsConfiguration:
+        ImageTestsEnabled: true
+        TimeoutMinutes: 60
+      Status: ENABLED
