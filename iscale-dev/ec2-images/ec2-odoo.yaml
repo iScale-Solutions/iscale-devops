@@ -34,7 +34,7 @@ Parameters:
   Name:
     Description: Unique name/identifier (e.g. odoo-linux).
     Type: String
-    Default: odoo14-linux
+    Default: odoo-linux
     AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
   OrgName:
     Description: The name of the organization.
@@ -260,4 +260,189 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
         ImageRecipeARN: !Ref Odoo14ImageRecipe
+        SNSStackName: !Ref SNSStackName
+
+###
+# Odoo13 Configurations
+###
+
+  Odoo13Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Odoo 13
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs Odoo 13
+      ChangeDescription: Initial version
+      Data: |
+        name: Odoo 13 - InlineData
+        description: Installation of Odoo 13
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallWkHTMLToPDF
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y --nogpgcheck https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox-0.12.5-1.centos7.x86_64.rpm
+              - name: CreateDirs
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - mkdir -p /opt/odoo13
+                    - mkdir -p /var/log/odoo13
+              - name: DownloadOdoo13
+                action: WebDownload
+                maxAttempts: 3
+                inputs:
+                  - source: https://github.com/odoo/odoo/archive/13.0.zip
+                    destination: /tmp/13.0.zip
+              - name: UnzipOdoo13
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - unzip /tmp/13.0.zip -d /opt/odoo13
+                    - mv -fv /opt/odoo13/odoo-13.0/* /opt/odoo13/
+                    - rm -fr /opt/odoo13/odoo-13.0/
+              - name: InstallOdoo13Requirements
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo pip3 install -r /opt/odoo13/requirements.txt
+              - name: CreateOdoo13config
+                action: CreateFile
+                inputs:
+                  - path: /opt/odoo13/odoo13.conf
+                    content: |
+                      [options]
+                      addons_path = /opt/odoo13/odoo/addons,/opt/odoo13/addons
+                      admin_passwd = admin
+                      csv_internal_sep = ,
+                      data_dir = /home/ec2-user/.local/share/Odoo
+                      db_host = False
+                      db_maxconn = 64
+                      db_name = False
+                      db_password = False
+                      db_port = False
+                      db_sslmode = prefer
+                      db_template = template0
+                      db_user = False
+                      dbfilter =
+                      demo = {}
+                      email_from = False
+                      # geoip_database = /usr/share/GeoIP/GeoLite2-City.mmdb
+                      http_enable = True
+                      http_interface =
+                      http_port = 8069
+                      import_partial =
+                      limit_memory_hard = 2684354560
+                      limit_memory_soft = 2147483648
+                      limit_request = 8192
+                      limit_time_cpu = 60
+                      limit_time_real = 120
+                      limit_time_real_cron = -1
+                      list_db = True
+                      log_db = False
+                      log_db_level = warning
+                      log_handler = :INFO
+                      log_level = info
+                      logfile =
+                      longpolling_port = 8072
+                      max_cron_threads = 2
+                      osv_memory_age_limit = False
+                      osv_memory_count_limit = False
+                      pg_path =
+                      pidfile =
+                      proxy_mode = True
+                      reportgz = False
+                      screencasts =
+                      screenshots = /tmp/odoo_tests
+                      server_wide_modules = base,web
+                      smtp_password = False
+                      smtp_port = 25
+                      smtp_server = localhost
+                      smtp_ssl = False
+                      smtp_user = False
+                      syslog = False
+                      test_enable = False
+                      test_file =
+                      test_tags = None
+                      transient_age_limit = 1.0
+                      translate_modules = ['all']
+                      unaccent = False
+                      upgrade_path =
+                      without_demo = False
+                      workers = 0
+                    overwrite: true
+              - name: SetOdoo13Permissions
+                action: SetFolderOwner
+                inputs:
+                  - path: /opt/odoo13
+                    owner: ec2-user
+                    group: ec2-user
+              - name: SetOdoo13LogPermissions
+                action: SetFolderOwner
+                inputs:
+                  - path: /var/log/odoo13
+                    owner: ec2-user
+                    group: ec2-user
+              - name: CreateOdoo13Service
+                action: CreateFile
+                inputs:
+                  - path: /lib/systemd/system/odoo13.service
+                    content: |
+                      [Unit]
+                      Description=Odoo13 Server
+                          
+                      [Service]
+                      Type=simple
+                      PermissionsStartOnly=true
+                      SyslogIdentifier=odoo13-server
+                      User=ec2-user
+                      Group=ec2-user
+                      ExecStart=/opt/odoo13/odoo-bin -c /opt/odoo13/odoo13.conf
+                      WorkingDirectory=/opt/odoo13/
+                          
+                      [Install]
+                      WantedBy=multi-user.target
+                    overwrite: true
+
+  Odoo13ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'odoo13']]
+      Version: 1.0.0
+      ParentImage: arn:aws:imagebuilder:us-west-2:338284463834:image/iscale-dev-amazon-linux/1.0.0/1
+      WorkingDirectory: /tmp
+      Description: !Join [' ', [!Ref OrgName, 'odoo13']]
+      Components: #Max 20
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/python-3-linux/1.0.2/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/postgresql-11-client/1.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/python-3-devel/1.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/openldap-devel/1.0.0']]
+        - ComponentArn: !Ref Odoo13Component
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/nginx/1.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0/1']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            KmsKeyId: !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  Odoo13ImageBuilder: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters: 
+        Name: 'odoo13'
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref Odoo13ImageRecipe
         SNSStackName: !Ref SNSStackName
