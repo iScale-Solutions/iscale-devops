@@ -17,6 +17,7 @@ Metadata:
         Parameters:
           - DBSubnetGroup
           - VPC
+          - DeletionProtection
           - MultiAz
           - Port
           - InstanceType
@@ -48,6 +49,8 @@ Metadata:
         default: Environment Name
       DBSubnegGroup:
         default: DB Subnet Group
+      DeletionProtection:
+        default: Deletion Protection
       MultiAz:
         default: Multi AZ
       Port:
@@ -107,6 +110,13 @@ Parameters:
     Description: VPC to use for instances
     Type: AWS::EC2::VPC::Id
     Default: vpc-0c43465a6b510a4f7
+  DeletionProtection:
+    Description: Set to true to enabled deletion protection
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
   EnablePerformanceInsights:
     Description: Set to true to enabled performance Insights
     Type: String
@@ -187,6 +197,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasDeletionProtection: !Equals [!Ref DeletionProtection, true]
   HasPerformanceInsights: !Equals [!Ref EnablePerformanceInsights, true]
   IsEnableEnhancedMonitoring: !Equals [!Ref EnableEnhancedMonitoring, true]
 
@@ -216,7 +227,6 @@ Resources:
     
   ShardZone01:
     Type: AWS::RDS::DBInstance
-    DeletionPolicy: Delete #For now
     DependsOn:
       - RDSIamRole
       - MySQL8ParameterGroup
@@ -224,12 +234,12 @@ Resources:
       BackupRetentionPeriod: !Ref BackupRetentionPeriod
       DBInstanceClass: !Ref InstanceType
       AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'zone01']]
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'zone1']]
       DBParameterGroupName: !Ref MySQL8ParameterGroup
       DBSnapshotIdentifier: !Ref SnapshotIdentifier
       DBSubnetGroupName: !Ref DBSubnetGroup
       DeleteAutomatedBackups: false
-      DeletionProtection: true #Make this a param
+      DeletionProtection: !If [HasDeletionProtection, true, false]
       EnablePerformanceInsights: !Ref EnablePerformanceInsights
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
       Engine: mysql
@@ -252,7 +262,7 @@ Resources:
     Properties:
       DBInstanceClass: !Ref InstanceType #Need to have separate type for read replica vs source
       AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'zone01-replica']]
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'zone1-replica']]
       DBParameterGroupName: !Ref MySQL8ParameterGroup
       EnablePerformanceInsights: !Ref EnablePerformanceInsights
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
@@ -266,6 +276,92 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+
+####
+# Dashboard Section
+####
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+        DashboardName: 'SellUSeller_DB_Shards'
+        DashboardBody: !Sub
+          - |
+            {
+              "widgets": [
+              {
+                "type": "metric",
+                "x": 0,
+                "y": 0,
+                "width": 6,
+                "height": 6,
+                "properties": {
+                  "view": "timeSeries",
+                  "title": "Zone 01 - Connections",
+                  "stacked": true,
+                  "metrics": [
+                      [ "AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+                      [ "...", "${ZONE1_RDS_REPLICA}" ]
+                  ],
+                  "region": "${AWS::Region}"
+                }
+              },
+              {
+                  "type": "metric",
+                  "x": 6,
+                  "y": 0,
+                  "width": 6,
+                  "height": 6,
+                  "properties": {
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "title": "Zone 01 - CPU",
+                      "metrics": [
+                          [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+                          [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${ZONE1_RDS_REPLICA}" ]
+                      ],
+                      "region": "${AWS::Region}"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 12,
+                  "y": 0,
+                  "width": 6,
+                  "height": 6,
+                  "properties": {
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "title": "Zone 01 - IOPS",
+                      "metrics": [
+                          [ "AWS/RDS", "ReadIOPS", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+                          [ "AWS/RDS", "WriteIOPS", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+                          [ "AWS/RDS", "ReadIOPS", "DBInstanceIdentifier", "${ZONE1_RDS_REPLICA}" ],
+                          [ "AWS/RDS", "WriteIOPS", "DBInstanceIdentifier", "${ZONE1_RDS_REPLICA}" ]
+                      ],
+                      "region": "${AWS::Region}"
+                  }
+              },
+              {
+                "type": "metric",
+                "x": 18,
+                "y": 0,
+                "width": 6,
+                "height": 6,
+                "properties": {
+                    "view": "timeSeries",
+                    "title": "Zone 01 - Free Storage",
+                    "stacked": false,
+                    "metrics": [
+                        [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+                        [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${ZONE1_RDS_REPLICA}" ]
+                    ]
+                }
+              }
+              ]
+            }
+          - ZONE1_RDS: !Ref ShardZone01
+            ZONE1_RDS_REPLICA: !Ref ReadReplicaZone01
 
   # RDSEventSubscription:
   #   Type: AWS::RDS::EventSubscription
