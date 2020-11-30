@@ -221,15 +221,6 @@ Resources:
       GroupDescription: Full Original Data DB Security Group
       VpcId: !Ref VPC
   
-  AllowHTTPOnPMMServer:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
-      IpProtocol: TCP
-      GroupId: !Ref PMMInstanceSecurityGroup
-      FromPort: 80
-      ToPort: 80
-      CidrIp: 0.0.0.0/0
-
   AllowDBAccessfromPMMServer:
     Type: AWS::EC2::SecurityGroupIngress
     Properties: 
@@ -238,6 +229,15 @@ Resources:
       FromPort: 3306
       ToPort: 3306
       SourceSecurityGroupId: !Ref PMMInstanceSecurityGroup
+
+  AllowDBAccessfromDMSInstance:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: TCP
+      GroupId: !Ref Original57DataSecurityGroup
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref DMSInstanceSecurityGroup
 
   ##
   # This database is the 5.7.22 clone of prod based on the latest snapshot - Later, it gets upgraded to 8.0
@@ -258,6 +258,40 @@ Resources:
       PubliclyAccessible: false
       StorageType: gp2
       VPCSecurityGroups: !Ref SecurityGroups
+      #VPCSecurityGroups: !Ref Original57DataSecurityGroup #Next round
+
+  ##
+  # This instance contains the final, shrunk version of the data for production
+  ##
+  Phase1ProdRDSInstance:
+    DeletionPolicy: Delete #For now
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20 #will change this based on actual data needs
+      AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
+      DBInstanceClass: db.r5.large
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'db']]
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DeleteAutomatedBackups: false
+      DeletionProtection: !If [HasDeletionProtection, true, false]
+      EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MasterUsername: root
+      MasterUserPassword: password
+      MonitoringRoleArn: !If [IsEnableEnhancedMonitoring, !GetAtt RDSIamRole.Arn, !Ref 'AWS::NoValue']
+      MonitoringInterval: !If [IsEnableEnhancedMonitoring, !Ref MonitoringInterval, !Ref 'AWS::NoValue']
+      MultiAZ: false
+      Port: !Ref Port
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: !Ref SecurityGroups
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'db']]
 
   # Already exists
   # DBSubnetGroup:
@@ -351,6 +385,55 @@ Resources:
 # DMS Section
 ####
 
+  DMSInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: DMS Replication Instance Security Group
+      VpcId: !Ref VPC
+  
+  DMSVPCRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: dms.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole
+      RoleName: dms-vpc-role
+  
+  DMSReplicationSubnetGroup: 
+    DependsOn:
+      - DMSVPCRole
+    Type: AWS::DMS::ReplicationSubnetGroup
+    Properties: 
+      ReplicationSubnetGroupDescription: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+      ReplicationSubnetGroupIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+      SubnetIds: 
+        - Fn::ImportValue:
+            Fn::Sub: "${NetworkStackName}-PrivateSubnetId1"
+        - Fn::ImportValue:
+            Fn::Sub: "${NetworkStackName}-PrivateSubnetId2"
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+  
+  Phase1DMSInstance: 
+    Type: AWS::DMS::ReplicationInstance
+    Properties: 
+      MultiAZ: false
+      PubliclyAccessible: false
+      ReplicationInstanceClass: dms.t3.small
+      ReplicationSubnetGroupIdentifier: !Ref DMSReplicationSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DMSInstanceSecurityGroup
+
   OriginalDataSourceEndPoint: 
     Type: AWS::DMS::Endpoint
     Properties: 
@@ -361,6 +444,17 @@ Resources:
       Port: 3306
       Username: root
       ServerName: !GetAtt Original57Data.Endpoint.Address
+  
+  Phase1TargetEndPoint: 
+    Type: AWS::DMS::Endpoint
+    Properties: 
+      DatabaseName: !Ref Phase1ProdRDSInstance
+      EndpointType: target
+      EngineName: mysql
+      Password: password
+      Port: 3306
+      ServerName: !GetAtt Phase1ProdRDSInstance.Endpoint.Address
+      Username: root
 
   # Zone1SourceEndPoint: 
   #   Type: AWS::DMS::Endpoint
@@ -395,6 +489,48 @@ Resources:
 ####
 # CloudWatch Section
 ####
+
+  Phase01RDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref Phase1ProdRDSInstance, 'high-cpu']]
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Phase1ProdRDSInstance
+
+  Phase01RDSFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref Phase1ProdRDSInstance, 'low-storage']]
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 5368709120 # 5GB
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Phase1ProdRDSInstance
 
   # Zone01CPUAlarm:
   #   Type: AWS::CloudWatch::Alarm
@@ -438,9 +574,87 @@ Resources:
   #       - Name: DBInstanceIdentifier
   #         Value: !Ref ShardZone01
 
+
 ####
 # Dashboard Section
 ####
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: 'SellUSeller_DB'
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 6,
+              "height": 6,
+              "properties": {
+                "view": "timeSeries",
+                "title": "Prod DB - Connections",
+                "stacked": true,
+                "metrics": [
+                    [ "AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${PROD_RDS}" ]
+                ],
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+                "type": "metric",
+                "x": 6,
+                "y": 0,
+                "width": 6,
+                "height": 6,
+                "properties": {
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "title": "Prod DB - CPU",
+                  "metrics": [
+                      [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${PROD_RDS}" ]
+                  ],
+                  "region": "${AWS::Region}"
+                }
+            },
+            {
+                "type": "metric",
+                "x": 12,
+                "y": 0,
+                "width": 6,
+                "height": 6,
+                "properties": {
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "title": "Prod DB - IOPS",
+                  "metrics": [
+                      [ "AWS/RDS", "ReadIOPS", "DBInstanceIdentifier", "${PROD_RDS}" ],
+                      [ "AWS/RDS", "WriteIOPS", "DBInstanceIdentifier", "${PROD_RDS}" ]
+                  ],
+                  "region": "${AWS::Region}"
+                }
+            },
+            {
+              "type": "metric",
+              "x": 18,
+              "y": 0,
+              "width": 6,
+              "height": 6,
+              "properties": {
+                  "view": "timeSeries",
+                  "title": "Prod DB - Free Storage",
+                  "stacked": false,
+                  "metrics": [
+                      [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${PROD_RDS}" ]
+                  ],
+                  "region": "${AWS::Region}"
+              }
+            }
+            ]
+          }
+        - PROD_RDS: !Ref Phase1ProdRDSInstance
 
   # Dashboard:
   #   Type: AWS::CloudWatch::Dashboard
@@ -636,7 +850,16 @@ Resources:
         - Key: Organization
           Value: !Ref OrgName
 
-  AllowSSHAccessOnPMM:
+  AllowHTTPOnPMMServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: TCP
+      GroupId: !Ref PMMInstanceSecurityGroup
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  AllowSSHOnPMMServer:
     Type: AWS::EC2::SecurityGroupIngress
     Properties: 
       IpProtocol: TCP
@@ -677,25 +900,22 @@ Resources:
           Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
       IamInstanceProfile: !Ref PMMInstanceProfile
       Tags:
-        - 
-          Key: Name
+        - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PMM]]
-        - 
-          Key: Environment
+        - Key: Environment
           Value: !Ref EnvName
-        - 
-          Key: Organization
+        - Key: Organization
           Value: !Ref OrgName
 
-# Outputs:
+Outputs:
 
-#   PMMUserAccesskey:
-#     Description: AccessKey for PMM User
-#     Value: !Ref PMMUserKey
+  PMMUserAccesskey:
+    Description: AccessKey for PMM User
+    Value: !Ref PMMUserKey
 
-#   PMMUserSecretkey:
-#     Description: Secret Key for PMM User
-#     Value: !GetAtt PMMUserKey.SecretAccessKey
+  PMMUserSecretkey:
+    Description: Secret Key for PMM User
+    Value: !GetAtt PMMUserKey.SecretAccessKey
 
 #   ShardZone01ARN:
 #     Description: ARN of the created RDS instance
