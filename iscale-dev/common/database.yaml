@@ -4,20 +4,21 @@ Description: This cloudformation configuration provisions an RDS instance with m
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
-      -
-        Label:
+      - Label:
           default: Resource Configuration
         Parameters:
           - Name
           - OrgName
           - EnvName
-      -
-        Label:
+      - Label:
           default: Database Configuration
         Parameters:
           - MultiAz
           - MasterUser
+          - MasterUserPassword
           - DatabaseName
+          - DatabaseUser
+          - DatabaseUserPassword
           - Port
           - StorageEncrypted
           - InstanceType
@@ -33,14 +34,12 @@ Metadata:
           - Family
           - MonitoringInterval
           - EnableEnhancedMonitoring
-      -
-        Label:
+      - Label:
           default: CloudWatch Configuration
         Parameters:
           - LogRetentionPeriod
           - EnableCPUCreditAlarm
-      -
-        Label:
+      - Label:
           default: Cloudformation Stack Configuration
         Parameters:
           - NetworkStackName
@@ -56,9 +55,15 @@ Metadata:
       MultiAz:
         default: Multi AZ
       MasterUser:
-        default: Master Username
+        default: Root Username
+      MasterUserPassword:
+        default: Root User Password (leave blank to auto-generate)
       DatabaseName:
         default: Database Name
+      DatabaseUser:
+        default: Database Username
+      DatabaseUserPassword:
+        default: Database User Password (leave blank to auto-generate)
       Port:
         default: Port
       StorageEncrypted:
@@ -136,12 +141,25 @@ Parameters:
   MasterUser:
     Description: The name of the master user for the database instance.
     Type: String
-    Default: master
-    ConstraintDescription: Can be any printable ASCII character except "/", "\", or "@".
+    Default: root
+  MasterUserPassword:
+    Description: Master User Password
+    NoEcho: true
+    Type: String
+    Default: ''
   DatabaseName:
     Description: The name of the database
     Type: String
     Default: clientdb
+  DatabaseUser:
+    Description: The name of the database user
+    Type: String
+    Default: dbuser
+  DatabaseUserPassword:
+    Description: The password of the database user
+    NoEcho: true
+    Type: String
+    Default: ''
   Port:
     Description: The port number on which the database accepts connections.
     Type: Number
@@ -164,20 +182,9 @@ Parameters:
     Type: String
     Default: aurora-mysql
     AllowedValues:
-      # - aurora
       - aurora-mysql
       - aurora-postgresql
-      # - mariadb
       - mysql
-      # - oracle-ee
-      # - oracle-se2
-      # - oracle-se1
-      # - oracle-se
-      # - postgres
-      # - sqlserver-ee
-      # - sqlserver-se
-      # - sqlserver-ex
-      # - sqlserver-web
   EngineVersion:
     Description: The version number of the database engine to use.
     Type: String
@@ -199,7 +206,7 @@ Parameters:
     Default: ""
     ConstraintDescription: Must be in the format hh24:mi-hh24:mi. Must be in Universal Coordinated Time (UTC). Must not conflict with the preferred maintenance window. Must be at least 30 minutes.
   SnapshotIdentifier:
-    Description: The name or Amazon Resource Name (ARN) of the DB snapshot that's used to restore the DB instance.
+    Description: The name or Amazon Resource Name (ARN) of the DB snapshot to restore. If you specied root user, make sure it matches
     Type: String
     Default: ""
   SourceDbInstanceIdentifier:
@@ -261,16 +268,20 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsAuroraPostgreSQL: !Equals [!Ref Engine, aurora-postgresql]
-  # IsRDSMySQL: !Equals [!Ref Engine, mysql]
   IsAuroraMySQL: !Equals [!Ref Engine, aurora-mysql]
   IsAurora: !Or [Condition: IsAuroraPostgreSQL, Condition: IsAuroraMySQL]
+  HasDBUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, ""]]
+  HasDBRootPassword: !Not [!Equals [!Ref MasterUserPassword, ""]]
+  HasDBPasswords: !Or [Condition: HasDBUserPassword, Condition: HasDBRootPassword]
   HasNoCluster: !Not [Condition: IsAurora]
   HasCluster: !Not [Condition: HasNoCluster]
   HasSnapshot: !Not [!Equals [!Ref SnapshotIdentifier, ""]]
+  HasNoSnapshot: !Not [Condition: HasSnapshot]
   HasClusterSnapshot: !And [Condition: HasCluster, Condition: HasSnapshot]
   HasClusterAndClusterSnapshot: !And [Condition: HasCluster, Condition: HasClusterSnapshot]
   HasPerformanceInsights: !Equals [!Ref EnablePerformanceInsights, true]
   HasSnapshotAndNoCluster: !And [Condition: HasSnapshot, Condition: HasNoCluster]
+  HasNoSnapshotAndNoCluster: !And [Condition: HasNoSnapshot, Condition: HasNoCluster]
   HasSourceDbInstanceIdentifier: !Not [!Equals [!Ref SourceDbInstanceIdentifier, ""]]
   HasBackupWindow: !Not [!Equals [!Ref BackupWindow, ""]]
   IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
@@ -291,8 +302,6 @@ Resources:
   LambdaPasswordGeneratorFunction:
     Type: AWS::Lambda::Function
     Properties:
-      #Do not put function name so that the lambda function can be replaced
-      #FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, password-generator]]
       Handler: index.lambda_handler
       Role: !GetAtt LambdaPasswordGeneratorExecutionRole.Arn
       Runtime: python3.6
@@ -379,10 +388,10 @@ Resources:
               "MAGENTO_ADMIN_PASSWORD": "${MAGENTO_ADMIN_PASSWORD}"
             }
           - DB_ROOT_USER: !Ref MasterUser
-            DB_ROOT_PASSWORD: !GetAtt RDSPasswordGenerator.DatabaseRootPassword
+            DB_ROOT_PASSWORD: !If [HasDBRootPassword, !Ref MasterUserPassword, !GetAtt RDSPasswordGenerator.DatabaseRootPassword]
             DB_NAME: !Ref DatabaseName
-            DB_USER: dbuser
-            DB_PASSWORD: !GetAtt RDSPasswordGenerator.DatabasePassword
+            DB_USER: !Ref DatabaseUser
+            DB_PASSWORD: !If [HasDBUserPassword, !Ref DatabaseUserPassword, !GetAtt RDSPasswordGenerator.DatabasePassword]
             MAGENTO_ADMIN_PASSWORD: !GetAtt RDSPasswordGenerator.MagentoAdminPassword
         GenerateStringKey: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         PasswordLength: 30
@@ -454,7 +463,13 @@ Resources:
         !If [IsAuroraMySQL, [audit, error, slowquery], [postgresql]]
       Engine: !Ref Engine
       MasterUsername: !If [HasClusterSnapshot, !Ref 'AWS::NoValue', !Ref MasterUser]
-      MasterUserPassword: !If [HasClusterSnapshot, !Ref 'AWS::NoValue', !GetAtt RDSPasswordGenerator.DatabaseRootPassword]
+      MasterUserPassword: !If 
+        - HasClusterSnapshot 
+        - !Ref 'AWS::NoValue'
+        - !If
+          - HasDBRootPassword
+          - !Ref MasterUserPassword
+          - !GetAtt RDSPasswordGenerator.DatabaseRootPassword
       Port: !Ref Port
       PreferredBackupWindow: !If [ HasBackupWindow, !Ref BackupWindow, !Ref 'AWS::NoValue']
       SnapshotIdentifier: !If [HasClusterSnapshot, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
@@ -516,7 +531,13 @@ Resources:
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
       Engine: !Ref Engine
       MasterUsername: !If [HasNoCluster, !Ref MasterUser, !Ref 'AWS::NoValue']
-      MasterUserPassword: !If [HasNoCluster, !GetAtt RDSPasswordGenerator.DatabaseRootPassword, !Ref 'AWS::NoValue']
+      MasterUserPassword: !If
+        - HasNoSnapshotAndNoCluster
+        - !If
+          - HasDBRootPassword
+          - !Ref MasterUserPassword
+          - !GetAtt RDSPasswordGenerator.DatabaseRootPassword
+        - !Ref 'AWS::NoValue'
       StorageEncrypted: !If [HasNoCluster, !Ref StorageEncrypted, !Ref 'AWS::NoValue']
       StorageType: !If [HasNoCluster, gp2, !Ref 'AWS::NoValue']
       MonitoringRoleArn: !If [IsEnableEnhancedMonitoring, !GetAtt RDSIamRole.Arn, !Ref 'AWS::NoValue']
@@ -570,14 +591,11 @@ Resources:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-VpcId"
       Tags:
-        - 
-          Key: Name
+        - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db]]
-        - 
-          Key: Environment
+        - Key: Environment
           Value: !Ref EnvName
-        - 
-          Key: Organization
+        - Key: Organization
           Value: !Ref OrgName
 
 ####
@@ -591,8 +609,7 @@ Resources:
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
-          -
-            Sid: 1
+          - Sid: 1
             Effect: Allow
             Action: sts:AssumeRole
             Principal:
@@ -607,21 +624,18 @@ Resources:
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
-          -
-            Effect: Allow
+          - Effect: Allow
             Principal:
               Service:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
       Policies:
-        -
-          PolicyName: LambdaPasswordGeneratorFunctionPolicy
+        - PolicyName: LambdaPasswordGeneratorFunctionPolicy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              -
-                Effect: Allow
+              - Effect: Allow
                 Action:
                   - logs:CreateLogStream
                   - logs:CreateLogGroup
@@ -648,8 +662,7 @@ Resources:
       LogGroupName: !Ref RDSLogGroup
       FilterPattern: "[timestamp, id, message=\"*password authentication failed*\"]"
       MetricTransformations:
-        -
-          MetricValue: 1
+        - MetricValue: 1
           MetricNamespace: LogMetrics
           MetricName: !Join ['-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], error-denied]]
 
@@ -679,8 +692,7 @@ Resources:
       LogGroupName: !Ref RDSLogGroup
       FilterPattern: "[time, id, message_type=\"*FATAL*\"]"
       MetricTransformations:
-        -
-          MetricValue: 1
+        - MetricValue: 1
           MetricNamespace: LogMetrics
           MetricName: !Join ['-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], fatal]]
 
@@ -691,8 +703,7 @@ Resources:
       LogGroupName: !Ref RDSLogGroup
       FilterPattern: "[time, id, message_type=\"*ERROR*\"]"
       MetricTransformations:
-        -
-          MetricValue: 1
+        - MetricValue: 1
           MetricNamespace: LogMetrics
           MetricName: !Join ['-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], errors]]
 
@@ -722,8 +733,7 @@ Resources:
       LogGroupName: !Ref RDSLogGroup
       FilterPattern: "[time, id, message_type=\"*WARNING*\"]"
       MetricTransformations:
-        -
-          MetricValue: 1
+        - MetricValue: 1
           MetricNamespace: LogMetrics
           MetricName: !Join ['-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], warnings]]
 
