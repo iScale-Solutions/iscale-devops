@@ -45,7 +45,7 @@ Metadata:
       Port:
         default: Port
       InstanceType:
-        default: RDS Instance Type
+        default: QA Machine Instance Type
       EnablePerformanceInsights:
         default: Enable Performance Insights
       SecurityGroups:
@@ -75,7 +75,7 @@ Parameters:
   EnvName:
     Description: The name of the environment
     Type: String
-    Default: Staging
+    Default: Production
     AllowedValues:
       - Production
       - Staging
@@ -92,7 +92,7 @@ Parameters:
   DeletionProtection:
     Description: Set to true to enabled deletion protection
     Type: String
-    Default: false
+    Default: true
     AllowedValues:
       - true
       - false
@@ -117,9 +117,9 @@ Parameters:
     MinValue: 1
     MaxValue: 65535
   InstanceType:
-    Description: The compute and memory capacity of the DB instance, for example, db.m4.large.
+    Description: QA Machine Instance type
     Type: String
-    Default: db.t3.micro
+    Default: t3.micro
   SnapshotIdentifier:
     Description: DB snapshot (5.7.22) to seed the database
     Type: String
@@ -174,52 +174,66 @@ Resources:
   OriginalDataSecurityGroup:
     Type: AWS::EC2::SecurityGroup 
     Properties:
-      GroupDescription: Full Original Data DB Security Group
+      GroupDescription: Original Database Security Group
       VpcId: !Ref VPC
       SecurityGroupIngress:
+        # - IpProtocol : TCP
+        #   FromPort: 3306
+        #   ToPort: 3306
+        #   SourceSecurityGroupId: !Ref PMMInstanceSecurityGroup
+        # - IpProtocol : TCP
+        #   FromPort: 3306
+        #   ToPort: 3306
+        #   SourceSecurityGroupId: !Ref DMSInstanceSecurityGroup
         - IpProtocol : TCP
           FromPort: 3306
           ToPort: 3306
-          SourceSecurityGroupId: !Ref PMMInstanceSecurityGroup
-        - IpProtocol : TCP
-          FromPort: 3306
-          ToPort: 3306
-          SourceSecurityGroupId: !Ref DMSInstanceSecurityGroup
+          SourceSecurityGroupId: !Ref Phase1QASecurityGroup
 
   ##
   # This database is the 5.7.22 clone of prod based on the latest snapshot - Later, it gets upgraded to 8.0
   ##
-  OriginalData:
-    DeletionPolicy: Delete
-    Type: AWS::RDS::DBInstance
-    Properties:
-      DBInstanceClass: db.r3.8xlarge
-      AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !If [Isv8Mode, 'v8', 'v5']]]
-      DBParameterGroupName: !If [Isv8Mode, !Ref MySQL8ParameterGroup, dbselluseller-parameter-group-mysql57]
-      DBSnapshotIdentifier: !Ref SnapshotIdentifier
-      DBSubnetGroupName: !Ref DBSubnetGroup
-      Engine: mysql
-      EngineVersion: !If [Isv8Mode, 8.0.21, 5.7.22]
-      Port: !Ref Port
-      PubliclyAccessible: false
-      StorageType: gp2
-      # VPCSecurityGroups: !Ref SecurityGroups
-      VPCSecurityGroups: 
-        - !Ref OriginalDataSecurityGroup
+
+  # OriginalData:
+  #   DeletionPolicy: Retain
+  #   Type: AWS::RDS::DBInstance
+  #   Properties:
+  #     DBInstanceClass: db.r3.8xlarge
+  #     AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
+  #     BackupRetentionPeriod: 30
+  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !If [Isv8Mode, 'v8', 'v5']]]
+  #     DBParameterGroupName: !If [Isv8Mode, !Ref MySQL8ParameterGroup, dbselluseller-parameter-group-mysql57]
+  #     DBSnapshotIdentifier: !Ref SnapshotIdentifier
+  #     DBSubnetGroupName: !Ref DBSubnetGroup
+  #     DeleteAutomatedBackups: false
+  #     DeletionProtection: true
+  #     EnablePerformanceInsights: !Ref EnablePerformanceInsights
+  #     PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
+  #     Engine: mysql
+  #     EngineVersion: !If [Isv8Mode, 8.0.21, 5.7.22]
+  #     MonitoringRoleArn: !GetAtt RDSIamRole.Arn
+  #     MonitoringInterval: 30
+  #     MultiAZ: false
+  #     Port: !Ref Port
+  #     PubliclyAccessible: false
+  #     StorageEncrypted: true
+  #     StorageType: gp2
+  #     # VPCSecurityGroups: !Ref SecurityGroups
+  #     VPCSecurityGroups: 
+  #       - !Ref OriginalDataSecurityGroup
 
   ##
   # This instance contains the final, shrunk version of the data for production
   ##
   # Phase1ProdRDSInstance:
-  #   DeletionPolicy: Delete #For now
+  #   DeletionPolicy: Retain
   #   Type: AWS::RDS::DBInstance
   #   Properties:
-  #     AllocatedStorage: 20 #will change this based on actual data needs
+  #     AllocatedStorage: 2420 #will change this based on actual data needs
   #     AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
   #     BackupRetentionPeriod: 30
-  #     DBInstanceClass: db.r5.large
-  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'db']]
+  #     DBInstanceClass: db.r3.8xlarge
+  #     DBInstanceIdentifier: 'dbselluseller-carina-prod-2tb'
   #     DBParameterGroupName: !Ref MySQL8ParameterGroup
   #     DBSubnetGroupName: !Ref DBSubnetGroup
   #     DeleteAutomatedBackups: false
@@ -228,8 +242,6 @@ Resources:
   #     PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
   #     Engine: mysql
   #     EngineVersion: 8.0.21
-  #     MasterUsername: root
-  #     MasterUserPassword: password
   #     MonitoringRoleArn: !GetAtt RDSIamRole.Arn
   #     MonitoringInterval: 30
   #     MultiAZ: false
@@ -237,7 +249,9 @@ Resources:
   #     PubliclyAccessible: false
   #     StorageEncrypted: true
   #     StorageType: gp2
-  #     VPCSecurityGroups: !Ref SecurityGroups #Also needs DMSInstanceSecurityGroup
+  #      VPCSecurityGroups: 
+  #      - !Ref OriginalDataSecurityGroup
+  #     # VPCSecurityGroups: !Ref SecurityGroups
   #     Tags:
   #       - Key: Name
   #         Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'db']]
@@ -258,181 +272,6 @@ Resources:
       Tags:
         - Key: Name
           Value: MySQL 8 Parameter Group
-
-  # PerconaZone01:
-  #   Type: AWS::RDS::DBInstance
-  #   DependsOn:
-  #     - RDSIamRole
-  #     - MySQL8ParameterGroup
-  #   Properties:
-  #     DBInstanceClass: !Ref InstanceType
-  #     AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
-  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'percona-zone1']]
-  #     DBParameterGroupName: !Ref MySQL8ParameterGroup
-  #     DBSnapshotIdentifier: !Ref SnapshotIdentifier
-  #     DBSubnetGroupName: !Ref DBSubnetGroup
-  #     Engine: mysql
-  #     EngineVersion: 8.0.21
-  #     Port: !Ref Port
-  #     PubliclyAccessible: false
-  #     StorageType: gp2
-  #     VPCSecurityGroups: !Ref SecurityGroups
-
-  # ShardZone01:
-  #   Type: AWS::RDS::DBInstance
-  #   DependsOn:
-  #     - RDSIamRole
-  #     - MySQL8ParameterGroup
-  #   Properties:
-  #     BackupRetentionPeriod: 30
-  #     DBInstanceClass: !Ref InstanceType
-  #     AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
-  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'zone1']]
-  #     DBParameterGroupName: !Ref MySQL8ParameterGroup
-  #     DBSubnetGroupName: !Ref DBSubnetGroup
-  #     DeleteAutomatedBackups: false
-  #     DeletionProtection: !If [HasDeletionProtection, true, false]
-  #     EnablePerformanceInsights: !Ref EnablePerformanceInsights
-  #     PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
-  #     Engine: mysql
-  #     EngineVersion: 8.0.21
-  #     MonitoringRoleArn: !GetAtt RDSIamRole.Arn
-  #     MonitoringInterval: 30
-  #     MultiAZ: !Ref MultiAz
-  #     Port: !Ref Port
-  #     PubliclyAccessible: false
-  #     StorageType: gp2
-  #     VPCSecurityGroups: !Ref SecurityGroups
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
-
-  # ReadReplicaZone01:
-  #   Type: AWS::RDS::DBInstance
-  #   DependsOn: ShardZone01
-  #   DeletionPolicy: Delete #For now
-  #   Properties:
-  #     DBInstanceClass: !Ref InstanceType #Need to have separate type for read replica vs source
-  #     AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
-  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'zone1-replica']]
-  #     DBParameterGroupName: !Ref MySQL8ParameterGroup
-  #     EnablePerformanceInsights: !Ref EnablePerformanceInsights
-  #     PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
-  #     MonitoringRoleArn: !GetAtt RDSIamRole.Arn
-  #     MonitoringInterval: 30
-  #     Port: !Ref Port
-  #     PubliclyAccessible: false
-  #     StorageType: gp2
-  #     SourceDBInstanceIdentifier: !Ref ShardZone01
-  #     VPCSecurityGroups: !Ref SecurityGroups
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
-
-####
-# DMS Section
-####
-
-  DMSInstanceSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: DMS Replication Instance Security Group
-      VpcId: !Ref VPC
-  
-  DMSVPCRole:
-    Type: AWS::IAM::Role
-    Properties:
-      Path: /
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          -
-            Sid: 1
-            Effect: Allow
-            Action: sts:AssumeRole
-            Principal:
-              Service: dms.amazonaws.com
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole
-      RoleName: dms-vpc-role
-  
-  DMSReplicationSubnetGroup: 
-    DependsOn:
-      - DMSVPCRole
-    Type: AWS::DMS::ReplicationSubnetGroup
-    Properties: 
-      ReplicationSubnetGroupDescription: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
-      ReplicationSubnetGroupIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
-      SubnetIds: 
-        - Fn::ImportValue:
-            Fn::Sub: "${NetworkStackName}-PrivateSubnetId1"
-        - Fn::ImportValue:
-            Fn::Sub: "${NetworkStackName}-PrivateSubnetId2"
-      Tags: 
-        - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
-  
-  Phase1DMSInstance: 
-    Type: AWS::DMS::ReplicationInstance
-    Properties: 
-      MultiAZ: false
-      PubliclyAccessible: false
-      ReplicationInstanceClass: dms.t3.small
-      ReplicationSubnetGroupIdentifier: !Ref DMSReplicationSubnetGroup
-      VpcSecurityGroupIds:
-        - !Ref DMSInstanceSecurityGroup
-
-  OriginalDataSourceEndPoint: 
-    Type: AWS::DMS::Endpoint
-    Properties: 
-      DatabaseName: !Ref OriginalData
-      EndpointType: source
-      EngineName: mysql
-      Password: password
-      Port: 3306
-      Username: root
-      ServerName: !GetAtt OriginalData.Endpoint.Address
-  
-  # Phase1TargetEndPoint: 
-  #   Type: AWS::DMS::Endpoint
-  #   Properties: 
-  #     DatabaseName: !Ref Phase1ProdRDSInstance
-  #     EndpointType: target
-  #     EngineName: mysql
-  #     Password: password
-  #     Port: 3306
-  #     ServerName: !GetAtt Phase1ProdRDSInstance.Endpoint.Address
-  #     Username: root
-
-  # Zone1SourceEndPoint: 
-  #   Type: AWS::DMS::Endpoint
-  #   Properties: 
-  #     DatabaseName: !Ref PerconaZone01
-  #     EndpointType: source
-  #     EngineName: mysql
-  #     Password: password
-  #     Port: 3306
-  #     ServerName: !GetAtt PerconaZone01.Endpoint.Address
-
-  # Zone1TargetEndPoint: 
-  #   Type: AWS::DMS::Endpoint
-  #   Properties: 
-  #     DatabaseName: !Ref ShardZone01
-  #     EndpointType: target
-  #     EngineName: mysql
-  #     Password: password
-  #     Port: 3306
-  #     ServerName: !GetAtt ShardZone01.Endpoint.Address
-
-  # Zone1DMSReplicationInstance: 
-  #   Type: AWS::DMS::ReplicationInstance
-  #   Properties: 
-  #     AvailabilityZone: !Join ['-', [!Ref 'AWS::Region', '1a']]
-  #     AllocatedStorage: 20
-  #     MultiAZ: false
-  #     PubliclyAccessible: false
-  #     ReplicationInstanceClass: dms.t3.small
-    
 
 ####
 # CloudWatch Section
@@ -710,26 +549,6 @@ Resources:
   #       - !Ref DBInstance
   #     SourceType: db-instance
 
-####
-# VPC Section
-####
-
-  # #By default, no inbound connection are allowed. The caller (AppServer / Lambda) will need to add itself to the allowed callers list.
-  # RDSSecurityGroup:
-  #   Type: AWS::EC2::SecurityGroup
-  #   Properties:
-  #     GroupDescription: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], db] ]
-  #     VpcId: !Ref VPC
-  #     Tags:
-  #       - 
-  #         Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db]]
-  #       - 
-  #         Key: Environment
-  #         Value: !Ref EnvName
-  #       - 
-  #         Key: Organization
-  #         Value: !Ref OrgName
 
 ####
 # IAM Section
@@ -755,68 +574,134 @@ Resources:
 # PMM Monitoring
 ####
 
-  PMMUser:
-    Type: AWS::IAM::User
-    Properties:
-      UserName: PMMUser
+  # PMMUser:
+  #   Type: AWS::IAM::User
+  #   Properties:
+  #     UserName: PMMUser
   
-  PMMUserKey:
-    Type: AWS::IAM::AccessKey
-    Properties:
-      UserName: !Ref PMMUser
+  # PMMUserKey:
+  #   Type: AWS::IAM::AccessKey
+  #   Properties:
+  #     UserName: !Ref PMMUser
 
-  RDSPMMAccessPolicy:
-    Type: AWS::IAM::Policy
-    Properties: 
-      PolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Action:
-              - rds:DescribeDBInstances
-              - cloudwatch:GetMetricStatistics
-              - cloudwatch:ListMetrics
-            Resource: '*'
-          - Effect: Allow
-            Action:
-              - logs:DescribeLogStreams
-              - logs:GetLogEvents
-              - logs:FilterLogEvents
-            Resource: 'arn:aws:logs:*:*:log-group:RDSOSMetrics:*'
-      PolicyName: RDSPMMAccessPolicy
-      Users: 
-        - !Ref PMMUser
+  # RDSPMMAccessPolicy:
+  #   Type: AWS::IAM::Policy
+  #   Properties: 
+  #     PolicyDocument:
+  #       Version: 2012-10-17
+  #       Statement:
+  #         - Effect: Allow
+  #           Action:
+  #             - rds:DescribeDBInstances
+  #             - cloudwatch:GetMetricStatistics
+  #             - cloudwatch:ListMetrics
+  #           Resource: '*'
+  #         - Effect: Allow
+  #           Action:
+  #             - logs:DescribeLogStreams
+  #             - logs:GetLogEvents
+  #             - logs:FilterLogEvents
+  #           Resource: 'arn:aws:logs:*:*:log-group:RDSOSMetrics:*'
+  #     PolicyName: RDSPMMAccessPolicy
+  #     Users: 
+  #       - !Ref PMMUser
 
-  PMMInstanceSecurityGroup:
+  # PMMInstanceSecurityGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: PMM Server Security Group
+  #     VpcId: !Ref VPC
+  #     Tags:
+  #       - Key: Environment
+  #         Value: !Ref EnvName
+  #       - Key: Organization
+  #         Value: !Ref OrgName
+
+  # AllowHTTPOnPMMServer:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties: 
+  #     IpProtocol: TCP
+  #     GroupId: !Ref PMMInstanceSecurityGroup
+  #     FromPort: 80
+  #     ToPort: 80
+  #     CidrIp: 0.0.0.0/0
+
+  # AllowSSHOnPMMServer:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties: 
+  #     IpProtocol: TCP
+  #     GroupId: !Ref PMMInstanceSecurityGroup
+  #     CidrIp: 0.0.0.0/0
+  #     FromPort: 22
+  #     ToPort: 22
+  
+  # PMMInstanceIamRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Sid: 1
+  #           Effect: Allow
+  #           Action: sts:AssumeRole
+  #           Principal:
+  #             Service: ec2.amazonaws.com
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  # PMMInstanceProfile:
+  #   Type: AWS::IAM::InstanceProfile
+  #   Properties:
+  #     Roles:
+  #       - Ref: PMMInstanceIamRole
+
+  # PMMInstance:
+  #   Type: AWS::EC2::Instance
+  #   Properties: 
+  #     ImageId: ami-09e516eb13973ed17 #From marketplace
+  #     InstanceType: !Ref InstanceType
+  #     IamInstanceProfile: !Ref PMMInstanceProfile
+  #     KeyName: Shivam-Nanda
+  #     NetworkInterfaces: 
+  #       - AssociatePublicIpAddress: true
+  #         DeviceIndex: 0
+  #         GroupSet: 
+  #           - Ref: PMMInstanceSecurityGroup
+  #         SubnetId:
+  #           Fn::ImportValue:
+  #             Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PMM]]
+  #       - Key: Environment
+  #         Value: !Ref EnvName
+  #       - Key: Organization
+  #         Value: !Ref OrgName
+
+###
+# QA Section
+###
+
+  Phase1QASecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: PMM Server Security Group
+      GroupDescription: Sharding Phase 1 - QA Instance Security Group
       VpcId: !Ref VPC
-      Tags:
-        - Key: Environment
-          Value: !Ref EnvName
-        - Key: Organization
-          Value: !Ref OrgName
+      SecurityGroupIngress:
+        - IpProtocol : TCP
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol : TCP
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol : TCP
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
 
-  AllowHTTPOnPMMServer:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
-      IpProtocol: TCP
-      GroupId: !Ref PMMInstanceSecurityGroup
-      FromPort: 80
-      ToPort: 80
-      CidrIp: 0.0.0.0/0
-
-  AllowSSHOnPMMServer:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
-      IpProtocol: TCP
-      GroupId: !Ref PMMInstanceSecurityGroup
-      CidrIp: 0.0.0.0/0
-      FromPort: 22
-      ToPort: 22
-  
-  PMMInstanceIamRole:
+  Phase1QAIamRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -830,70 +715,42 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
-  PMMInstanceProfile:
+  Phase1QAInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
-        - Ref: PMMInstanceIamRole
+        - Ref: Phase1QAIamRole
 
-  PMMInstance:
+  Phase1QAInstance:
     Type: AWS::EC2::Instance
     Properties: 
-      ImageId: ami-09e516eb13973ed17 #From marketplace
-      InstanceType: t3.micro
-      IamInstanceProfile: !Ref PMMInstanceProfile
-      KeyName: Shivam-Nanda
+      ImageId: ami-058486f5bbd43c49e #provided by Vishal
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref Phase1QAInstanceProfile
+      KeyName: MPC-Production
       NetworkInterfaces: 
         - AssociatePublicIpAddress: true
           DeviceIndex: 0
           GroupSet: 
-            - Ref: PMMInstanceSecurityGroup
+            - Ref: Phase1QASecurityGroup
           SubnetId:
             Fn::ImportValue:
               Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PMM]]
+          Value: Shards MIgration - Phase 1 - QA Test for v8 Prod RDS
         - Key: Environment
           Value: !Ref EnvName
         - Key: Organization
           Value: !Ref OrgName
 
-  ###  
-  # Route 53 Section
-  ###
-  Route53:
-    Type: AWS::Route53::HostedZone
-    Properties:
-      HostedZoneConfig:
-        Comment: 'My hosted zone for example.com'
-      Name: !Join ['.', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name]]]
-      VPCs: 
-        - VPCId: !Ref VPC
-          VPCRegion: !Ref 'AWS::Region'
 
-Outputs:
+# Outputs:
 
-  PMMUserAccesskey:
-    Description: AccessKey for PMM User
-    Value: !Ref PMMUserKey
+#   PMMUserAccesskey:
+#     Description: AccessKey for PMM User
+#     Value: !Ref PMMUserKey
 
-  PMMUserSecretkey:
-    Description: Secret Key for PMM User
-    Value: !GetAtt PMMUserKey.SecretAccessKey
-
-#   ShardZone01ARN:
-#     Description: ARN of the created RDS instance
-#     Value: !Join [":", ["arn:aws:rds", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "db", !Ref ShardZone01]]
-  
-#   ShardZone01Name:
-#     Description: Name of the created RDS instance
-#     Value: !Ref ShardZone01
-
-#   ShardZone01Address:
-#     Description: The endpoint address of the RDS instance
-#     Value: !GetAtt ShardZone01.Endpoint.Address
-
-#   ShardZone01Port:
-#     Description: The port number of the RDS instance
-#     Value: !Ref Port
+#   PMMUserSecretkey:
+#     Description: Secret Key for PMM User
+#     Value: !GetAtt PMMUserKey.SecretAccessKey
