@@ -119,7 +119,7 @@ Parameters:
   InstanceType:
     Description: QA Machine Instance type
     Type: String
-    Default: t3.micro
+    Default: r5.large
   SnapshotIdentifier:
     Description: DB snapshot (5.7.22) to seed the database
     Type: String
@@ -151,16 +151,124 @@ Parameters:
     Default: anchanto-prd-sns
 
 Mappings: 
-  Fn::Transform:
-    Name: AWS::Include
-    Parameters:
-      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+  # Fn::Transform:
+  #   Name: AWS::Include
+  #   Parameters:
+  #     Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+    #Short names for environment
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
+  
+  EnvLowerCase:
+    Production:
+      Name: production
+    Staging:
+      Name: staging
+    Development:
+      Name: development
+    Test:
+      Name: test
+
+  #Short names for regions
+  RegionShort:
+    us-east-2:
+      Name: ue2
+    us-east-1:
+      Name: ue1
+    us-west-1:
+      Name: uw1
+    us-west-2:
+      Name: uw2
+    ap-east-1:
+      Name: ae1
+    ap-south-1:
+      Name: as1
+    ap-northeast-1:
+      Name: ane1
+    ap-northeast-2:
+      Name: ane2
+    ap-northeast-3:
+      Name: ane3
+    ap-southeast-1:
+      Name: ase1
+    ap-southeast-2:
+      Name: ase2
+    ca-central-1:
+      Name: cc1
+    cn-north-1:
+      Name: cn1
+    cn-northwest-1:
+      Name: cnw1
+    eu-central-1:
+      Name: ec1
+    eu-west-1:
+      Name: ew1
+    eu-west-2:
+      Name: ew2
+    eu-west-3:
+      Name: ew3
+    eu-north-1:
+      Name: en1
+    me-south-1:
+      Name: ms1
+    sa-east-1:
+      Name: se1
+    us-gov-east-1:
+      Name: uge1
+    us-gov-west-1:
+      Name: ugw1 
+
+  # Short Name for ELB
+  ElbTypeShort:
+    application:
+      Name: alb
+    network:
+      Name: nlb
+
 
 Conditions:
-  Fn::Transform:
-    Name: AWS::Include
-    Parameters:
-      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  # Fn::Transform:
+  #   Name: AWS::Include
+  #   Parameters:
+  #     Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+  IsDev:
+    Fn::Equals:
+      - Ref: EnvName
+      - Development
+  IsTest:
+    Fn::Equals:
+      - Ref: EnvName
+      - Test
+  IsStaging:
+    Fn::Equals:
+      - Ref: EnvName
+      - Staging
+  IsProd: 
+    Fn::Equals:
+      - Ref: EnvName
+      - Production
+  IsNotDev: 
+    Fn::Not:
+      - Condition: IsDev
+  IsNotTest: 
+    Fn::Not:
+      - Condition: IsTest
+  IsNotStaging: 
+    Fn::Not:
+      - Condition: IsStaging
+  IsNotProd: 
+    Fn::Not:
+      - Condition: IsProd
+
   HasDeletionProtection: !Equals [!Ref DeletionProtection, true]
   HasPerformanceInsights: !Equals [!Ref EnablePerformanceInsights, true]
   Isv8Mode: !Equals [!Ref DatabaseMode, 8.0]
@@ -190,37 +298,55 @@ Resources:
           ToPort: 3306
           SourceSecurityGroupId: !Ref Phase1QASecurityGroup
 
+  # ProdDBSubnetGroup:
+  #   Type: AWS::RDS::DBSubnetGroup
+  #   DeletionPolicy: Retain
+  #   Properties:
+  #     DBSubnetGroupName: !Ref DBSubnetGroup
+  #     DBSubnetGroupDescription: MPC Production DB Subnet Group
+  #     SubnetIds:
+  #       - Fn::ImportValue:
+  #           Fn::Sub: "${NetworkStackName}-PrivateSubnetId1"
+  #       - Fn::ImportValue:
+  #           Fn::Sub: "${NetworkStackName}-PrivateSubnetId2"
+  #       # - subnet-7b5b4112 #subnet-1e8d107a
+  #       # - subnet-7b5b4115 #subnet-efca4799
+  #     # Tags:
+  #     #   -
+  #     #     Key: String
+  #     #     Value: String
+    
   ##
   # This database is the 5.7.22 clone of prod based on the latest snapshot - Later, it gets upgraded to 8.0
   ##
 
-  # OriginalData:
-  #   DeletionPolicy: Retain
-  #   Type: AWS::RDS::DBInstance
-  #   Properties:
-  #     DBInstanceClass: db.r3.8xlarge
-  #     AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
-  #     BackupRetentionPeriod: 30
-  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !If [Isv8Mode, 'v8', 'v5']]]
-  #     DBParameterGroupName: !If [Isv8Mode, !Ref MySQL8ParameterGroup, dbselluseller-parameter-group-mysql57]
-  #     DBSnapshotIdentifier: !Ref SnapshotIdentifier
-  #     DBSubnetGroupName: !Ref DBSubnetGroup
-  #     DeleteAutomatedBackups: false
-  #     DeletionProtection: true
-  #     EnablePerformanceInsights: !Ref EnablePerformanceInsights
-  #     PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
-  #     Engine: mysql
-  #     EngineVersion: !If [Isv8Mode, 8.0.21, 5.7.22]
-  #     MonitoringRoleArn: !GetAtt RDSIamRole.Arn
-  #     MonitoringInterval: 30
-  #     MultiAZ: false
-  #     Port: !Ref Port
-  #     PubliclyAccessible: false
-  #     StorageEncrypted: true
-  #     StorageType: gp2
-  #     # VPCSecurityGroups: !Ref SecurityGroups
-  #     VPCSecurityGroups: 
-  #       - !Ref OriginalDataSecurityGroup
+  OriginalData:
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: !If [Isv8Mode, db.r5.8xlarge, db.r3.8xlarge]
+      AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
+      BackupRetentionPeriod: 30
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !If [Isv8Mode, 'v8', 'v5']]]
+      DBParameterGroupName: !If [Isv8Mode, !Ref MySQL8ParameterGroup, dbselluseller-parameter-group-mysql57]
+      DBSnapshotIdentifier: !Ref SnapshotIdentifier
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DeleteAutomatedBackups: false
+      DeletionProtection: true
+      EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
+      Engine: mysql
+      EngineVersion: !If [Isv8Mode, 8.0.21, 5.7.22]
+      MonitoringRoleArn: !GetAtt RDSIamRole.Arn
+      MonitoringInterval: 30
+      MultiAZ: false
+      Port: !Ref Port
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      # VPCSecurityGroups: !Ref SecurityGroups
+      VPCSecurityGroups: 
+        - !Ref OriginalDataSecurityGroup
 
   ##
   # This instance contains the final, shrunk version of the data for production
@@ -232,7 +358,7 @@ Resources:
   #     AllocatedStorage: 2420 #will change this based on actual data needs
   #     AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
   #     BackupRetentionPeriod: 30
-  #     DBInstanceClass: db.r3.8xlarge
+  #     DBInstanceClass: db.r5.8xlarge
   #     DBInstanceIdentifier: 'dbselluseller-carina-prod-2tb'
   #     DBParameterGroupName: !Ref MySQL8ParameterGroup
   #     DBSubnetGroupName: !Ref DBSubnetGroup
@@ -738,7 +864,7 @@ Resources:
               Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
       Tags:
         - Key: Name
-          Value: Shards MIgration - Phase 1 - QA Test for v8 Prod RDS
+          Value: Shards Migration - Phase 1 - QA Test for v8 Prod RDS
         - Key: Environment
           Value: !Ref EnvName
         - Key: Organization
