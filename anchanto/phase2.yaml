@@ -1,0 +1,747 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provision shards from a master source database
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      # - Label:
+      #     default: Master Database Configuration
+      #   Parameters:
+      - Label:
+          default: Shards Global Configuration
+        Parameters:
+          - AutoMinorVersionUpgrade
+          - BackupRetentionPeriod
+          - DBSubnetGroup
+          - DeletionProtection
+          - EnablePerformanceInsights
+          - MultiAz
+          - Port
+          - SecurityGroups
+          - VPC
+      - Label:
+          default: PH Shard Configuration
+        Parameters:
+          - PHDBAllocatedStorage
+          - PHDBInstanceClass
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DBSubnetGroup:
+        default: DB Subnet Group
+      DeletionProtection:
+        default: Deletion Protection
+      MultiAz:
+        default: Multi AZ
+      Port:
+        default: Port
+      PHDBAllocatedStorage:
+        default: Allocated Storage
+      PHDBInstanceClass:
+        default: Instance Class
+      EnablePerformanceInsights:
+        default: Enable Performance Insights
+      SecurityGroups:
+        default: Security Groups
+      AutoMinorVersionUpgrade:
+        default: Auto-Minor Version Upgrade
+      NetworkStackName:
+        default: Network Stack
+      SNSStackName:
+        default: SNS Stack
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+    Default: sus
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: anchanto
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  BackupRetentionPeriod:
+    Description: Database Backup Retention Period
+    Type: Number
+    Default: 5
+    MinValue: 5
+    MaxValue: 35
+  DBSubnetGroup:
+    Description: DB Subnet Group
+    Default: mpc production db subnet group
+    Type: String
+  VPC:
+    Description: VPC to use for shards
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-32f32f56
+  PHDBAllocatedStorage:
+    Description: Storage for PH DB Instance
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 1000
+  PHDBInstanceClass:
+    Description: PH Shared Instance Class
+    Type: String
+    Default: db.r5.large
+  DeletionProtection:
+    Description: Set to true to enabled deletion protection
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  EnablePerformanceInsights:
+    Description: Set to true to enabled performance Insights
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  MultiAz:
+    Description: Set to true if MultiAZ is enabled. Otherwise, disabled.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  Port:
+    Description: The port number on which the database accepts connections.
+    Type: Number
+    Default: 3306
+    MinValue: 1
+    MaxValue: 65535
+  AutoMinorVersionUpgrade:
+    Description: Set to true to automatically apply minor engine upgrades.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  SecurityGroups:
+    Type: CommaDelimitedList
+    Default: sg-ae866dc9
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: anchanto-prd-network
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: anchanto-prd-sns
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasDeletionProtection: !Equals [!Ref DeletionProtection, true]
+  HasPerformanceInsights: !Equals [!Ref EnablePerformanceInsights, true]
+
+Resources:
+
+###
+# Global Resources
+###
+
+  MySQL8ParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, params]]
+      Family: mysql8.0
+      Parameters:
+        general_log: 0
+        log_output: FILE
+        long_query_time: 5
+        slow_query_log: 1
+      Tags:
+        - Key: Name
+          Value: MySQL 8 Parameter Group
+
+  RDSIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+####
+# PH Shard Section
+####
+    
+  PHShardRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: !Ref PHDBAllocatedStorage
+      AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
+      BackupRetentionPeriod: !Ref BackupRetentionPeriod
+      DBInstanceClass: !Ref PHDBInstanceClass
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph-shard']]
+      DBName: dbpSEAOMSPH01
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DeleteAutomatedBackups: false
+      DeletionProtection: !Ref DeletionProtection
+      EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MasterUsername: root
+      MasterUserPassword: password #To be changed
+      MonitoringRoleArn: !GetAtt RDSIamRole.Arn
+      MonitoringInterval: 30
+      MultiAZ: false
+      Port: !Ref Port
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: !Ref SecurityGroups
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph']]
+    
+  PHShardReplicaRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: !Ref PHDBInstanceClass
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph-shard-replica']]
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
+      MonitoringRoleArn: !GetAtt RDSIamRole.Arn
+      MonitoringInterval: 30
+      Port: !Ref Port
+      PubliclyAccessible: false
+      SourceDBInstanceIdentifier: !Ref PHShardRDSInstance
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: !Ref SecurityGroups
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph-replica']]
+
+####
+# CloudWatch Section
+####
+
+  PHShardRDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref PHShardRDSInstance, 'high-cpu']]
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref PHShardRDSInstance
+  
+  # PHShardReplicaRDSCPUAlarm:
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-', [!Ref PHShardReplicaRDSInstance, 'high-cpu']]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/RDS
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 300
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub "${SNSStackName}-TopicArn"
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub "${SNSStackName}-TopicArn"
+  #     Dimensions:
+  #       - Name: DBInstanceIdentifier
+  #         Value: !Ref PHShardReplicaRDSInstance
+
+  PHShardRDSFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref PHShardRDSInstance, 'low-storage']]
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 5368709120 # 5GB
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref PHShardRDSInstance
+
+####
+# Dashboard Section
+####
+
+  # Dashboard:
+  #   Type: AWS::CloudWatch::Dashboard
+  #   Properties:
+  #     DashboardName: 'SellUSeller_DB'
+  #     DashboardBody: !Sub
+  #       - |
+  #         {
+  #           "widgets": [
+  #           {
+  #             "type": "metric",
+  #             "x": 0,
+  #             "y": 0,
+  #             "width": 6,
+  #             "height": 6,
+  #             "properties": {
+  #               "view": "timeSeries",
+  #               "title": "Prod DB - Connections",
+  #               "stacked": true,
+  #               "metrics": [
+  #                   [ "AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${PROD_RDS}" ]
+  #               ],
+  #               "region": "${AWS::Region}"
+  #             }
+  #           },
+  #           {
+  #               "type": "metric",
+  #               "x": 6,
+  #               "y": 0,
+  #               "width": 6,
+  #               "height": 6,
+  #               "properties": {
+  #                 "view": "timeSeries",
+  #                 "stacked": false,
+  #                 "title": "Prod DB - CPU",
+  #                 "metrics": [
+  #                     [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${PROD_RDS}" ]
+  #                 ],
+  #                 "region": "${AWS::Region}"
+  #               }
+  #           },
+  #           {
+  #               "type": "metric",
+  #               "x": 12,
+  #               "y": 0,
+  #               "width": 6,
+  #               "height": 6,
+  #               "properties": {
+  #                 "view": "timeSeries",
+  #                 "stacked": false,
+  #                 "title": "Prod DB - IOPS",
+  #                 "metrics": [
+  #                     [ "AWS/RDS", "ReadIOPS", "DBInstanceIdentifier", "${PROD_RDS}" ],
+  #                     [ "AWS/RDS", "WriteIOPS", "DBInstanceIdentifier", "${PROD_RDS}" ]
+  #                 ],
+  #                 "region": "${AWS::Region}"
+  #               }
+  #           },
+  #           {
+  #             "type": "metric",
+  #             "x": 18,
+  #             "y": 0,
+  #             "width": 6,
+  #             "height": 6,
+  #             "properties": {
+  #                 "view": "timeSeries",
+  #                 "title": "Prod DB - Free Storage",
+  #                 "stacked": false,
+  #                 "metrics": [
+  #                     [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${PROD_RDS}" ]
+  #                 ],
+  #                 "region": "${AWS::Region}"
+  #             }
+  #           }
+  #           ]
+  #         }
+  #       - PROD_RDS: !Ref Phase1ProdRDSInstance
+
+  # Dashboard:
+  #   Type: AWS::CloudWatch::Dashboard
+  #   Properties:
+  #       DashboardName: 'SellUSeller_DB_Shards'
+  #       DashboardBody: !Sub
+  #         - |
+  #           {
+  #             "widgets": [
+  #             {
+  #               "type": "metric",
+  #               "x": 0,
+  #               "y": 0,
+  #               "width": 6,
+  #               "height": 6,
+  #               "properties": {
+  #                 "view": "timeSeries",
+  #                 "title": "Zone 01 - Connections",
+  #                 "stacked": true,
+  #                 "metrics": [
+  #                     [ "AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+  #                     [ "...", "${ZONE1_RDS_REPLICA}" ]
+  #                 ],
+  #                 "region": "${AWS::Region}"
+  #               }
+  #             },
+  #             {
+  #                 "type": "metric",
+  #                 "x": 6,
+  #                 "y": 0,
+  #                 "width": 6,
+  #                 "height": 6,
+  #                 "properties": {
+  #                   "view": "timeSeries",
+  #                   "stacked": false,
+  #                   "title": "Zone 01 - CPU",
+  #                   "metrics": [
+  #                       [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+  #                       [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${ZONE1_RDS_REPLICA}" ]
+  #                   ],
+  #                   "region": "${AWS::Region}"
+  #                 }
+  #             },
+  #             {
+  #                 "type": "metric",
+  #                 "x": 12,
+  #                 "y": 0,
+  #                 "width": 6,
+  #                 "height": 6,
+  #                 "properties": {
+  #                   "view": "timeSeries",
+  #                   "stacked": false,
+  #                   "title": "Zone 01 - IOPS",
+  #                   "metrics": [
+  #                       [ "AWS/RDS", "ReadIOPS", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+  #                       [ "AWS/RDS", "WriteIOPS", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+  #                       [ "AWS/RDS", "ReadIOPS", "DBInstanceIdentifier", "${ZONE1_RDS_REPLICA}" ],
+  #                       [ "AWS/RDS", "WriteIOPS", "DBInstanceIdentifier", "${ZONE1_RDS_REPLICA}" ]
+  #                   ],
+  #                   "region": "${AWS::Region}"
+  #                 }
+  #             },
+  #             {
+  #               "type": "metric",
+  #               "x": 18,
+  #               "y": 0,
+  #               "width": 6,
+  #               "height": 6,
+  #               "properties": {
+  #                   "view": "timeSeries",
+  #                   "title": "Zone 01 - Free Storage",
+  #                   "stacked": false,
+  #                   "metrics": [
+  #                       [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${ZONE1_RDS}" ],
+  #                       [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${ZONE1_RDS_REPLICA}" ]
+  #                   ],
+  #                   "region": "${AWS::Region}"
+  #               }
+  #             }
+  #             ]
+  #           }
+  #         - ZONE1_RDS: !Ref ShardZone01
+  #           ZONE1_RDS_REPLICA: !Ref ReadReplicaZone01
+
+  # RDSEventSubscription:
+  #   Type: AWS::RDS::EventSubscription
+  #   Properties:
+  #     Enabled: true
+  #     EventCategories:
+  #       - availability
+  #       - configuration change
+  #       - creation
+  #       - deletion
+  #       - failover
+  #       - low storage
+  #       - maintenance
+  #       - notification
+  #       - read replica
+  #       - recovery
+  #       - restoration
+  #     SnsTopicArn:
+  #       Fn::ImportValue:
+  #         !Sub "${SNSStackName}-TopicArn"
+  #     SourceIds:
+  #       - !Ref DBInstance
+  #     SourceType: db-instance
+
+####
+# PMM Monitoring
+####
+
+  # PMMUser:
+  #   Type: AWS::IAM::User
+  #   Properties:
+  #     UserName: PMMUser
+  
+  # PMMUserKey:
+  #   Type: AWS::IAM::AccessKey
+  #   Properties:
+  #     UserName: !Ref PMMUser
+
+  # RDSPMMAccessPolicy:
+  #   Type: AWS::IAM::Policy
+  #   Properties: 
+  #     PolicyDocument:
+  #       Version: 2012-10-17
+  #       Statement:
+  #         - Effect: Allow
+  #           Action:
+  #             - rds:DescribeDBInstances
+  #             - cloudwatch:GetMetricStatistics
+  #             - cloudwatch:ListMetrics
+  #           Resource: '*'
+  #         - Effect: Allow
+  #           Action:
+  #             - logs:DescribeLogStreams
+  #             - logs:GetLogEvents
+  #             - logs:FilterLogEvents
+  #           Resource: 'arn:aws:logs:*:*:log-group:RDSOSMetrics:*'
+  #     PolicyName: RDSPMMAccessPolicy
+  #     Users: 
+  #       - !Ref PMMUser
+
+  # PMMInstanceSecurityGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: PMM Server Security Group
+  #     VpcId: !Ref VPC
+  #     Tags:
+  #       - Key: Environment
+  #         Value: !Ref EnvName
+  #       - Key: Organization
+  #         Value: !Ref OrgName
+
+  # AllowHTTPOnPMMServer:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties: 
+  #     IpProtocol: TCP
+  #     GroupId: !Ref PMMInstanceSecurityGroup
+  #     FromPort: 80
+  #     ToPort: 80
+  #     CidrIp: 0.0.0.0/0
+
+  # AllowSSHOnPMMServer:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties: 
+  #     IpProtocol: TCP
+  #     GroupId: !Ref PMMInstanceSecurityGroup
+  #     CidrIp: 0.0.0.0/0
+  #     FromPort: 22
+  #     ToPort: 22
+  
+  # PMMInstanceIamRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Sid: 1
+  #           Effect: Allow
+  #           Action: sts:AssumeRole
+  #           Principal:
+  #             Service: ec2.amazonaws.com
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  # PMMInstanceProfile:
+  #   Type: AWS::IAM::InstanceProfile
+  #   Properties:
+  #     Roles:
+  #       - Ref: PMMInstanceIamRole
+
+  # PMMInstance:
+  #   Type: AWS::EC2::Instance
+  #   Properties: 
+  #     ImageId: ami-09e516eb13973ed17 #From marketplace
+  #     InstanceType: !Ref InstanceType
+  #     IamInstanceProfile: !Ref PMMInstanceProfile
+  #     KeyName: Shivam-Nanda
+  #     NetworkInterfaces: 
+  #       - AssociatePublicIpAddress: true
+  #         DeviceIndex: 0
+  #         GroupSet: 
+  #           - Ref: PMMInstanceSecurityGroup
+  #         SubnetId:
+  #           Fn::ImportValue:
+  #             Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PMM]]
+  #       - Key: Environment
+  #         Value: !Ref EnvName
+  #       - Key: Organization
+  #         Value: !Ref OrgName
+
+###
+# QA Section
+###
+
+#   Phase1QASecurityGroup:
+#     Type: AWS::EC2::SecurityGroup
+#     Properties:
+#       GroupDescription: Sharding Phase 1 - QA Instance Security Group
+#       VpcId: !Ref VPC
+#       SecurityGroupIngress:
+#         - IpProtocol : TCP
+#           FromPort: 22
+#           ToPort: 22
+#           CidrIp: 0.0.0.0/0
+#         - IpProtocol : TCP
+#           FromPort: 80
+#           ToPort: 80
+#           CidrIp: 0.0.0.0/0
+#         - IpProtocol : TCP
+#           FromPort: 443
+#           ToPort: 443
+#           CidrIp: 0.0.0.0/0
+
+#   Phase1QAIamRole:
+#     Type: AWS::IAM::Role
+#     Properties:
+#       AssumeRolePolicyDocument:
+#         Version: '2012-10-17'
+#         Statement:
+#           - Sid: 1
+#             Effect: Allow
+#             Action: sts:AssumeRole
+#             Principal:
+#               Service: ec2.amazonaws.com
+#       ManagedPolicyArns:
+#         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+#   Phase1QAInstanceProfile:
+#     Type: AWS::IAM::InstanceProfile
+#     Properties:
+#       Roles:
+#         - Ref: Phase1QAIamRole
+
+#   Phase1QAInstance:
+#     Type: AWS::EC2::Instance
+#     Properties: 
+#       ImageId: ami-058486f5bbd43c49e #provided by Vishal
+#       InstanceType: !Ref InstanceType
+#       IamInstanceProfile: !Ref Phase1QAInstanceProfile
+#       KeyName: MPC-Production
+#       NetworkInterfaces: 
+#         - AssociatePublicIpAddress: true
+#           DeviceIndex: 0
+#           GroupSet: 
+#             - Ref: Phase1QASecurityGroup
+#           SubnetId:
+#             Fn::ImportValue:
+#               Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+#       Tags:
+#         - Key: Name
+#           Value: Shards Migration - Phase 1 - QA Test for v8 Prod RDS
+#         - Key: Environment
+#           Value: !Ref EnvName
+#         - Key: Organization
+#           Value: !Ref OrgName
+
+
+###
+# DMS Setup
+###
+
+  # DMSInstanceSecurityGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: DMS Replication Instance Security Group
+  #     VpcId: !Ref VPC
+  
+  # DMSVPCRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     Path: /
+  #     AssumeRolePolicyDocument:
+  #       Version: 2012-10-17
+  #       Statement:
+  #         -
+  #           Sid: 1
+  #           Effect: Allow
+  #           Action: sts:AssumeRole
+  #           Principal:
+  #             Service: dms.amazonaws.com
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole
+  #     RoleName: dms-vpc-role
+  
+  # DMSReplicationSubnetGroup: 
+  #   DependsOn:
+  #     - DMSVPCRole
+  #   Type: AWS::DMS::ReplicationSubnetGroup
+  #   Properties: 
+  #     ReplicationSubnetGroupDescription: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+  #     ReplicationSubnetGroupIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+  #     SubnetIds: 
+  #       - Fn::ImportValue:
+  #           Fn::Sub: "${NetworkStackName}-PrivateSubnetId1"
+  #       - Fn::ImportValue:
+  #           Fn::Sub: "${NetworkStackName}-PrivateSubnetId2"
+  #     Tags: 
+  #       - Key: Name
+  #         Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+
+# # Outputs:
+
+# #   PMMUserAccesskey:
+# #     Description: AccessKey for PMM User
+# #     Value: !Ref PMMUserKey
+
+# #   PMMUserSecretkey:
+# #     Description: Secret Key for PMM User
+# #     Value: !GetAtt PMMUserKey.SecretAccessKey
