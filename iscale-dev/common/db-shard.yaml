@@ -1,0 +1,425 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provision a DB shard
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Database Configuration
+        Parameters:
+          - AllocatedStorage
+          - InstanceClass
+          - MaxAllocatedStorage
+          - ParameterGroupName
+          - DBSchemaName
+          - MasterUser
+          - MasterUserPassword
+          - AutoMinorVersionUpgrade
+          - BackupRetentionPeriod
+          - DBSubnetGroup
+          - DeletionProtection
+          - EnablePerformanceInsights
+          - MultiAz
+          - Port
+          - SecurityGroup
+          - ShardName
+          - VPC
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - VPCDNSStackName
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      SchemaName:
+        default: Name of the default DB Schema
+      DBParameterGroupName:
+        default: Parameter Group Name to use
+      DBSubnetGroup:
+        default: DB Subnet Group
+      DeletionProtection:
+        default: Deletion Protection
+      MultiAz:
+        default: Multi AZ
+      Port:
+        default: Port
+      AllocatedStorage:
+        default: Allocated Storage
+      MaxAllocatedStorage:
+        default: Max Allocated Storage
+      InstanceClass:
+        default: Instance Class
+      EnablePerformanceInsights:
+        default: Enable Performance Insights
+      SecurityGroup:
+        default: Security Group
+      AutoMinorVersionUpgrade:
+        default: Auto-Minor Version Upgrade
+      NetworkStackName:
+        default: Network Stack
+      VPCDNSStackName:
+        default: VPC DNS Stack
+      SNSStackName:
+        default: SNS Stack
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+    Default: sus
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: anchanto
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  BackupRetentionPeriod:
+    Description: Database Backup Retention Period
+    Type: Number
+    Default: 30
+    MinValue: 5
+    MaxValue: 35
+  DBSchemaName:
+    Description: Name of the default database schema
+    Type: String
+    MinLength: 1
+  DBParameterGroupName:
+    Description: DB Parameter Group Name
+    Type: String
+    MinLength: 1
+  DBSubnetGroup:
+    Description: DB Subnet Group
+    Default: mpc production db subnet group
+    Type: String
+  MasterUser:
+    Description: DB root User
+    Type: String
+    Default: root
+  MasterUserPassword:
+    Description: DB root Password
+    Type: String
+    NoEcho: true
+  VPC:
+    Description: VPC to use for shards
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-32f32f56
+  AllocatedStorage:
+    Description: Storage for DB Instance
+    Type: Number
+    Default: 300
+    MinValue: 20
+    MaxValue: 1000
+  MaxAllocatedStorage:
+    Description: Max Storage for DB Instance
+    Type: Number
+    Default: 1000
+    MinValue: 20
+    MaxValue: 2000
+  InstanceClass:
+    Description: DB Instance Class
+    Type: String
+    Default: db.r5.large
+  DeletionProtection:
+    Description: Set to true to enable deletion protection
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  EnablePerformanceInsights:
+    Description: Set to true to enable performance Insights
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  EnableReadReplica:
+    Description: Set to true to enable read replica
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  MultiAz:
+    Description: Set to true to enable MultiAZ
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  Port:
+    Description: The port number on which the database accepts connections.
+    Type: Number
+    Default: 3306
+    MinValue: 1
+    MaxValue: 65535
+  AutoMinorVersionUpgrade:
+    Description: Set to true to automatically apply minor engine upgrades.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  SecurityGroup:
+    Description: Security Group for shard instances
+    Type: AWS::EC2::SecurityGroup::Id
+  ShardName:
+    Description: Name of the DB shard
+    Type: String
+    MinLength: 1
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: anchanto-prd-network
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: anchanto-prd-sns
+  VPCDNSStackName:
+    Description: VPC DNS Stack Name
+    Type: String
+    Default: anchanto-prd-vpc-dns
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasDeletionProtection: !Equals [!Ref DeletionProtection, true]
+  HasPerformanceInsights: !Equals [!Ref EnablePerformanceInsights, true]
+  HasReplica: !Equals [!Ref EnableReadReplica, true]
+
+Resources:
+
+  RDSIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+###
+# DMS Global settings
+###
+
+  ShardRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: !Ref AllocatedStorage
+      AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
+      BackupRetentionPeriod: !Ref BackupRetentionPeriod
+      DBInstanceClass: !Ref InstanceClass
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref ShardName]]
+      DBName: !Ref DBSchemaName
+      DBParameterGroupName: !Ref DBParameterGroupName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DeleteAutomatedBackups: false
+      DeletionProtection: !Ref DeletionProtection
+      EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MasterUsername: !Ref MasterUser
+      MasterUserPassword: !Ref MasterUserPassword
+      MaxAllocatedStorage: !Ref MaxAllocatedStorage
+      MonitoringRoleArn: !GetAtt RDSIamRole.Arn
+      MonitoringInterval: 30
+      MultiAZ: false
+      Port: !Ref Port
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph']]
+    
+  ShardReplicaRDSInstance:
+    Condition: HasReplica
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: !Ref InstanceClass
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref ShardName, 'replica']]
+      DBParameterGroupName: !Ref DBParameterGroupName
+      EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
+      MonitoringRoleArn: !GetAtt RDSIamRole.Arn
+      MonitoringInterval: 30
+      Port: !Ref Port
+      PubliclyAccessible: false
+      SourceDBInstanceIdentifier: !Ref ShardRDSInstance
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref ShardName, 'replica']]
+
+  ShardRDSInstance53Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue 
+        'Fn::Sub': '${VPCDNSStackName}-HostedZoneId'
+      Comment: !Join [' ', [!Ref Name, !Ref ShardName, 'DB']]
+      Name: !Join
+        - ''
+        - - !Join ['-', [!Ref Name, !Ref ShardName, 'db']]
+          - .
+          - !ImportValue 
+            'Fn::Sub': '${VPCDNSStackName}-HostedZoneDomainName'
+      Type: CNAME
+      TTL: 3600
+      ResourceRecords:
+        - !GetAtt 
+            - ShardRDSInstance
+            - Endpoint.Address
+  
+  ShardReplicaRDSInstance53Record:
+    Condition: HasReplica
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue 
+        'Fn::Sub': '${VPCDNSStackName}-HostedZoneId'
+      Comment: !Join [' ', [!Ref Name, !Ref ShardName, 'DB Replica']]
+      Name: !Join
+        - ''
+        - - !Join ['-', [!Ref Name, !Ref ShardName, 'db', 'replica']]
+          - .
+          - !ImportValue 
+            'Fn::Sub': '${VPCDNSStackName}-HostedZoneDomainName'
+      Type: CNAME
+      TTL: 3600
+      ResourceRecords:
+        - !GetAtt 
+            - ShardReplicaRDSInstance
+            - Endpoint.Address
+
+  ShardRDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref ShardRDSInstance, 'high-cpu']]
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref ShardRDSInstance
+  
+  ShardReplicaRDSCPUAlarm:
+    Condition: HasReplica
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref ShardReplicaRDSInstance, 'high-cpu']]
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref ShardReplicaRDSInstance
+
+  ShardRDSFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref ShardRDSInstance, 'low-storage']]
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 5368709120 # 5GB
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref ShardRDSInstance
+
+Outputs:
+
+  ShardRDSInstanceEndpoint:
+    Description: Shard RDS Instance Endpoint
+    Value: !Join
+      - ''
+      - - !Join ['-', [!Ref ShardName, 'db']]
+        - .
+        - !ImportValue 
+          'Fn::Sub': '${VPCDNSStackName}-HostedZoneDomainName'
+  
+  ShardRDSInstanceSecurityGroup:
+    Description: Shard RDS Instance Security Group
+    Value: !Ref SecurityGroup
+  
+  ShardReplicaRDSInstanceEndpoint:
+    Condition: HasReplica
+    Description: Shard RDS Replica Instance Endpoint
+    Value: !Join
+      - ''
+      - - !Join ['-', [!Ref ShardName, 'db', 'replica']]
+        - .
+        - !ImportValue 
+          'Fn::Sub': '${VPCDNSStackName}-HostedZoneDomainName'

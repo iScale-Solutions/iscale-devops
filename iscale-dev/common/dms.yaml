@@ -1,0 +1,236 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provision a Database Migration Service Task for MySQL
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Source Configuration
+        Parameters:
+          - SourceEndpoint
+          - SourcePort
+          - SourceSchemaName
+          - SourceSecurityGroup
+          - SourceUser
+          - SourceUserPassword
+      - Label:
+          default: Target Configuration
+        Parameters:
+          - TargetEndpoint
+          - TargetPort
+          - TargetSchemaName
+          - TargetSecurityGroup
+          - TargetUser
+          - TargetUserPassword
+      - Label:
+          default: Mappings
+        Parameters:
+          - TableMappings
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+      NetworkStackName:
+        default: Network Stack
+      SNSStackName:
+        default: SNS Stack
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+    Default: sus
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DMSReplicationSubnetGroup:
+    Type: String
+    Description: DMS Replication Subnet Group
+    MinLength: 1
+  SourceEndpoint:
+    Type: String
+    Description: Source Database Endpoint
+    MinLength: 1
+  SourcePort:
+    Type: Number
+    Description: Source Database Port
+    Default: 3306
+  SourceSchemaName:
+    Type: String
+    Description: Source Database Schema Name
+    MinLength: 1
+  SourceSecurityGroup:
+    Type: String
+    Description: Source Database Security Group
+    MinLength: 1
+  SourceUser:
+    Type: String
+    Description: Source Database UserName
+    MinLength: 1
+  SourceUserPassword:
+    Type: String
+    Description: Source Database Password
+    NoEcho: true
+    MinLength: 1
+  TableMappings:
+    Type: String
+    Description: Table Mappings
+    Default: "{ \"rules\": [ { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"%\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }] }"
+  TargetEndpoint:
+    Type: String
+    Description: Target Database Endpoint
+    MinLength: 1
+  TargetPort:
+    Type: Number
+    Description: Source Database Port
+    Default: 3306
+  TargetSchemaName:
+    Type: String
+    Description: Target Database Schema Name
+    MinLength: 1
+  TargetSecurityGroup:
+    Type: String
+    Description: Target Database Security Group
+    MinLength: 1
+  TargetUser:
+    Type: String
+    Description: Target Database UserName
+    MinLength: 1
+  TargetUserPassword:
+    Type: String
+    Description: Target Database Password
+    NoEcho: true
+    MinLength: 1
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: anchanto-prd-network
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: anchanto-prd-sns
+  VPCDNSStackName:
+    Description: VPC DNS Stack Name
+    Type: String
+    Default: anchanto-prd-vpc-dns
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+  
+  DMSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join [' ', ['DMS Replication (', !Ref Name, ') Security Group']]
+      VpcId: !Ref VPC
+
+  SourceSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow connection from DMS
+      IpProtocol: TCP
+      GroupId: !Ref SourceSecurityGroup
+      FromPort: !Ref SourcePort
+      ToPort: !Ref SourcePort
+      SourceSecurityGroupId: !Ref DMSSecurityGroup
+
+  TargetSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from DMS
+      IpProtocol: TCP
+      GroupId: !Ref TargetSecurityGroup
+      FromPort: !Ref TargetPort
+      ToPort: !Ref TargetPort
+      SourceSecurityGroupId: !Ref DMSSecurityGroup
+
+  DMSInstance: 
+    Type: AWS::DMS::ReplicationInstance
+    Properties: 
+      MultiAZ: false
+      PubliclyAccessible: false
+      ReplicationInstanceClass: dms.t3.medium
+      ReplicationInstanceIdentifier: !Join ['-', [!Ref Name, 'replication']]
+      ReplicationSubnetGroupIdentifier: !Ref DMSReplicationSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DMSSecurityGroup
+
+  DMSSourceEndPoint: 
+    Type: AWS::DMS::Endpoint
+    Properties: 
+      DatabaseName: !Ref SourceSchemaName
+      EndpointIdentifier: !Join ['-', [!Ref Name, 'target']]
+      EndpointType: source
+      EngineName: mysql
+      Password: !Ref MasterUserPassword
+      Port: !Ref SourcePort
+      Username: root
+      ServerName: !Ref TargetEndpoint
+
+  DMSTargetEndPoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      DatabaseName: !Ref TargetSchemaName
+      EndpointIdentifier: !Join ['-', [!Ref Name, 'target']]
+      EndpointType: target
+      EngineName: mysql
+      Password: !Ref MasterUserPassword
+      Port: !Ref TargetPort
+      Username: ssdba
+      ServerName: !GetAtt ShardRDSInstance.Endpoint.Address
+
+  DMSReplicationTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties: 
+      MigrationType: full-load
+      ReplicationInstanceArn: !Ref DMSInstance
+      ReplicationTaskIdentifier: !Join ['-', [!Ref Name, 'migration']]
+      SourceEndpointArn: !Ref SourceEndpoint
+      TargetEndpointArn: !Ref TargetEndpoint
+      TableMappings: !Ref TableMappings
+
+Outputs:
+  
+  DMSSecurityGroup:
+    Description: DMS Security Group
+    Value: !Ref DMSSecurityGroup
