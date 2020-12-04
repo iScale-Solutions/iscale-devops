@@ -1110,7 +1110,7 @@ Resources:
     Type: AWS::DMS::Endpoint
     Properties:
       DatabaseName: dbpSEAOMSMY01
-      EndpointIdentifier: phase2-SGID-target
+      EndpointIdentifier: phase2-MY-target
       EndpointType: target
       EngineName: mysql
       Password: !Ref MasterUserPassword
@@ -1126,6 +1126,234 @@ Resources:
       ReplicationTaskIdentifier: MY-Migration
       SourceEndpointArn: !Ref MYShardDMSSourceEndPoint
       TargetEndpointArn: !Ref MYShardDMSTargetEndPoint
+      TableMappings: "{ \"rules\": [ { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"mysql\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }, { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbssPH01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" } ] }"
+
+
+####
+# Global Shard Section
+####
+    
+  GlobalShardRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: !Ref PHDBAllocatedStorage #TODO PARAM
+      AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
+      BackupRetentionPeriod: !Ref BackupRetentionPeriod
+      DBInstanceClass: !Ref PHDBInstanceClass #TODO Param
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'global-shard']]
+      DBName: dbpSEAOMSGLOBAL01 #TODO - Prod / Staging
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DeleteAutomatedBackups: false
+      DeletionProtection: !Ref DeletionProtection
+      EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MasterUsername: ssdba
+      MasterUserPassword: !Ref MasterUserPassword
+      MaxAllocatedStorage: !Ref PHMaxAllocatedStorage #TODO Param
+      MonitoringRoleArn: !GetAtt RDSIamRole.Arn
+      MonitoringInterval: 30
+      MultiAZ: false
+      Port: !Ref Port
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+        - !Ref GlobalShardRDSSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'global-shard']]
+    
+  GlobalShardReplicaRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: !Ref PHDBInstanceClass #TODO - param
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'global-shard-replica']]
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
+      MonitoringRoleArn: !GetAtt RDSIamRole.Arn
+      MonitoringInterval: 30
+      Port: !Ref Port
+      PubliclyAccessible: false
+      SourceDBInstanceIdentifier: !Ref GlobalShardRDSInstance
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+        - !Ref GlobalShardRDSSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'global-shard-replica']]
+
+  GlobalShardRDSInstance53Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue 
+        'Fn::Sub': '${VPCDNSStackName}-HostedZoneId'
+      Comment: MY DB Shard
+      Name: !Join
+        - ''
+        - - db-global.
+          - !ImportValue 
+            'Fn::Sub': '${VPCDNSStackName}-HostedZoneDomainName'
+      Type: CNAME
+      TTL: 3600
+      ResourceRecords:
+        - !GetAtt 
+            - GlobalShardRDSInstance
+            - Endpoint.Address
+  
+  GlobalShardReplicaRDSInstance53Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue 
+        'Fn::Sub': '${VPCDNSStackName}-HostedZoneId'
+      Comment: Global Replica DB Shard
+      Name: !Join
+        - ''
+        - - db-global-replica.
+          - !ImportValue 
+            'Fn::Sub': '${VPCDNSStackName}-HostedZoneDomainName'
+      Type: CNAME
+      TTL: 3600
+      ResourceRecords:
+        - !GetAtt 
+            - GlobalShardReplicaRDSInstance
+            - Endpoint.Address
+
+  GlobalShardRDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref GlobalShardRDSInstance, 'high-cpu']]
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref GlobalShardRDSInstance
+  
+  GlobalShardReplicaRDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref GlobalShardReplicaRDSInstance, 'high-cpu']]
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref GlobalShardReplicaRDSInstance
+
+  GlobalShardRDSFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref GlobalShardRDSInstance, 'low-storage']]
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 5368709120 # 5GB
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      OKActions:
+        - Fn::ImportValue:
+            !Sub "${SNSStackName}-TopicArn"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref GlobalShardRDSInstance
+
+  GlobalShardRDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup 
+    Properties:
+      GroupDescription: Global Shard RDS Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol : TCP
+          FromPort: !Ref Port
+          ToPort: !Ref Port
+          SourceSecurityGroupId: !Ref MYShardDMSSecurityGroup  
+        - IpProtocol : TCP
+          FromPort: !Ref Port
+          ToPort: !Ref Port
+          SourceSecurityGroupId: !Ref Phase2QASecurityGroup
+
+  GlobalShardDMSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: DMS Replication (Global) Security Group
+      VpcId: !Ref VPC
+
+  GlobalShardDMSInstance: 
+    Type: AWS::DMS::ReplicationInstance
+    Properties: 
+      MultiAZ: false
+      PubliclyAccessible: false
+      ReplicationInstanceClass: dms.t3.medium
+      ReplicationInstanceIdentifier: Global-DMS-Replication
+      ReplicationSubnetGroupIdentifier: !Ref DMSReplicationSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref GlobalShardDMSSecurityGroup
+        - !Ref SecurityGroup #To connect to V8 instance
+
+  GlobalShardDMSSourceEndPoint: 
+    Type: AWS::DMS::Endpoint
+    Properties: 
+      # DatabaseName: dbpSEAOMSPH01
+      DatabaseName: dbssPH01 #TODO - Right database to pick
+      EndpointIdentifier: phase2-Global-source
+      EndpointType: source
+      EngineName: mysql
+      Password: !Ref MasterUserPassword
+      Port: !Ref Port
+      Username: root
+      ServerName: anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+
+  GlobalShardDMSTargetEndPoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      DatabaseName: dbpSEAOMSGLOBAL01
+      EndpointIdentifier: phase2-Global-target
+      EndpointType: target
+      EngineName: mysql
+      Password: !Ref MasterUserPassword
+      Port: !Ref Port
+      Username: ssdba
+      ServerName: !GetAtt GlobalShardRDSInstance.Endpoint.Address
+
+  GlobalShardDMSReplicationTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties: 
+      MigrationType: full-load
+      ReplicationInstanceArn: !Ref GlobalShardDMSInstance
+      ReplicationTaskIdentifier: Global-Migration
+      SourceEndpointArn: !Ref GlobalShardDMSSourceEndPoint
+      TargetEndpointArn: !Ref GlobalShardDMSTargetEndPoint
       TableMappings: "{ \"rules\": [ { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"mysql\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }, { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbssPH01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" } ] }"
 
 ####
