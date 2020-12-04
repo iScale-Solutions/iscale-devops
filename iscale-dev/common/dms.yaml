@@ -29,9 +29,10 @@ Metadata:
           - TargetUser
           - TargetUserPassword
       - Label:
-          default: Mappings
+          default: Other Settings
         Parameters:
           - TableMappings
+          - VPC
       - Label:
           default: Cloudformation Stack Configuration
         Parameters:
@@ -131,6 +132,9 @@ Parameters:
     Description: Target Database Password
     NoEcho: true
     MinLength: 1
+  VPC:
+    Description: VPC to use for shards
+    Type: AWS::EC2::VPC::Id
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
@@ -161,7 +165,7 @@ Resources:
   DMSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Join [' ', ['DMS Replication (', !Ref Name, ') Security Group']]
+      GroupDescription: !Join [' ', ['DMS Replication (', !Join ['-', [!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], ') Security Group']]
       VpcId: !Ref VPC
 
   SourceSecurityGroupIngress:
@@ -190,7 +194,7 @@ Resources:
       MultiAZ: false
       PubliclyAccessible: false
       ReplicationInstanceClass: dms.t3.medium
-      ReplicationInstanceIdentifier: !Join ['-', [!Ref Name, 'replication']]
+      ReplicationInstanceIdentifier: !Join ['-', [!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'replication']]
       ReplicationSubnetGroupIdentifier: !Ref DMSReplicationSubnetGroup
       VpcSecurityGroupIds:
         - !Ref DMSSecurityGroup
@@ -199,34 +203,34 @@ Resources:
     Type: AWS::DMS::Endpoint
     Properties: 
       DatabaseName: !Ref SourceSchemaName
-      EndpointIdentifier: !Join ['-', [!Ref Name, 'target']]
+      EndpointIdentifier: !Join ['-', [!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'source']]
       EndpointType: source
       EngineName: mysql
-      Password: !Ref MasterUserPassword
+      Password: !Ref SourceUserPassword
       Port: !Ref SourcePort
       Username: root
-      ServerName: !Ref TargetEndpoint
+      ServerName: !Ref SourceEndpoint
 
   DMSTargetEndPoint:
     Type: AWS::DMS::Endpoint
     Properties:
       DatabaseName: !Ref TargetSchemaName
-      EndpointIdentifier: !Join ['-', [!Ref Name, 'target']]
+      EndpointIdentifier: !Join ['-', [!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'target']]
       EndpointType: target
       EngineName: mysql
-      Password: !Ref MasterUserPassword
+      Password: !Ref TargetUserPassword
       Port: !Ref TargetPort
       Username: ssdba
-      ServerName: !GetAtt ShardRDSInstance.Endpoint.Address
+      ServerName: !Ref TargetEndpoint
 
   DMSReplicationTask:
     Type: AWS::DMS::ReplicationTask
     Properties: 
       MigrationType: full-load
       ReplicationInstanceArn: !Ref DMSInstance
-      ReplicationTaskIdentifier: !Join ['-', [!Ref Name, 'migration']]
-      SourceEndpointArn: !Ref SourceEndpoint
-      TargetEndpointArn: !Ref TargetEndpoint
+      ReplicationTaskIdentifier: !Join ['-', [!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'migration']]
+      SourceEndpointArn: !Ref DMSSourceEndPoint
+      TargetEndpointArn: !Ref DMSTargetEndPoint
       TableMappings: !Ref TableMappings
 
 Outputs:
