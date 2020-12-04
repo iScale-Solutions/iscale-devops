@@ -259,17 +259,6 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole
       RoleName: dms-shards-role
-
-  DMSDataSourceEndPoint: 
-    Type: AWS::DMS::Endpoint
-    Properties: 
-      DatabaseName: anchanto-sus-stg-v8
-      EndpointType: source
-      EngineName: mysql
-      Password: !Ref MasterUserPassword
-      Port: !Ref Port
-      Username: root #TODO - Param
-      ServerName: anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
   
 ####
 # PH Shard Section
@@ -282,7 +271,7 @@ Resources:
       AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
       BackupRetentionPeriod: !Ref BackupRetentionPeriod
       DBInstanceClass: !Ref PHDBInstanceClass
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph']]
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph-shard']]
       DBName: dtpSEAOMSPH01 #TODO - Prod / Staging
       DBParameterGroupName: !Ref MySQL8ParameterGroup
       DBSubnetGroupName: !Ref DBSubnetGroup
@@ -292,7 +281,7 @@ Resources:
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
       Engine: mysql
       EngineVersion: 8.0.21
-      MasterUsername: root #TODO - Param
+      MasterUsername: ssdba
       MasterUserPassword: !Ref MasterUserPassword
       MaxAllocatedStorage: !Ref PHMaxAllocatedStorage
       MonitoringRoleArn: !GetAtt RDSIamRole.Arn
@@ -304,16 +293,16 @@ Resources:
       StorageType: gp2
       VPCSecurityGroups: 
         - !Ref SecurityGroup
-        - !Ref AllowPHDMSSecurityGroup
+        - !Ref PHShardRDSSecurityGroup
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph']]
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph-shard']]
     
   PHShardReplicaRDSInstance:
     Type: AWS::RDS::DBInstance
     Properties:
       DBInstanceClass: !Ref PHDBInstanceClass
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph-replica']]
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph-shard-replica']]
       DBParameterGroupName: !Ref MySQL8ParameterGroup
       EnablePerformanceInsights: !Ref EnablePerformanceInsights
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
@@ -326,9 +315,10 @@ Resources:
       StorageType: gp2
       VPCSecurityGroups: 
         - !Ref SecurityGroup
+        - !Ref PHShardRDSSecurityGroup
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph-replica']]
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph-shard-replica']]
 
   PHShardRDSCPUAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -393,16 +383,20 @@ Resources:
         - Name: DBInstanceIdentifier
           Value: !Ref PHShardRDSInstance
 
-  AllowPHDMSSecurityGroup:
+  PHShardRDSSecurityGroup:
     Type: AWS::EC2::SecurityGroup 
     Properties:
-      GroupDescription: Security Group Allowing Access from DMS
+      GroupDescription: PH Shard RDS Security Group
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol : TCP
           FromPort: !Ref Port
           ToPort: !Ref Port
-          SourceSecurityGroupId: !Ref PHShardDMSSecurityGroup
+          SourceSecurityGroupId: !Ref PHShardDMSSecurityGroup  
+        - IpProtocol : TCP
+          FromPort: !Ref Port
+          ToPort: !Ref Port
+          SourceSecurityGroupId: !Ref Phase2QASecurityGroup
 
   PHShardDMSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -416,19 +410,35 @@ Resources:
       MultiAZ: false
       PubliclyAccessible: false
       ReplicationInstanceClass: dms.t3.medium
+      ReplicationInstanceIdentifier: PH-DMS-Replication
       ReplicationSubnetGroupIdentifier: !Ref DMSReplicationSubnetGroup
       VpcSecurityGroupIds:
         - !Ref PHShardDMSSecurityGroup
+        - !Ref SecurityGroup #To connect to V8 instance
+
+  PHShardDMSSourceEndPoint: 
+    Type: AWS::DMS::Endpoint
+    Properties: 
+      # DatabaseName: dbpSEAOMSPH01
+      DatabaseName: dbssPH01 #As test for now
+      EndpointIdentifier: phase2-PH-source
+      EndpointType: source
+      EngineName: mysql
+      Password: !Ref MasterUserPassword
+      Port: !Ref Port
+      Username: root
+      ServerName: anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
 
   PHShardDMSTargetEndPoint:
     Type: AWS::DMS::Endpoint
     Properties:
-      DatabaseName: dbpSEAOMSPH01
+      DatabaseName: dtpSEAOMSPH01
+      EndpointIdentifier: phase2-PH-target
       EndpointType: target
       EngineName: mysql
       Password: !Ref MasterUserPassword
       Port: !Ref Port
-      Username: root #TODO - Param 
+      Username: ssdba
       ServerName: !GetAtt PHShardRDSInstance.Endpoint.Address
 
   # PHShardDMSReplicationTask: 
@@ -658,7 +668,7 @@ Resources:
 ####
 # TH VN Shard Section
 ####
-    
+  
   THVNShardRDSInstance:
     Type: AWS::RDS::DBInstance
     Properties:
@@ -666,7 +676,7 @@ Resources:
       AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
       BackupRetentionPeriod: !Ref BackupRetentionPeriod
       DBInstanceClass: !Ref PHDBInstanceClass #TODO - Param
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'thvn']]
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'thvn-shard']]
       DBName: dtpSEAOMSTHVN01 #TODO - Prod / Staging
       DBParameterGroupName: !Ref MySQL8ParameterGroup
       DBSubnetGroupName: !Ref DBSubnetGroup
@@ -676,7 +686,7 @@ Resources:
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
       Engine: mysql
       EngineVersion: 8.0.21
-      MasterUsername: root #TODO - Param
+      MasterUsername: ssdba
       MasterUserPassword: !Ref MasterUserPassword
       MaxAllocatedStorage: 1000 #TODO - param
       MonitoringRoleArn: !GetAtt RDSIamRole.Arn
@@ -688,16 +698,16 @@ Resources:
       StorageType: gp2
       VPCSecurityGroups: 
         - !Ref SecurityGroup
-        - !Ref AllowPHDMSSecurityGroup #TODO - Param
+        - !Ref THVNShardRDSSecurityGroup
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'thvn']]
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'thvn-shard']]
     
   THVNShardReplicaRDSInstance:
     Type: AWS::RDS::DBInstance
     Properties:
-      DBInstanceClass: !Ref PHDBInstanceClass
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'thvn-replica']]
+      DBInstanceClass: !Ref PHDBInstanceClass #TOOD - Param
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'thvn-shard-replica']]
       DBParameterGroupName: !Ref MySQL8ParameterGroup
       EnablePerformanceInsights: !Ref EnablePerformanceInsights
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
@@ -710,9 +720,67 @@ Resources:
       StorageType: gp2
       VPCSecurityGroups: 
         - !Ref SecurityGroup
+        - !Ref THVNShardRDSSecurityGroup
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'thvn-shard-replica']]
+
+  THVNShardRDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup 
+    Properties:
+      GroupDescription: THVN Shard RDS Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol : TCP
+          FromPort: !Ref Port
+          ToPort: !Ref Port
+          SourceSecurityGroupId: !Ref THVNShardDMSSecurityGroup
+        - IpProtocol : TCP
+          FromPort: !Ref Port
+          ToPort: !Ref Port
+          SourceSecurityGroupId: !Ref Phase2QASecurityGroup
+
+  THVNShardDMSSourceEndPoint: 
+    Type: AWS::DMS::Endpoint
+    Properties: 
+      DatabaseName: dbpSEAOMSTHVN01
+      EndpointIdentifier: phase2-THVN-source
+      EndpointType: source
+      EngineName: mysql
+      Password: !Ref MasterUserPassword
+      Port: !Ref Port
+      Username: root
+      ServerName: anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+
+  THVNShardDMSTargetEndPoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      DatabaseName: dtpSEAOMSTHVN01
+      EndpointIdentifier: phase2-THVN-target
+      EndpointType: target
+      EngineName: mysql
+      Password: !Ref MasterUserPassword
+      Port: !Ref Port
+      Username: ssdba
+      ServerName: !GetAtt THVNShardRDSInstance.Endpoint.Address
+
+  THVNShardDMSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:  Replication (THVN) Security Group
+      VpcId: !Ref VPC
+
+  THVNShardDMSInstance: 
+    Type: AWS::DMS::ReplicationInstance
+    Properties: 
+      MultiAZ: false
+      PubliclyAccessible: false
+      ReplicationInstanceClass: dms.t3.medium
+      ReplicationInstanceIdentifier: THVN-DMS-Replication
+      ReplicationSubnetGroupIdentifier: !Ref DMSReplicationSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref THVNShardDMSSecurityGroup
+        - !Ref SecurityGroup #To connect to V8 instance
 
 ####
 # Dashboard Section
@@ -824,186 +892,41 @@ Resources:
   #       - !Ref DBInstance
   #     SourceType: db-instance
 
-####
-# PMM Monitoring
-####
 
-  # PMMUser:
-  #   Type: AWS::IAM::User
-  #   Properties:
-  #     UserName: PMMUser
-  
-  # PMMUserKey:
-  #   Type: AWS::IAM::AccessKey
-  #   Properties:
-  #     UserName: !Ref PMMUser
-
-  # RDSPMMAccessPolicy:
-  #   Type: AWS::IAM::Policy
-  #   Properties: 
-  #     PolicyDocument:
-  #       Version: 2012-10-17
-  #       Statement:
-  #         - Effect: Allow
-  #           Action:
-  #             - rds:DescribeDBInstances
-  #             - cloudwatch:GetMetricStatistics
-  #             - cloudwatch:ListMetrics
-  #           Resource: '*'
-  #         - Effect: Allow
-  #           Action:
-  #             - logs:DescribeLogStreams
-  #             - logs:GetLogEvents
-  #             - logs:FilterLogEvents
-  #           Resource: 'arn:aws:logs:*:*:log-group:RDSOSMetrics:*'
-  #     PolicyName: RDSPMMAccessPolicy
-  #     Users: 
-  #       - !Ref PMMUser
-
-  # PMMInstanceSecurityGroup:
-  #   Type: AWS::EC2::SecurityGroup
-  #   Properties:
-  #     GroupDescription: PMM Server Security Group
-  #     VpcId: !Ref VPC
-  #     Tags:
-  #       - Key: Environment
-  #         Value: !Ref EnvName
-  #       - Key: Organization
-  #         Value: !Ref OrgName
-
-  # AllowHTTPOnPMMServer:
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     IpProtocol: TCP
-  #     GroupId: !Ref PMMInstanceSecurityGroup
-  #     FromPort: 80
-  #     ToPort: 80
-  #     CidrIp: 0.0.0.0/0
-
-  # AllowSSHOnPMMServer:
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     IpProtocol: TCP
-  #     GroupId: !Ref PMMInstanceSecurityGroup
-  #     CidrIp: 0.0.0.0/0
-  #     FromPort: 22
-  #     ToPort: 22
-  
-  # PMMInstanceIamRole:
-  #   Type: AWS::IAM::Role
-  #   Properties:
-  #     AssumeRolePolicyDocument:
-  #       Version: '2012-10-17'
-  #       Statement:
-  #         - Sid: 1
-  #           Effect: Allow
-  #           Action: sts:AssumeRole
-  #           Principal:
-  #             Service: ec2.amazonaws.com
-  #     ManagedPolicyArns:
-  #       - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
-  # PMMInstanceProfile:
-  #   Type: AWS::IAM::InstanceProfile
-  #   Properties:
-  #     Roles:
-  #       - Ref: PMMInstanceIamRole
-
-  # PMMInstance:
-  #   Type: AWS::EC2::Instance
-  #   Properties: 
-  #     ImageId: ami-09e516eb13973ed17 #From marketplace
-  #     InstanceType: !Ref InstanceType
-  #     IamInstanceProfile: !Ref PMMInstanceProfile
-  #     KeyName: Shivam-Nanda
-  #     NetworkInterfaces: 
-  #       - AssociatePublicIpAddress: true
-  #         DeviceIndex: 0
-  #         GroupSet: 
-  #           - Ref: PMMInstanceSecurityGroup
-  #         SubnetId:
-  #           Fn::ImportValue:
-  #             Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PMM]]
-  #       - Key: Environment
-  #         Value: !Ref EnvName
-  #       - Key: Organization
-  #         Value: !Ref OrgName
 
 ###
 # QA Section
 ###
 
-#   Phase1QASecurityGroup:
-#     Type: AWS::EC2::SecurityGroup
-#     Properties:
-#       GroupDescription: Sharding Phase 1 - QA Instance Security Group
-#       VpcId: !Ref VPC
-#       SecurityGroupIngress:
-#         - IpProtocol : TCP
-#           FromPort: 22
-#           ToPort: 22
-#           CidrIp: 0.0.0.0/0
-#         - IpProtocol : TCP
-#           FromPort: 80
-#           ToPort: 80
-#           CidrIp: 0.0.0.0/0
-#         - IpProtocol : TCP
-#           FromPort: 443
-#           ToPort: 443
-#           CidrIp: 0.0.0.0/0
+  Phase2QASecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Phase 2 - QA Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol : TCP
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol : TCP
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol : TCP
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
 
-#   Phase1QAIamRole:
-#     Type: AWS::IAM::Role
-#     Properties:
-#       AssumeRolePolicyDocument:
-#         Version: '2012-10-17'
-#         Statement:
-#           - Sid: 1
-#             Effect: Allow
-#             Action: sts:AssumeRole
-#             Principal:
-#               Service: ec2.amazonaws.com
-#       ManagedPolicyArns:
-#         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+Outputs:
 
-#   Phase1QAInstanceProfile:
-#     Type: AWS::IAM::InstanceProfile
-#     Properties:
-#       Roles:
-#         - Ref: Phase1QAIamRole
-
-#   Phase1QAInstance:
-#     Type: AWS::EC2::Instance
-#     Properties: 
-#       ImageId: ami-058486f5bbd43c49e #provided by Vishal
-#       InstanceType: !Ref InstanceType
-#       IamInstanceProfile: !Ref Phase1QAInstanceProfile
-#       KeyName: MPC-Production
-#       NetworkInterfaces: 
-#         - AssociatePublicIpAddress: true
-#           DeviceIndex: 0
-#           GroupSet: 
-#             - Ref: Phase1QASecurityGroup
-#           SubnetId:
-#             Fn::ImportValue:
-#               Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
-#       Tags:
-#         - Key: Name
-#           Value: Shards Migration - Phase 1 - QA Test for v8 Prod RDS
-#         - Key: Environment
-#           Value: !Ref EnvName
-#         - Key: Organization
-#           Value: !Ref OrgName
-
-# # Outputs:
-
-# #   PMMUserAccesskey:
-# #     Description: AccessKey for PMM User
-# #     Value: !Ref PMMUserKey
-
-# #   PMMUserSecretkey:
-# #     Description: Secret Key for PMM User
-# #     Value: !GetAtt PMMUserKey.SecretAccessKey
+  Phase2QASecurityGroup:
+    Description: Security Group for QA
+    Value: !Ref Phase2QASecurityGroup
+  
+  PHShardDMSSecurityGroup:
+    Description: PH Shard DMS Security Group
+    Value: !Ref PHShardDMSSecurityGroup
+  
+  THVNShardDMSSecurityGroup:
+    Description: THVN Shard DMS Security Group
+    Value: !Ref THVNShardDMSSecurityGroup
