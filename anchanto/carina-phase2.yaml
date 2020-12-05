@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provision a DB shard
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Database Configuration
+        Parameters:
+          - InstanceClass
+          - ParameterGroupName
+          - DBSnapshotIdentifier
+          - DBSubnetGroup
+          - SecurityGroup
+          - VPC
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - VPCDNSStackName
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DBParameterGroupName:
+        default: Parameter Group Name to use
+      DBSnapshotIdentifier:
+        default: DB Snapshot Identifier
+      DBSubnetGroup:
+        default: DB Subnet Group
+      DeletionProtection:
+        default: Deletion Protection
+      MultiAz:
+        default: Multi AZ
+      Port:
+        default: Port
+      InstanceClass:
+        default: Instance Class
+      SecurityGroup:
+        default: Security Group
+      NetworkStackName:
+        default: Network Stack
+      VPCDNSStackName:
+        default: VPC DNS Stack
+      SNSStackName:
+        default: SNS Stack
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+    Default: sus
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: anchanto
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DBParameterGroupName:
+    Description: DB Parameter Group Name
+    Type: String
+    MinLength: 1
+    Default: anchanto-sus-prd-db-shards-mysql8parametergroup-1cr918izijrgk
+  DBSnapshotIdentifier:
+    Description: DB Snapshot Identifier
+    Type: String
+    Default: arn:aws:rds:ap-southeast-1:337564481418:snapshot:dbselluseller-carina-prod-2tb-dec-6-2020-before-shards
+  DBSubnetGroup:
+    Description: DB Subnet Group
+    Default: mpc production db subnet group
+    Type: String
+  DeletionProtection:
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  VPC:
+    Description: VPC to use for shards
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-32f32f56
+  SecurityGroup:
+    Description: Security Group for shard instances
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: sg-ae866dc9
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: anchanto-prd-network
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: anchanto-prd-sns
+  VPCDNSStackName:
+    Description: VPC DNS Stack Name
+    Type: String
+    Default: anchanto-prd-vpc-dns
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  CarinaRDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Carina Phase 2 RDS Security Group
+      VpcId: !Ref VPC
+
+  CarinaEC2ScriptSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Carina Phase 2 EC2 Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+  CarinaRDSSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow Carina EC2 script into the DB instances
+      IpProtocol: TCP
+      GroupId: !Ref CarinaRDSSecurityGroup
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref CarinaEC2ScriptSecurityGroup
+ 
+  CarinaScriptEC2PH:
+    Type: AWS::EC2::Instance
+    Properties: 
+      DisableApiTermination: !Ref DeletionProtection
+      ImageId: ami-0d728fd4e52be968f
+      KeyName: AnalyticsServers
+      InstanceType: t3.micro
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: 
+            - !Ref CarinaEC2ScriptSecurityGroup
+          SubnetId: 
+            Fn::ImportValue:
+              Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'carina-script-PH']]
+  
+  CarinaScriptEC2MY:
+    Type: AWS::EC2::Instance
+    Properties: 
+      DisableApiTermination: !Ref DeletionProtection
+      ImageId: ami-0d728fd4e52be968f
+      KeyName: AnalyticsServers
+      InstanceType: t3.micro
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: 
+            - !Ref CarinaEC2ScriptSecurityGroup
+          SubnetId: 
+            Fn::ImportValue:
+              Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'carina-script-MY']]
+
+  CarinaScriptEC2SGID:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: !Ref DeletionProtection
+      ImageId: ami-0d728fd4e52be968f
+      KeyName: AnalyticsServers
+      InstanceType: t3.micro
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: 
+            - !Ref CarinaEC2ScriptSecurityGroup
+          SubnetId: 
+            Fn::ImportValue:
+              Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'carina-script-SGID']]
+
+  CarinaScriptEC2THVN:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: !Ref DeletionProtection
+      ImageId: ami-0d728fd4e52be968f
+      KeyName: AnalyticsServers
+      InstanceType: t3.micro
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: 
+            - !Ref CarinaEC2ScriptSecurityGroup
+          SubnetId: 
+            Fn::ImportValue:
+              Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'carina-script-THVN']]
+
+  CarinaScriptEC2Global:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: !Ref DeletionProtection 
+      ImageId: ami-0d728fd4e52be968f
+      KeyName: AnalyticsServers
+      InstanceType: t3.micro
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: 
+            - !Ref CarinaEC2ScriptSecurityGroup
+          SubnetId: 
+            Fn::ImportValue:
+              Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'carina-script-Global']]
+
+  CarinaRDSPH:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DeletionProtection: !Ref DeletionProtection
+      DBInstanceClass: db.r5.2xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-PH]]
+      DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
+      DBParameterGroupName: !Ref DBParameterGroupName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref CarinaRDSSecurityGroup
+
+  CarinaRDSGlobal:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DeletionProtection: !Ref DeletionProtection
+      DBInstanceClass: db.r5.2xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-Global]]
+      DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
+      DBParameterGroupName: !Ref DBParameterGroupName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref CarinaRDSSecurityGroup
+
+  CarinaRDSMY:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DeletionProtection: !Ref DeletionProtection
+      DBInstanceClass: db.r5.2xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-MY]]
+      DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
+      DBParameterGroupName: !Ref DBParameterGroupName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref CarinaRDSSecurityGroup
+
+  CarinaRDSSGID:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DeletionProtection: !Ref DeletionProtection
+      DBInstanceClass: db.r5.2xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-sgid]]
+      DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
+      DBParameterGroupName: !Ref DBParameterGroupName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref CarinaRDSSecurityGroup
+
+  CarinaRDSTHVN:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DeletionProtection: !Ref DeletionProtection
+      DBInstanceClass: db.r5.2xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-thvn]]
+      DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
+      DBParameterGroupName: !Ref DBParameterGroupName
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref CarinaRDSSecurityGroup
+
+Outputs:
+
+  CarinaRDSSecurityGroup:
+    Value: !Ref CarinaRDSSecurityGroup
