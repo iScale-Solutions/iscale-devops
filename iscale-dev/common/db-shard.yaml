@@ -18,6 +18,7 @@ Metadata:
           - MaxAllocatedStorage
           - ParameterGroupName
           - DBSchemaName
+          - DBSnapshotIdentifier
           - MasterUser
           - MasterUserPassword
           - AutoMinorVersionUpgrade
@@ -48,6 +49,8 @@ Metadata:
         default: Name of the default DB Schema
       DBParameterGroupName:
         default: Parameter Group Name to use
+      DBSnapshotIdentifier:
+        default: DB Snapshot Identifier
       DBSubnetGroup:
         default: DB Subnet Group
       DeletionProtection:
@@ -111,6 +114,10 @@ Parameters:
     Description: DB Parameter Group Name
     Type: String
     MinLength: 1
+  DBSnapshotIdentifier:
+    Description: DB Snapshot Identifier
+    Type: String
+    Default: ''
   DBSubnetGroup:
     Description: DB Subnet Group
     Default: mpc production db subnet group
@@ -217,6 +224,7 @@ Conditions:
   HasDeletionProtection: !Equals [!Ref DeletionProtection, true]
   HasPerformanceInsights: !Equals [!Ref EnablePerformanceInsights, true]
   HasReplica: !Equals [!Ref EnableReadReplica, true]
+  HasDBSnapshot: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
 
 Resources:
 
@@ -243,12 +251,13 @@ Resources:
   ShardRDSInstance:
     Type: AWS::RDS::DBInstance
     Properties:
-      AllocatedStorage: !Ref AllocatedStorage
+      AllocatedStorage: !If [HasDBSnapshot, !Ref 'AWS::NoValue', !Ref AllocatedStorage]
       AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
       BackupRetentionPeriod: !Ref BackupRetentionPeriod
       DBInstanceClass: !Ref InstanceClass
       DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref ShardName]]
-      DBName: !Ref DBSchemaName
+      DBSnapshotIdentifier: !If [HasDBSnapshot, !Ref DBSnapshotIdentifier, !Ref 'AWS::NoValue']
+      DBName: !If [HasDBSnapshot, !Ref 'AWS::NoValue', !Ref DBSchemaName]
       DBParameterGroupName: !Ref DBParameterGroupName
       DBSubnetGroupName: !Ref DBSubnetGroup
       DeletionProtection: !Ref DeletionProtection
@@ -256,8 +265,8 @@ Resources:
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
       Engine: mysql
       EngineVersion: 8.0.21
-      MasterUsername: !Ref MasterUser
-      MasterUserPassword: !Ref MasterUserPassword
+      MasterUsername: !If [HasDBSnapshot, !Ref 'AWS::NoValue', !Ref MasterUser]
+      MasterUserPassword: !If [HasDBSnapshot, !Ref 'AWS::NoValue', !Ref MasterUserPassword]
       MaxAllocatedStorage: !Ref MaxAllocatedStorage
       MonitoringRoleArn: !GetAtt RDSIamRole.Arn
       MonitoringInterval: 30
