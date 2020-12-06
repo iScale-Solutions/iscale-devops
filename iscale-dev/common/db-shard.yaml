@@ -15,6 +15,7 @@ Metadata:
         Parameters:
           - AllocatedStorage
           - InstanceClass
+          - Iops
           - MaxAllocatedStorage
           - ParameterGroupName
           - DBSchemaName
@@ -122,6 +123,10 @@ Parameters:
     Description: DB Subnet Group
     Default: mpc production db subnet group
     Type: String
+  Iops:
+    Description: Iops to use (leave blank for using default)
+    Type: Number
+    Default: 0 #Means no provisionned IOPS
   MasterUser:
     Description: DB root User
     Type: String
@@ -222,6 +227,7 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasDeletionProtection: !Equals [!Ref DeletionProtection, true]
+  HasIops: !Not [!Equals [!Ref Iops, 0]]
   HasPerformanceInsights: !Equals [!Ref EnablePerformanceInsights, true]
   HasReplica: !Equals [!Ref EnableReadReplica, true]
   HasDBSnapshot: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
@@ -249,7 +255,7 @@ Resources:
 ###
 
   ShardRDSInstance:
-    DeletionPolicy: Delete #TODO - Remove in Prod
+    DeletionPolicy: Delete
     Type: AWS::RDS::DBInstance
     Properties:
       AllocatedStorage: !If [HasDBSnapshot, !Ref 'AWS::NoValue', !Ref AllocatedStorage]
@@ -263,6 +269,7 @@ Resources:
       DBSubnetGroupName: !Ref DBSubnetGroup
       DeletionProtection: !Ref DeletionProtection
       EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      Iops: !If [HasIops, !Ref Iops, !Ref 'AWS::NoValue']
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
       Engine: mysql
       EngineVersion: 8.0.21
@@ -275,7 +282,7 @@ Resources:
       Port: !Ref Port
       PubliclyAccessible: false
       StorageEncrypted: true
-      StorageType: gp2
+      StorageType: !If [HasIops, io1, gp2]
       VPCSecurityGroups: 
         - !Ref SecurityGroup
       Tags:
@@ -283,11 +290,11 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'ph']]
     
   ShardReplicaRDSInstance:
-    DeletionPolicy: Delete #TODO - Remove in Prod
     Condition: HasReplica
+    DeletionPolicy: Delete
     Type: AWS::RDS::DBInstance
     Properties:
-      DBInstanceClass: !Ref InstanceClass
+      DBInstanceClass: db.r5.large #all replica like this for now
       DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref ShardName, 'replica']]
       DBParameterGroupName: !Ref DBParameterGroupName
       EnablePerformanceInsights: !Ref EnablePerformanceInsights
