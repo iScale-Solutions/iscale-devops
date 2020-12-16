@@ -1,0 +1,292 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provisions a static website for a particular domain / URL
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Static Website Configuration
+        Parameters:
+          - CloudFrontCertificateArn
+          - SSLCertificateArn
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - LoadBalancerStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      LambdaDefaultIndexARN:
+        default: Lambda Default Index ARN
+      LambdaStaticSiteCachingARN:
+        default: Lambda Static Site Caching ARN
+      ClientStaticHostName:
+        default: Client Static Name
+      CloudFrontCertificateArn:
+        default: CloduFront SSL Certificate ARN
+      SSLCertificateArn:
+        default: ELB SSL Certificate ARN
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: website
+    MaxLength: 12
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-network
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-loadbalancer
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-sns
+  ClientStaticHostName:
+    Description: Static Host Name for the site (e.g. www)
+    Type: String
+    Default: www
+  LambdaDefaultIndexARN:
+    Description: Default Index Lambda function ARN
+    Type: String
+    Default: arn:aws:lambda:us-east-1:178070162686:function:LambdaEdgeFunctions-LambdaDefaultIndexFunction-GQXH6N0VHIMU:1
+  LambdaStaticSiteCachingARN:
+    Description: Default Lambda Static Site Caching function ARN
+    Type: String
+    Default: arn:aws:lambda:us-east-1:178070162686:function:LambdaEdgeFunctions-LambdaStaticSiteCachingFunctio-B438ZA4X5Y8C:4
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+  CloudFrontCertificateArn:
+    Description: CloudFront Certificate ARN (must be in us-east-1)
+    Type: String
+  SSLCertificateArn:
+    Description: ELB SSL Certificate ARN
+    Type: String
+  CreateS3IAMUser:
+    Description: Set to true to generate an access key to the S3 static bucket
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  NeedIAMUser: !Equals [!Ref CreateS3IAMUser, true]
+Resources:
+
+####
+# S3 Section
+####
+  
+  StaticWebsiteBucket:
+    Type: AWS::S3::Bucket
+    # DeletionPolicy: Retain
+    Properties:
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+####
+# Certificate Section
+####
+
+  SiteELBSSLCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties: 
+      Certificates: 
+        - CertificateArn: !Ref SSLCertificateArn
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub '${LoadBalancerStackName}-SSLListener'
+
+####
+# IAM Section
+####
+
+  StaticWebsiteUser:
+    Condition: NeedIAMUser
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Join ['/', [!GetAtt [StaticWebsiteBucket, Arn], '*']]
+                  - !GetAtt [StaticWebsiteBucket, Arn]
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:ListInvalidations
+                Resource:
+                  - !Join ['',['arn:aws:cloudfront::', !Ref 'AWS::AccountId', ':distribution/', !Ref StaticWebsiteCloudFront]]
+
+  StaticWebsiteUserAccessKey:
+    Condition: NeedIAMUser
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName:
+        Ref: StaticWebsiteUser
+
+
+####
+# CloudFront Section
+####
+
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Join [' ', [ 'CloudFront Origin Access for', !Ref ClientStaticHostName, '.', !Ref ClientDomainName]]
+ 
+  StaticWebsiteCloudFront:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !GetAtt [StaticWebsiteBucket, DomainName]
+          Id: StaticWebsiteBucketOrigin
+          S3OriginConfig:
+            OriginAccessIdentity: !Join ['', ['origin-access-identity/cloudfront/', !Ref CloudFrontOriginAccessIdentity]]
+        Enabled: true
+        Comment: !Join [' ', [ 'Static website for', !Join ['.', [!Ref ClientStaticHostName, !Ref ClientDomainName]]]]
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        Aliases:
+        - !Join ['.', [!Ref ClientStaticHostName, !Ref ClientDomainName]]
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          TargetOriginId: StaticWebsiteBucketOrigin
+          LambdaFunctionAssociations:
+          - EventType: origin-request
+            IncludeBody: false
+            LambdaFunctionARN: !Ref LambdaDefaultIndexARN
+          - EventType: origin-response
+            IncludeBody: false
+            LambdaFunctionARN: !Ref LambdaStaticSiteCachingARN
+          ForwardedValues:
+            QueryString: 'true'
+            Cookies:
+              Forward: all
+          Compress: true
+          ViewerProtocolPolicy: redirect-to-https
+          MinTTL: 3600
+          MaxTTL: 86400
+        PriceClass: PriceClass_All
+        ViewerCertificate: 
+          SslSupportMethod: sni-only
+          AcmCertificateArn: !Ref CloudFrontCertificateArn
+
+####
+# Route 53
+####
+
+  # Maps the s3 static website to the ClientDomainName
+  DomainNameDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
+      Comment: Domain Name record (no www)
+      RecordSets:
+        - Name: !Ref ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                !Sub "${LoadBalancerStackName}-PublicELBCanonicalHostedZoneID"
+            DNSName:  
+              Fn::ImportValue:
+                !Sub "${LoadBalancerStackName}-PublicELBDNS"
+
+  StaticDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
+      Comment: Domain Name with static host
+      RecordSets:
+        - Name: !Join ['.', [!Ref ClientStaticHostName, !Ref ClientDomainName]]
+          Type: CNAME
+          TTL: 3600
+          ResourceRecords:
+            - !GetAtt [StaticWebsiteCloudFront, DomainName]
+
+Outputs:
+
+  S3StaticBucket:
+    Description: The S3 bucket holding the static website
+    Value: !Ref StaticWebsiteBucket
+  
+  StaticWebsiteUserAccessKeyId:
+    Condition: NeedIAMUser
+    Description: Access Key Id for the static S3 bucket
+    Value: !Ref StaticWebsiteUserAccessKey
+  
+  StaticWebsiteUserAccessKeySecret:
+    Condition: NeedIAMUser
+    Description: Secret Key for the static S3 bucket
+    Value: !GetAtt [StaticWebsiteUserAccessKey, SecretAccessKey]
