@@ -13,6 +13,7 @@ Metadata:
       - Label:
           default: Shards Global Configuration
         Parameters:
+          - CarinaPassword
           - BackupRetentionPeriod
           - DBSubnetGroup
           - EnablePerformanceInsights
@@ -34,6 +35,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      CarinaPassword:
+        default: Carina root password
       DBSubnetGroup:
         default: DB Subnet Group
       MultiAz:
@@ -79,6 +82,10 @@ Parameters:
     Default: 5
     MinValue: 5
     MaxValue: 35
+  CarinaPassword:
+    Description: Root Password for Carina
+    Type: String
+    NoEcho: true
   DBSubnetGroup:
     Description: DB Subnet Group
     Default: mpc production db subnet group
@@ -150,6 +157,8 @@ Resources:
         log_output: FILE
         long_query_time: 5
         slow_query_log: 1
+        binlog_format: ROW
+        binlog_row_image: full
       Tags:
         - Key: Name
           Value: MySQL 8 Parameter Group
@@ -210,100 +219,106 @@ Resources:
 ####
   
   # Not yet in production
-  # PHShard:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       AllocatedStorage: 500
-  #       DBSchemaName: dbpSEAOMSPH01
-  #       DBParameterGroupName: !Ref MySQL8ParameterGroup
-  #       DBSubnetGroup: !Ref DBSubnetGroup
-  #       DeletionProtection: false
-  #       EnableReadReplica: false #!If [IsProd, true, false]
-  #       EnablePerformanceInsights: !Ref EnablePerformanceInsights
-  #       MasterUser: ssdba
-  #       MasterUserPassword: !Ref MasterUserPassword
-  #       MaxAllocatedStorage: 1000
-  #       BackupRetentionPeriod: !Ref BackupRetentionPeriod
-  #       MultiAz: false
-  #       SecurityGroup: !Ref SecurityGroup
-  #       ShardName: ph
-  #       VPC: !Ref VPC
-  #       InstanceClass: !If [IsProd, db.r5.2xlarge, db.r5.large]
-  #       VPCDNSStackName: !Ref VPCDNSStackName
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  PHShard:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AllocatedStorage: 500
+        DBSchemaName: dbpSEAOMSPH01
+        DBParameterGroupName: !Ref MySQL8ParameterGroup
+        DBSubnetGroup: !Ref DBSubnetGroup
+        DeletionProtection: false
+        EnableReadReplica: false #!If [IsProd, true, false]
+        EnablePerformanceInsights: !Ref EnablePerformanceInsights
+        Iops: 15000 #Set this for now - will need to remove later
+        MasterUser: ssdba
+        MasterUserPassword: !Ref MasterUserPassword
+        MaxAllocatedStorage: 1000
+        BackupRetentionPeriod: !Ref BackupRetentionPeriod
+        MultiAz: false
+        SecurityGroup: !Ref SecurityGroup
+        ShardName: ph
+        VPC: !Ref VPC
+        InstanceClass: !If [IsProd, db.r5.2xlarge, db.r5.large]
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
   # Not yet in production
-  # PHDMS:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-  #     Parameters:
-  #       Name: !Join ['-', [!Ref Name, 'PH']]
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-  #       ReplicationInstanceClass: dms.c5.2xlarge
-  #       SourceEndpoint: anchanto-sus-prd-carina-script-ph.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com #anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
-  #       SourceSchemaName: dbpSEAOMSPH01
-  #       SourceSecurityGroup: sg-07a7992aacb596cea #sg-05177fa0274e32351
-  #       SourceUser: root
-  #       SourceUserPassword: !Ref MasterUserPassword
-  #       TargetEndpoint: 
-  #         Fn::GetAtt:
-  #           - PHShard
-  #           - Outputs.ShardRDSInstanceEndpoint
-  #       TargetSchemaName: dbpSEAOMSPH01
-  #       TargetSecurityGroup: !Ref SecurityGroup
-  #       TargetUser: ssdba
-  #       TargetUserPassword: !Ref MasterUserPassword
-  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSPH01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSPH01\", \"table-name\": \"dj_processor%\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSPH01\", \"table-name\": \"image_delayed_jobs\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSPH01\", \"table-name\": \"delayed_jobs\" }, \"rule-action\": \"exclude\" }
-  #       ] }"
-  #       VPC: !Ref VPC
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
-
+  PHDMSBig6:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'PH', 'Big']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        MigrationType: full-load-and-cdc
+        ReplicationInstanceClass: dms.c5.2xlarge
+        # SourceEndpoint: anchanto-sus-prd-carina-script-ph.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com #anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+        SourceEndpoint: dbselluseller-carina-prod-2tb.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+        # SourceSchemaName: dbpSEAOMSPH01
+        SourceSchemaName: dbSelluSeller
+        SourceSecurityGroup: sg-ae866dc9 #sg-07a7992aacb596cea #sg-05177fa0274e32351
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - PHShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSPH01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
 ####
 # MY Shard Section
 ####
   
   # Not yet in production
-  # MYShard:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       AllocatedStorage: 300
-  #       BackupRetentionPeriod: !Ref BackupRetentionPeriod
-  #       DBParameterGroupName: !Ref MySQL8ParameterGroup
-  #       DBSchemaName: dbpSEAOMSMY01
-  #       DBSubnetGroup: !Ref DBSubnetGroup
-  #       DeletionProtection: false
-  #       EnableReadReplica: false #!If [IsProd, true, false]
-  #       EnablePerformanceInsights: !Ref EnablePerformanceInsights
-  #       InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
-  #       MasterUser: ssdba
-  #       MasterUserPassword: !Ref MasterUserPassword
-  #       MaxAllocatedStorage: 1000
-  #       MultiAz: false
-  #       SecurityGroup: !Ref SecurityGroup
-  #       ShardName: my
-  #       VPC: !Ref VPC
-  #       VPCDNSStackName: !Ref VPCDNSStackName
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  MYShard:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AllocatedStorage: 300
+        BackupRetentionPeriod: !Ref BackupRetentionPeriod
+        DBParameterGroupName: !Ref MySQL8ParameterGroup
+        DBSchemaName: dbpSEAOMSMY01
+        DBSubnetGroup: !Ref DBSubnetGroup
+        DeletionProtection: false
+        EnableReadReplica: false #!If [IsProd, true, false]
+        EnablePerformanceInsights: !Ref EnablePerformanceInsights
+        InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
+        Iops: 15000 #Set this for now - will need to remove later
+        MasterUser: ssdba
+        MasterUserPassword: !Ref MasterUserPassword
+        MaxAllocatedStorage: 1000
+        MultiAz: false
+        SecurityGroup: !Ref SecurityGroup
+        ShardName: my
+        VPC: !Ref VPC
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
   # Not yet in production
   # MYDMS:
@@ -533,7 +548,7 @@ Resources:
 # KR / ROW Shard
 ###
 
-  #Keep Running while testing a bit longer
+  #Not prod yet, KR still running in dbss-prd-zone-02.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
   KRROWShard:
     Type: AWS::CloudFormation::Stack
     Properties:
