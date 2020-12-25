@@ -158,7 +158,7 @@ Resources:
         long_query_time: 5
         slow_query_log: 1
         binlog_format: ROW
-        binlog_checksum: CRC32
+        binlog_checksum: NONE
         binlog_row_image: full
       Tags:
         - Key: Name
@@ -394,33 +394,69 @@ Resources:
 ####
   
   # Not yet in prod but turning off for now
-  # THVNShard:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       AllocatedStorage: 300
-  #       BackupRetentionPeriod: !Ref BackupRetentionPeriod
-  #       DBSchemaName: dbpSEAOMSTHVN01
-  #       DBParameterGroupName: !Ref MySQL8ParameterGroup
-  #       DBSubnetGroup: !Ref DBSubnetGroup
-  #       DeletionProtection: false
-  #       EnableReadReplica: false #!If [IsProd, true, false]
-  #       EnablePerformanceInsights: !Ref EnablePerformanceInsights
-  #       InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
-  #       MasterUser: ssdba
-  #       MasterUserPassword: !Ref MasterUserPassword
-  #       MaxAllocatedStorage: 1000
-  #       MultiAz: false
-  #       SecurityGroup: !Ref SecurityGroup
-  #       ShardName: thvn
-  #       VPC: !Ref VPC
-  #       VPCDNSStackName: !Ref VPCDNSStackName
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  THVNShard:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AllocatedStorage: 300
+        BackupRetentionPeriod: !Ref BackupRetentionPeriod
+        DBSchemaName: dbpSEAOMSTHVN01
+        DBParameterGroupName: !Ref MySQL8ParameterGroup
+        DBSubnetGroup: !Ref DBSubnetGroup
+        DeletionProtection: false
+        EnableReadReplica: false #!If [IsProd, true, false]
+        EnablePerformanceInsights: !Ref EnablePerformanceInsights
+        InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
+        Iops: 15000 #Set this for now - will need to remove later
+        MasterUser: ssdba
+        MasterUserPassword: !Ref MasterUserPassword
+        MaxAllocatedStorage: 1000
+        MultiAz: false
+        SecurityGroup: !Ref SecurityGroup
+        ShardName: thvn
+        VPC: !Ref VPC
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  THVNDMSBig6:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'THVN', 'Big']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        MigrationType: full-load-and-cdc
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint: dbselluseller-carina-prod-2tb.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+        SourceSchemaName: dbSelluSeller
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - THVNShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSTHVN01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
   # Not yet in prod but turning off for now
   # THVNDMS:
@@ -460,33 +496,69 @@ Resources:
 ####
   
   # Not yet in production
-  # SGIDShard:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       AllocatedStorage: 300
-  #       DBSchemaName: dbpSEAOMSSGID01
-  #       DBParameterGroupName: !Ref MySQL8ParameterGroup
-  #       BackupRetentionPeriod: !Ref BackupRetentionPeriod
-  #       DBSubnetGroup: !Ref DBSubnetGroup
-  #       DeletionProtection: false
-  #       EnableReadReplica: false #!If [IsProd, true, false]
-  #       EnablePerformanceInsights: !Ref EnablePerformanceInsights
-  #       InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
-  #       MasterUser: ssdba
-  #       MasterUserPassword: !Ref MasterUserPassword
-  #       MaxAllocatedStorage: 1000
-  #       MultiAz: false
-  #       SecurityGroup: !Ref SecurityGroup
-  #       ShardName: sgid
-  #       VPC: !Ref VPC 
-  #       VPCDNSStackName: !Ref VPCDNSStackName
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  SGIDShard:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AllocatedStorage: 300
+        DBSchemaName: dbpSEAOMSSGID01
+        DBParameterGroupName: !Ref MySQL8ParameterGroup
+        BackupRetentionPeriod: !Ref BackupRetentionPeriod
+        DBSubnetGroup: !Ref DBSubnetGroup
+        DeletionProtection: false
+        EnableReadReplica: false #!If [IsProd, true, false]
+        EnablePerformanceInsights: !Ref EnablePerformanceInsights
+        InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
+        Iops: 15000 #Set this for now - will need to remove later
+        MasterUser: ssdba
+        MasterUserPassword: !Ref MasterUserPassword
+        MaxAllocatedStorage: 1000
+        MultiAz: false
+        SecurityGroup: !Ref SecurityGroup
+        ShardName: sgid
+        VPC: !Ref VPC 
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  SGIDDMSBig6:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'SGID', 'Big']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        MigrationType: full-load-and-cdc
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint: dbselluseller-carina-prod-2tb.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+        SourceSchemaName: dbSelluSeller
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - SGIDShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSSGID01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
   #Not yet in prod but turning off for now
   # SGIDDMS:
