@@ -112,6 +112,10 @@ Parameters:
     AllowedValues:
       - true
       - false
+  ProdSnapshotIdentifier:
+    Description: Name of the production copy to use in the source DBs
+    Type: String
+    Default: ''
   SecurityGroup:
     Description: Security Group for shard instances
     Type: AWS::EC2::SecurityGroup::Id
@@ -140,6 +144,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasProdSnapshot: !Not [!Equals [!Ref ProdSnapshotIdentifier, '']]
 
 Resources:
 
@@ -219,6 +224,24 @@ Resources:
 # PH Shard Section
 ####
   
+  ProdCloneForPH:
+    Condition: HasProdSnapshot
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-PH]]
+      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+        
   # Not yet in production
   PHShard:
     Type: AWS::CloudFormation::Stack
@@ -261,11 +284,9 @@ Resources:
         DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
         MigrationType: full-load-and-cdc
         ReplicationInstanceClass: dms.c5.2xlarge
-        # SourceEndpoint: anchanto-sus-prd-carina-script-ph.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com #anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
         SourceEndpoint: dbselluseller-carina-prod-2tb.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
-        # SourceSchemaName: dbpSEAOMSPH01
         SourceSchemaName: dbSelluSeller
-        SourceSecurityGroup: sg-ae866dc9 #sg-07a7992aacb596cea #sg-05177fa0274e32351
+        SourceSecurityGroup: sg-ae866dc9
         SourceUser: root
         SourceUserPassword: !Ref CarinaPassword
         TargetEndpoint: 
@@ -283,6 +304,47 @@ Resources:
                                       { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"include\" },
                                       { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"include\" },
                                       { \"rule-type\": \"selection\", \"rule-id\": \"7\", \"rule-name\": \"7\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_extra_address_details\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  # Not yet in production
+  PHDMS:
+    Condition: HasProdSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'PH']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint:
+          Fn::GetAtt: 
+            - ProdCloneForPH
+            - Endpoint.Address
+        SourceSchemaName: dbSelluSeller
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - PHShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSPH01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"7\", \"rule-name\": \"7\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_extra_address_details\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"8\", \"rule-name\": \"8\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
         ] }"
         VPC: !Ref VPC
         NetworkStackName: !Ref NetworkStackName
@@ -687,6 +749,42 @@ Resources:
         ShardName: krrow
         VPC: !Ref VPC
         VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  ROWDMSBig6:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'ROW', 'Big']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        MigrationType: full-load-and-cdc
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint: dbselluseller-carina-prod-2tb.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+        SourceSchemaName: dbSelluSeller
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - MYShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSROW01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"7\", \"rule-name\": \"7\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_extra_address_details\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
