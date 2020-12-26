@@ -384,6 +384,24 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
+  ProdCloneForMY:
+    Condition: HasProdSnapshot
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-MY]]
+      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+
   MYDMSBig6:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -421,37 +439,45 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   # Not yet in production
-  # MYDMS:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-  #     Parameters:
-  #       Name: !Join ['-', [!Ref Name, 'MY']]
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-  #       ReplicationInstanceClass: dms.c5.2xlarge
-  #       SourceEndpoint: anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
-  #       SourceSchemaName: dbpSEAOMSMY01
-  #       SourceSecurityGroup: sg-07a7992aacb596cea #sg-05177fa0274e32351
-  #       SourceUser: root
-  #       SourceUserPassword: !Ref MasterUserPassword
-  #       TargetEndpoint: 
-  #         Fn::GetAtt:
-  #           - MYShard
-  #           - Outputs.ShardRDSInstanceEndpoint
-  #       TargetSchemaName: dbpSEAOMSMY01
-  #       TargetSecurityGroup: !Ref SecurityGroup
-  #       TargetUser: ssdba
-  #       TargetUserPassword: !Ref MasterUserPassword
-  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSMY01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSMY01\", \"table-name\": \"dj_processor%\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSMY01\", \"table-name\": \"image_delayed_jobs\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSMY01\", \"table-name\": \"delayed_jobs\" }, \"rule-action\": \"exclude\" }
-  #                                     ] }"
-  #       VPC: !Ref VPC
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  MYDMS:
+    Condition: HasProdSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'MY']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint:
+          Fn::GetAtt: 
+            - ProdCloneForMY
+            - Endpoint.Address
+        SourceSchemaName: dbSelluSeller
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - MYShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSMY01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"7\", \"rule-name\": \"7\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_extra_address_details\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"8\", \"rule-name\": \"8\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
 ####
 # TH / VN Shard Section
@@ -486,6 +512,24 @@ Resources:
         VPCDNSStackName: !Ref VPCDNSStackName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+
+  ProdCloneForTHVN:
+    Condition: HasProdSnapshot
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-THVN]]
+      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
 
   THVNDMSBig6:
     Type: AWS::CloudFormation::Stack
@@ -524,37 +568,45 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   # Not yet in prod but turning off for now
-  # THVNDMS:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-  #     Parameters:
-  #       Name: !Join ['-', [!Ref Name, 'THVN']]
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-  #       # ReplicationInstanceClass: dms.c5.2xlarge
-  #       SourceEndpoint: anchanto-sus-prd-carina-script-thvn.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com #anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
-  #       SourceSchemaName: dbpOMSSEAVNTH01 #different name from Shafique vs target
-  #       SourceSecurityGroup: sg-07a7992aacb596cea #sg-05177fa0274e32351
-  #       SourceUser: root
-  #       SourceUserPassword: !Ref MasterUserPassword
-  #       TargetEndpoint: 
-  #         Fn::GetAtt:
-  #           - THVNShard
-  #           - Outputs.ShardRDSInstanceEndpoint
-  #       TargetSchemaName: !If [IsStaging, dbpSEAOMSTHVN02, dbpSEAOMSTHVN01]
-  #       TargetSecurityGroup: !Ref SecurityGroup
-  #       TargetUser: ssdba
-  #       TargetUserPassword: !Ref MasterUserPassword
-  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbpOMSSEAVNTH01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbpOMSSEAVNTH01\", \"table-name\": \"dj_processor%\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbpOMSSEAVNTH01\", \"table-name\": \"image_delayed_jobs\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbpOMSSEAVNTH01\", \"table-name\": \"delayed_jobs\" }, \"rule-action\": \"exclude\" }
-  #                       ] }"
-  #       VPC: !Ref VPC
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  THVNDMS:
+    Condition: HasProdSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'THVN']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint:
+          Fn::GetAtt: 
+            - ProdCloneForTHVN
+            - Endpoint.Address
+        SourceSchemaName: dbSelluSeller
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - THVNShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSTHVN01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"7\", \"rule-name\": \"7\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_extra_address_details\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"8\", \"rule-name\": \"8\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
 ####
 # SG / ID Shard Section
@@ -589,6 +641,24 @@ Resources:
         VPCDNSStackName: !Ref VPCDNSStackName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+
+  ProdCloneForSGID:
+    Condition: HasProdSnapshot
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-SGID]]
+      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
 
   SGIDDMSBig6:
     Type: AWS::CloudFormation::Stack
@@ -627,37 +697,45 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   #Not yet in prod but turning off for now
-  # SGIDDMS:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-  #     Parameters:
-  #       Name: !Join ['-', [!Ref Name, 'SGID']]
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-  #       ReplicationInstanceClass: dms.c5.2xlarge
-  #       SourceEndpoint: anchanto-sus-prd-carina-script-sgid.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com #anchanto-sus-stg-v8.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
-  #       SourceSchemaName: dbpSEAOMSSGID01
-  #       SourceSecurityGroup: sg-07a7992aacb596cea #sg-05177fa0274e32351
-  #       SourceUser: root
-  #       SourceUserPassword: !Ref MasterUserPassword
-  #       TargetEndpoint:
-  #         Fn::GetAtt:
-  #           - SGIDShard
-  #           - Outputs.ShardRDSInstanceEndpoint
-  #       TargetSchemaName: dbpSEAOMSSGID01
-  #       TargetSecurityGroup: !Ref SecurityGroup
-  #       TargetUser: ssdba
-  #       TargetUserPassword: !Ref MasterUserPassword
-  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSSGID01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSSGID01\", \"table-name\": \"dj_processor%\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSSGID01\", \"table-name\": \"image_delayed_jobs\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSSGID01\", \"table-name\": \"delayed_jobs\" }, \"rule-action\": \"exclude\" }
-  #                                     ] }"
-  #       VPC: !Ref VPC
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  SGIDDMS:
+    Condition: HasProdSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'MY']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint:
+          Fn::GetAtt: 
+            - ProdCloneForSGID
+            - Endpoint.Address
+        SourceSchemaName: dbSelluSeller
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - SGIDShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSSGID01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"7\", \"rule-name\": \"7\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_extra_address_details\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"8\", \"rule-name\": \"8\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
 ####
 # Global Shard Section
@@ -752,6 +830,24 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
+  ProdCloneForROW:
+    Condition: HasProdSnapshot
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-ROW]]
+      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBParameterGroupName: !Ref MySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+
   ROWDMSBig6:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -819,6 +915,46 @@ Resources:
                                         { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_orders_bak\" }, \"rule-action\": \"exclude\" },
                                         { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_sellers_bak_09_10\" }, \"rule-action\": \"exclude\" }
                         ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  ROWDMS:
+    Condition: HasProdSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'ROW']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint:
+          Fn::GetAtt: 
+            - ProdCloneForROW
+            - Endpoint.Address
+        SourceSchemaName: dbSelluSeller
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - KRROWShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSROW01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"versions\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"7\", \"rule-name\": \"7\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_extra_address_details\" }, \"rule-action\": \"exclude\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"8\", \"rule-name\": \"8\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+        ] }"
         VPC: !Ref VPC
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
