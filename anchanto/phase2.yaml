@@ -252,6 +252,24 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole
       RoleName: dms-shards-role
 
+  ProdCloneForInterim:
+    Condition: HasProdSnapshot
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], interim-migration]]
+      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+
 ####
 # PH Shard Section
 ####
@@ -691,41 +709,41 @@ Resources:
       VPCSecurityGroups: 
         - !Ref SecurityGroup
 
-  KRDMS:
-    Condition: HasProdSchemaSnapshot
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, 'krrow']]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-        MultiAZ: false
-        ReplicationInstanceClass: dms.c5.2xlarge
-        SourceEndpoint: dbss-prd-zone-02.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
-        SourceSchemaName: dbSelluSeller
-        SourceSecurityGroup: sg-ae866dc9
-        SourceUser: ssdba
-        SourceUserPassword: anchantoSS0918$
-        TargetEndpoint: 
-          Fn::GetAtt:
-            - KRROWShard
-            - Outputs.ShardRDSInstanceEndpoint
-        TargetSchemaName: !If [IsStaging, dbpSEAOMSKRROW02, dbpSEAOMSKR01]
-        TargetSecurityGroup: !Ref SecurityGroup
-        TargetUser: ssdba
-        TargetUserPassword: !Ref MasterUserPassword
-        #For Korean, Grab everything, global tables are included, but ignore some junk tables
-        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"%\" }, \"rule-action\": \"include\" },
-                                        { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"tmp2%\" }, \"rule-action\": \"exclude\" },
-                                        { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses_08NOV_BaK\" }, \"rule-action\": \"exclude\" },
-                                        { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_orders_bak\" }, \"rule-action\": \"exclude\" },
-                                        { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_sellers_bak_09_10\" }, \"rule-action\": \"exclude\" }
-                        ] }"
-        VPC: !Ref VPC
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
+  # KRDMS:
+  #   Condition: HasProdSchemaSnapshot
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+  #     Parameters:
+  #       Name: !Join ['-', [!Ref Name, 'krrow']]
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+  #       MultiAZ: false
+  #       ReplicationInstanceClass: dms.c5.2xlarge
+  #       SourceEndpoint: dbss-prd-zone-02.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+  #       SourceSchemaName: dbSelluSeller
+  #       SourceSecurityGroup: sg-ae866dc9
+  #       SourceUser: ssdba
+  #       SourceUserPassword: anchantoSS0918$
+  #       TargetEndpoint: 
+  #         Fn::GetAtt:
+  #           - KRROWShard
+  #           - Outputs.ShardRDSInstanceEndpoint
+  #       TargetSchemaName: !If [IsStaging, dbpSEAOMSKRROW02, dbpSEAOMSKR01]
+  #       TargetSecurityGroup: !Ref SecurityGroup
+  #       TargetUser: ssdba
+  #       TargetUserPassword: !Ref MasterUserPassword
+  #       #For Korean, Grab everything, global tables are included, but ignore some junk tables
+  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"%\" }, \"rule-action\": \"include\" },
+  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"tmp2%\" }, \"rule-action\": \"exclude\" },
+  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses_08NOV_BaK\" }, \"rule-action\": \"exclude\" },
+  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_orders_bak\" }, \"rule-action\": \"exclude\" },
+  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_sellers_bak_09_10\" }, \"rule-action\": \"exclude\" }
+  #                       ] }"
+  #       VPC: !Ref VPC
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SNSStackName: !Ref SNSStackName
 
   ROWDMS:
     Condition: HasProdSchemaSnapshot
