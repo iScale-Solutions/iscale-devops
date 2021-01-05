@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: This cloudformation template provisions resources for Tasaki
 
 Metadata:
-  AWS::CloudFormation::Interface: 
+  AWS::CloudFormation::Interface:
     ParameterGroups:
       -
         Label:
@@ -105,12 +105,10 @@ Parameters:
     NoEcho: true
     Description: Amasty Repository Username
     Type: String
-    MinLength: 1
   AmastyPassword: 
     NoEcho: true
     Description: Amasty Repository Password
     Type: String
-    MinLength: 1
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
     Type: String
@@ -177,7 +175,7 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasAmasty: !And [!Not [!Equals [!Ref AmastyUsername, '']], !Not [!Equals [!Ref AmastyPassword, '']]]
-      
+        
 Resources:
 
   RepoSecrets:
@@ -201,7 +199,8 @@ Resources:
             MAGENTO_PASSWORD: !Ref MagentoPrivateKey
         GenerateStringKey: MagentoRepos
 
-  DBStack: 
+  DBStack:
+    Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties: 
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -221,11 +220,12 @@ Resources:
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
-  CacheStack: 
+  CacheStack:
+    Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         NetworkStackName: !Ref NetworkStackName
@@ -246,15 +246,16 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
   
-  AppServerStack: 
-    DependsOn: 
+  AppServerStack:
+    Condition: IsNotProd
+    DependsOn:
       - CacheStack
       - DBStack
       - DeployStack
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-magento.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
@@ -302,6 +303,7 @@ Resources:
         MagentoRepoSecrets: !Ref RepoSecrets
 
   BackupStack:
+    Condition: IsNotProd
     DependsOn: 
       - DBStack
       - AppServerStack
@@ -321,14 +323,15 @@ Resources:
               - AppServerStack
               - Outputs.AppServerEFSArn
 
-  SchedulerStack: 
-    DependsOn: 
+  SchedulerStack:
+    Condition: IsNotProd
+    DependsOn:
       - DBStack
       - AppServerStack
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
@@ -676,24 +679,24 @@ Resources:
               Fn::ImportValue:
                 Fn::Sub: "${LoadBalancerStackName}-DNSName"
 
-  AllowFutureSpiritStagingDeployBucket:
+  AllowFutureSpiritDeployBucket:
     Type: AWS::S3::BucketPolicy
-    Condition: IsStaging
-    Properties: 
+    Condition: IsStagingOrProd
+    Properties:
       Bucket: !GetAtt [DeployStack, Outputs.DeploymentBucketName]
-      PolicyDocument: 
-        Statement: 
-          - 
-            Action: 
+      PolicyDocument:
+        Statement:
+          -
+            Action:
               - s3:GetObject
               - s3:GetObjectVersion
               - s3:ListBucket
             Effect: Allow
-            Resource: 
+            Resource:
               - !GetAtt [DeployStack, Outputs.DeploymentBucketArn]
               - !Join ['', [!GetAtt [DeployStack, Outputs.DeploymentBucketArn], '/*']]
-            Principal: 
-              AWS: 
+            Principal:
+              AWS:
                 - 181473428529 #Future Spirit
 
 Outputs:
