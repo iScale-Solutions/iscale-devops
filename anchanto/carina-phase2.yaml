@@ -183,12 +183,32 @@ Resources:
   CarinaRDSSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties: 
-      Description: Allow Carina EC2 script into the DB instances
+      Description: Allow Carina EC2 script into the DB instance
       IpProtocol: TCP
       GroupId: !Ref CarinaRDSSecurityGroup
       FromPort: 3306
       ToPort: 3306
       SourceSecurityGroupId: !Ref CarinaEC2ScriptSecurityGroup
+  
+  CarinaRDSSecurityGroupIngressFromShafique:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow Carina EC2 script into the DB instance
+      IpProtocol: TCP
+      GroupId: !Ref CarinaRDSSecurityGroup
+      FromPort: 3306
+      ToPort: 3306
+      CidrIp: 10.2.192.153/32
+
+  CarinaRDSSecurityGroupIngressFromGlue:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow Glue Into the DB instance
+      IpProtocol: TCP
+      FromPort: 0
+      ToPort: 65535
+      GroupId: !Ref CarinaRDSSecurityGroup
+      SourceSecurityGroupId: !Ref CarinaRDSSecurityGroup
  
   CarinaScriptEC2PH:
     Type: AWS::EC2::Instance
@@ -210,24 +230,24 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'carina-script-PH']]
   
-  # CarinaScriptEC2MY:
-  #   Type: AWS::EC2::Instance
-  #   Properties: 
-  #     DisableApiTermination: !Ref DeletionProtection
-  #     ImageId: ami-03b4aa7b203f9d1f9
-  #     KeyName: AnalyticsServers
-  #     InstanceType: t3.micro
-  #     NetworkInterfaces: 
-  #       - AssociatePublicIpAddress: true
-  #         DeviceIndex: 0
-  #         GroupSet: 
-  #           - !Ref CarinaEC2ScriptSecurityGroup
-  #         SubnetId: 
-  #           Fn::ImportValue:
-  #             Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'carina-script-MY']]
+  CarinaScriptEC2MY:
+    Type: AWS::EC2::Instance
+    Properties: 
+      DisableApiTermination: !Ref DeletionProtection
+      ImageId: ami-03b4aa7b203f9d1f9
+      KeyName: AnalyticsServers
+      InstanceType: t3.micro
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: 
+            - !Ref CarinaEC2ScriptSecurityGroup
+          SubnetId: 
+            Fn::ImportValue:
+              Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], 'carina-script-MY']]
 
   # CarinaScriptEC2SGID:
   #   Type: AWS::EC2::Instance
@@ -293,7 +313,8 @@ Resources:
       DeletionProtection: !Ref DeletionProtection
       DBInstanceClass: db.r5.8xlarge
       DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-PH]]
-      DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
+      # DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
+      DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:dbss-uat-zone-02-2020-12-11-16-42
       # DBParameterGroupName: !Ref DBParameterGroupName
       DBParameterGroupName: !Ref CarinaTestMySQL8ParameterGroup
       # DBSubnetGroupName: !If [IsStaging, !Ref StagingDBSubnetGroup, !Ref DBSubnetGroup]
@@ -306,6 +327,206 @@ Resources:
       StorageType: gp2
       VPCSecurityGroups: 
         - !Ref CarinaRDSSecurityGroup
+
+
+  DMSTargetPH:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AllocatedStorage: 500
+        Iops: 25000
+        DBSchemaName: dbpSEAOMSPH01
+        DBParameterGroupName: !Ref CarinaTestMySQL8ParameterGroup
+        # BackupRetentionPeriod: !Ref BackupRetentionPeriod
+        DBSubnetGroup: !Ref DBSubnetGroup
+        # DeletionProtection: true
+        # EnableReadReplica: !If [IsProd, true, false]
+        # EnablePerformanceInsights: !Ref EnablePerformanceInsights
+        # InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
+        InstanceClass: db.r5.xlarge
+        MasterUser: ssdba
+        MasterUserPassword: password
+        MaxAllocatedStorage: 1000
+        MultiAz: false
+        SecurityGroup: !Ref CarinaRDSSecurityGroup
+        ShardName: phdms
+        VPC: !Ref VPC
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  PHDMS:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'phdms']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        # DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        DMSReplicationSubnetGroup: anchanto-sus-stg
+        SourceEndpoint: anchanto-sus-stg-ph.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+        SourceSchemaName: dbSSOMS
+        SourceSecurityGroup: !Ref CarinaRDSSecurityGroup
+        SourceUser: root
+        SourceUserPassword: '@litubARK$oNID2020geNP'
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - DMSTargetPH
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSPH01
+        TargetSecurityGroup: !Ref CarinaRDSSecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: password
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"versions\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"7\", \"rule-name\": \"7\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  PHDMSBig6:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'ph', 'big']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        # DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        DMSReplicationSubnetGroup: anchanto-sus-stg
+        SourceEndpoint: anchanto-sus-stg-ph.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+        SourceSchemaName: dbSSOMS
+        SourceSecurityGroup: !Ref CarinaRDSSecurityGroup
+        SourceUser: root
+        SourceUserPassword: '@litubARK$oNID2020geNP'
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - DMSTargetPH
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSPH01
+        TargetSecurityGroup: !Ref CarinaRDSSecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: password
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"versions\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  DMSTargetMY:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AllocatedStorage: 500
+        Iops: 25000
+        DBSchemaName: dbpSEAOMSMY01
+        DBParameterGroupName: !Ref CarinaTestMySQL8ParameterGroup
+        # BackupRetentionPeriod: !Ref BackupRetentionPeriod
+        DBSubnetGroup: !Ref DBSubnetGroup
+        # DeletionProtection: true
+        # EnableReadReplica: !If [IsProd, true, false]
+        # EnablePerformanceInsights: !Ref EnablePerformanceInsights
+        # InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
+        InstanceClass: db.r5.xlarge
+        MasterUser: ssdba
+        MasterUserPassword: password
+        MaxAllocatedStorage: 1000
+        MultiAz: false
+        SecurityGroup: !Ref CarinaRDSSecurityGroup
+        ShardName: mydms
+        VPC: !Ref VPC
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  MYDMS:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'mydms']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        # DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        DMSReplicationSubnetGroup: anchanto-sus-stg
+        SourceEndpoint: anchanto-sus-stg-my.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+        SourceSchemaName: dbSSOMS
+        SourceSecurityGroup: !Ref CarinaRDSSecurityGroup
+        SourceUser: root
+        SourceUserPassword: '@litubARK$oNID2020geNP'
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - DMSTargetMY
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSMY01
+        TargetSecurityGroup: !Ref CarinaRDSSecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: password
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"versions\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"7\", \"rule-name\": \"7\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  MYDMSBig6:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'my', 'big']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        # DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        DMSReplicationSubnetGroup: anchanto-sus-stg
+        SourceEndpoint: anchanto-sus-stg-my.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
+        SourceSchemaName: dbSSOMS
+        SourceSecurityGroup: !Ref CarinaRDSSecurityGroup
+        SourceUser: root
+        SourceUserPassword: '@litubARK$oNID2020geNP'
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - DMSTargetMY
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSMY01
+        TargetSecurityGroup: !Ref CarinaRDSSecurityGroup
+        TargetUser: ssdba
+        TargetUserPassword: password
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_customer_addresses\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_state_changes\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_product_images\" }, \"rule-action\": \"include\" },
+                                      { \"rule-type\": \"selection\", \"rule-id\": \"6\", \"rule-name\": \"6\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"versions\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
 
   # CarinaRDSGlobal:
   #   DeletionPolicy: Delete
@@ -326,31 +547,33 @@ Resources:
   #     VPCSecurityGroups: 
   #       - !Ref CarinaRDSSecurityGroup
 
-  # CarinaRDSMY:
-  #   DeletionPolicy: Delete
-  #   Type: AWS::RDS::DBInstance
-  #   Properties:
-  #     DeletionProtection: !Ref DeletionProtection
-  #     DBInstanceClass: db.r5.4xlarge
-  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-MY]]
-  #     DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
-  #     DBParameterGroupName: !Ref DBParameterGroupName
-  #     DBSubnetGroupName: !Ref DBSubnetGroup
-  #     Engine: mysql
-  #     EngineVersion: 8.0.21
-  #     MultiAZ: false
-  #     PubliclyAccessible: false
-  #     StorageEncrypted: true
-  #     StorageType: gp2
-  #     VPCSecurityGroups: 
-  #       - !Ref CarinaRDSSecurityGroup
+  CarinaRDSMY:
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DeletionProtection: !Ref DeletionProtection
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-MY]]
+      # DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
+      DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:dbselluseller-carina-prod-2tb-2020-12-13-21-30
+      # DBParameterGroupName: !Ref DBParameterGroupName
+      DBParameterGroupName: !Ref CarinaTestMySQL8ParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref CarinaRDSSecurityGroup
 
   # CarinaRDSSGID:
   #   DeletionPolicy: Delete
   #   Type: AWS::RDS::DBInstance
   #   Properties:
   #     DeletionProtection: !Ref DeletionProtection
-  #     DBInstanceClass: db.r5.4xlarge
+  #     DBInstanceClass: db.r5.8xlarge
   #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-sgid]]
   #     DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
   #     DBParameterGroupName: !Ref DBParameterGroupName
@@ -369,7 +592,7 @@ Resources:
   #   Type: AWS::RDS::DBInstance
   #   Properties:
   #     DeletionProtection: !Ref DeletionProtection
-  #     DBInstanceClass: db.r5.4xlarge
+  #     DBInstanceClass: db.r5.8xlarge
   #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-thvn]]
   #     DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
   #     DBParameterGroupName: !Ref DBParameterGroupName
@@ -383,6 +606,76 @@ Resources:
   #     VPCSecurityGroups: 
   #       - !Ref CarinaRDSSecurityGroup
 
+####
+# Special roles and artifacts for Johann to use Glue
+####
+
+  JohannGlueS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: johann-glue
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  JohannCustomAccessGroup:
+    Type: AWS::IAM::Group
+    Properties: 
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
+        - arn:aws:iam::aws:policy/AwsGlueDataBrewFullAccessPolicy
+      Policies:
+        - PolicyName: S3AccessGlueBucket
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource: 
+                  - !Join [ '', ['arn:aws:s3:::', !Ref JohannGlueS3Bucket, '/*']]
+                  - !Join [ '', ['arn:aws:s3:::', !Ref JohannGlueS3Bucket, '']]
+
+  JohannIAMUser:
+    Type: AWS::IAM::User
+    Properties: 
+      UserName: johann@iscale-solutions.com
+      Groups: 
+        - !Ref JohannCustomAccessGroup
+
+  GlueIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: glue.amazonaws.com
+      # ManagedPolicyArns:
+      #   - arn:aws:iam::aws:policy/AdministratorAccess
+      Path: /
+      Policies:
+        - PolicyName: S3AccessGlueBucket
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource: 
+                  - !Join [ '', ['arn:aws:s3:::', !Ref JohannGlueS3Bucket, '/*']]
+                  - !Join [ '', ['arn:aws:s3:::', !Ref JohannGlueS3Bucket, '']]
 Outputs:
 
   CarinaRDSSecurityGroup:
