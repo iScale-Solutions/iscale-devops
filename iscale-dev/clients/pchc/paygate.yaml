@@ -22,7 +22,8 @@ Metadata:
           default: Load Balancer Configuration
         Parameters:
           - ClientDomainName
-          - LoadBalancerPriority
+          - LoadBalancerCertificateArn
+          - LoadBalancerHostName
       -
         Label:
           default: Instance Configuration
@@ -47,10 +48,10 @@ Metadata:
         default: Instance AMI ID
       InstanceKeyName:
         default: Instance Key Name
+      LoadBalancerCertificateArn:
+        default: Load Balancer SSL Certificate ARN
       LoadBalancerHostName:
         default: Load Balancer Host Name
-      LoadBalancerPriority:
-        default: Load Balancer Rule Priority
       NetworkStackName:
         default: Network Stack Name
       SNSStackName:
@@ -104,12 +105,10 @@ Parameters:
     Type: String
     Default: paygate
     MaxLength: 12
-  LoadBalancerPriority:
+  LoadBalancerCertificateArn:
     Description: The priority for ELB Listener.
-    Type: Number
-    Default: 100
-    MinValue: 1
-    MaxValue: 50000
+    Type: String
+    Default: arn:aws:acm:ap-southeast-1:050821737631:certificate/00ed4a3d-8f7d-45d5-a09f-354cd485c251
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
@@ -143,75 +142,191 @@ Conditions:
       
 Resources:
 
-  # DBStack: 
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties: 
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
-  #     Parameters: 
-  #       Name: !Ref Name
-  #       DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
-  #       AllocatedStorage: 20 #Gb
-  #       BackupRetentionPeriod: !If [IsProd, 30, 7]
-  #       EnableCPUCreditAlarm: !If [IsProd, true, false]
-  #       EnableEnhancedMonitoring: !If [IsProd, true, false]
-  #       EnablePerformanceInsights: !If [IsProd, true, false]
-  #       EnvName: !Ref EnvName
-  #       Engine: mysql
-  #       EngineVersion: 8.0.20
-  #       Family: mysql8.0
-  #       InstanceType: !If [IsProd, db.t3.medium, db.t3.micro]
-  #       MasterUser: root
-  #       MultiAz: !If [IsProd, true, false]
-  #       NetworkStackName: !Ref NetworkStackName
-  #       OrgName: !Ref OrgName
-  #       SNSStackName: !Ref SNSStackName
-  #       StorageEncrypted: true
+  ELBStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
-  DeployStack: 
+  DBStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters: 
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: 20
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        EnableCPUCreditAlarm: !If [IsProd, true, false]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: mysql
+        EngineVersion: 8.0.20
+        Family: mysql8.0
+        InstanceType: !If [IsProd, db.t3.medium, db.t3.micro]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
+####
+# PayGate Application
+####
+
+  PayGateDeployStack: 
     Type: AWS::CloudFormation::Stack
     Properties: 
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
       Parameters: 
+        Name: !Join ['-', ['pg', 'pg']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  PayGateAppServerStack: 
+    DependsOn: 
+      - DBStack
+      - PayGateDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters: 
         Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint: 
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort: 
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 80
+        InstanceType: t3.micro
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: 100
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+
+####
+# PG-PCHC Application
+####
+
+  PGPCHCDeployStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters: 
+        Name: !Join ['-', ['pg', 'pchc']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  PGPCHCAppServerStack: 
+    DependsOn: 
+      - DBStack
+      - PGPCHCDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters: 
+        Name: !Join ['-', ['pg', 'pchc']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint: 
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort: 
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 80
+        InstanceType: t3.micro
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: 101
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+
+####
+# PG-Payment Application
+####
+
+  PGPaymentDeployStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters: 
+        Name: !Join ['-', ['pg', 'pay']]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
   
-  # AppServerStack: 
-  #   DependsOn: 
-  #     - DBStack
-  #     - DeployStack
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-node.yaml
-  #     Parameters: 
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       ClientDomainName: !Ref ClientDomainName
-  #       DatabaseEndpoint: 
-  #         Fn::GetAtt:
-  #           - DBStack
-  #           - Outputs.DBInstanceAddress
-  #       DatabasePort: 
-  #         Fn::GetAtt:
-  #           - DBStack
-  #           - Outputs.DBInstancePort
-  #       DatabaseSecurityGroupId:
-  #         Fn::GetAtt:
-  #           - DBStack
-  #           - Outputs.SecurityGroupId
-  #       InstanceAMI: !Ref InstanceAMI
-  #       InstanceKeyName: !Ref InstanceKeyName
-  #       InstancePort: 8080
-  #       InstanceType: t3.small
-  #       LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
-  #       LoadBalancerPriority: !Ref LoadBalancerPriority
-  #       LoadBalancerStackName: !Ref LoadBalancerStackName
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
-  #       UseFriendlyNames: TRUE
+  PGPaymentAppServerStack: 
+    DependsOn: 
+      - DBStack
+      - PGPaymentDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters: 
+        Name: !Join ['-', ['pg', 'pay']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint: 
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort: 
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 80
+        InstanceType: t3.micro
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: 102
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
 
   # BackupStack:
   #   DependsOn: 
