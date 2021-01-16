@@ -17,14 +17,12 @@ Metadata:
         Parameters:
           - NetworkStackName
           - SNSStackName
-          - LoadBalancerStackName
       -
         Label:
           default: Load Balancer Configuration
         Parameters:
           - ClientDomainName
           - LoadBalancerPriority
-          - LoadBalancerHostName
       -
         Label:
           default: Instance Configuration
@@ -53,8 +51,6 @@ Metadata:
         default: Load Balancer Host Name
       LoadBalancerPriority:
         default: Load Balancer Rule Priority
-      LoadBalancerStackName:
-        default: Load Balancer Stack Name
       NetworkStackName:
         default: Network Stack Name
       SNSStackName:
@@ -72,11 +68,11 @@ Parameters:
     Type: String
     MinLength: 3
     MaxLength: 9
-    Default: app
+    Default: paygate
   OrgName:
     Description: The name of the organization.
     Type: String
-    Default: cloudcfo
+    Default: pchc
     AllowedPattern: "^[a-z]+(-[a-z]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
     MaxLength: 10
@@ -93,12 +89,12 @@ Parameters:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
     Type: String
     AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
-    Default: cloudcfo.co
+    Default: pchc.com.ph
     MinLength: 1
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-0528a5175983e7f28 #Default Amazon Linux 2
+    Default: ami-00b8d9cb8a7161e41 #Default Amazon Linux 2 for Singapore
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -106,7 +102,7 @@ Parameters:
   LoadBalancerHostName:
     Description: (Optional) Custom Hostname for load balancer URL
     Type: String
-    Default: app
+    Default: paygate
     MaxLength: 12
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
@@ -114,24 +110,15 @@ Parameters:
     Default: 100
     MinValue: 1
     MaxValue: 50000
-  LoadBalancerStackName:
-    Description: The name of the load balancer stack.
-    Type: String
-    Default: cloudcfo-stg-uw2-alb
-    MinLength: 1
-  MaintenanceWebsiteCertificate:
-    Description: Maintenance site certificate (For Prod Only)
-    Type: String
-    Default: arn:aws:acm:us-east-1:880804344419:certificate/61fe97b2-2645-4112-825d-51b69e5c8f58
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
-    Default: cloudcfo-stg-uw2-network
+    Default: pchc-dev-ase1-network
     MinLength: 1
   SNSStackName:
     Description: The name of the SNS stack.
     Type: String
-    Default: cloudcfo-prd-uw2-sns
+    Default: pchc-dev-ase1-sns
     MinLength: 1
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
@@ -156,29 +143,29 @@ Conditions:
       
 Resources:
 
-  DBStack: 
-    Type: AWS::CloudFormation::Stack
-    Properties: 
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
-      Parameters: 
-        Name: !Ref Name
-        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
-        AllocatedStorage: 20 #Gb
-        BackupRetentionPeriod: !If [IsProd, 30, 7]
-        EnableCPUCreditAlarm: !If [IsProd, true, false]
-        EnableEnhancedMonitoring: !If [IsProd, true, false]
-        EnablePerformanceInsights: !If [IsProd, true, false]
-        EnvName: !Ref EnvName
-        Engine: mysql
-        EngineVersion: 8.0.20
-        Family: mysql8.0
-        InstanceType: !If [IsProd, db.t3.medium, db.t3.micro]
-        MasterUser: root
-        MultiAz: !If [IsProd, true, false]
-        NetworkStackName: !Ref NetworkStackName
-        OrgName: !Ref OrgName
-        SNSStackName: !Ref SNSStackName
-        StorageEncrypted: true
+  # DBStack: 
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties: 
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+  #       AllocatedStorage: 20 #Gb
+  #       BackupRetentionPeriod: !If [IsProd, 30, 7]
+  #       EnableCPUCreditAlarm: !If [IsProd, true, false]
+  #       EnableEnhancedMonitoring: !If [IsProd, true, false]
+  #       EnablePerformanceInsights: !If [IsProd, true, false]
+  #       EnvName: !Ref EnvName
+  #       Engine: mysql
+  #       EngineVersion: 8.0.20
+  #       Family: mysql8.0
+  #       InstanceType: !If [IsProd, db.t3.medium, db.t3.micro]
+  #       MasterUser: root
+  #       MultiAz: !If [IsProd, true, false]
+  #       NetworkStackName: !Ref NetworkStackName
+  #       OrgName: !Ref OrgName
+  #       SNSStackName: !Ref SNSStackName
+  #       StorageEncrypted: true
 
   DeployStack: 
     Type: AWS::CloudFormation::Stack
@@ -191,88 +178,88 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
   
-  AppServerStack: 
-    DependsOn: 
-      - DBStack
-      - DeployStack
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-node.yaml
-      Parameters: 
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint: 
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort: 
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
-        InstanceAMI: !Ref InstanceAMI
-        InstanceKeyName: !Ref InstanceKeyName
-        InstancePort: 8080
-        InstanceType: t3.small
-        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
-        LoadBalancerPriority: !Ref LoadBalancerPriority
-        LoadBalancerStackName: !Ref LoadBalancerStackName
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
-        UseFriendlyNames: TRUE
+  # AppServerStack: 
+  #   DependsOn: 
+  #     - DBStack
+  #     - DeployStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-node.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       ClientDomainName: !Ref ClientDomainName
+  #       DatabaseEndpoint: 
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstanceAddress
+  #       DatabasePort: 
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstancePort
+  #       DatabaseSecurityGroupId:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.SecurityGroupId
+  #       InstanceAMI: !Ref InstanceAMI
+  #       InstanceKeyName: !Ref InstanceKeyName
+  #       InstancePort: 8080
+  #       InstanceType: t3.small
+  #       LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+  #       LoadBalancerPriority: !Ref LoadBalancerPriority
+  #       LoadBalancerStackName: !Ref LoadBalancerStackName
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SNSStackName: !Ref SNSStackName
+  #       UseFriendlyNames: TRUE
 
-  BackupStack:
-    DependsOn: 
-      - DBStack
-      - AppServerStack
-    Type: AWS::CloudFormation::Stack
-    Properties: 
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
-      Parameters: 
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        BackupARNList: !Join
-          - ','
-          - - Fn::GetAtt:
-              - DBStack
-              - Outputs.DBInstanceARN
-            - Fn::GetAtt:
-              - AppServerStack
-              - Outputs.AppServerEFSArn
+  # BackupStack:
+  #   DependsOn: 
+  #     - DBStack
+  #     - AppServerStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties: 
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       BackupARNList: !Join
+  #         - ','
+  #         - - Fn::GetAtt:
+  #             - DBStack
+  #             - Outputs.DBInstanceARN
+  #           - Fn::GetAtt:
+  #             - AppServerStack
+  #             - Outputs.AppServerEFSArn
 
-  SchedulerStack: 
-    DependsOn: 
-      - DBStack
-      - AppServerStack
-    Condition: IsNotProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters: 
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
-        UseFriendlyNames: FALSE
-        DatabaseInstanceName:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceName
-        CodeDeployApplicationName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployApplicationName
-        CodeDeployDeploymentGroupName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployDeploymentGroupName
+  # SchedulerStack: 
+  #   DependsOn: 
+  #     - DBStack
+  #     - AppServerStack
+  #   Condition: IsNotProd
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       StartScheduleExpression: !Ref StartScheduleExpression
+  #       StopScheduleExpression: !Ref StopScheduleExpression
+  #       UseFriendlyNames: FALSE
+  #       DatabaseInstanceName:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstanceName
+  #       CodeDeployApplicationName:
+  #         Fn::GetAtt:
+  #           - DeployStack
+  #           - Outputs.CodeDeployApplicationName
+  #       CodeDeployDeploymentGroupName:
+  #         Fn::GetAtt:
+  #           - DeployStack
+  #           - Outputs.CodeDeployDeploymentGroupName
 
 
 # Outputs:
