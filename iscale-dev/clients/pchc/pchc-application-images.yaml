@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: PCHC Image builder
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Sharing Configuration
+        Parameters:
+          - ShareImage
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      ShareImage:
+        default: Share image with other account? If sharing, encryption will be disabled.
+      SNSStackName:
+        default: SNS Topic Stack Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: image-builder
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: pchc-dev-ase1-network
+    MinLength: 1
+  ShareImage:
+    Description: Select true to not encrypt the image and share it with other accounts
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: pchc-dev-ase1-sns
+    MinLength: 1
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml      
+  IsImageShared: !Equals [!Ref ShareImage, true]
+
+Resources:
+
+  MySQLClientComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: MySQL Client
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs MySQL Client
+      ChangeDescription: Initial version
+      Data: |
+        name: MySQL Client - InlineData
+        description: Installation of MySQL Client
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: YumInstallMySQLCLient
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y mysql
+
+  NginxComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: NginX
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.1
+      Description: Installs NginX
+      ChangeDescription: Initial version
+      Data: |
+        name: NginX - InlineData
+        description: Installation of NginX
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallNginx
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - amazon-linux-extras install nginx1.12
+
+  NodeJSComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: NodeJS
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs NodeJS
+      ChangeDescription: Initial version
+      Data: |
+        name: NodeJS - InlineData
+        description: Installation of NodeJS
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallNodeJS
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - yum install -y gcc-c++ make
+                    - yum install -y nodejs
+
+  RoRComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: RubyOnRails
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs RoR
+      ChangeDescription: Initial version
+      Data: |
+        name: RoR - InlineData
+        description: Installation of RoR
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallRoR
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo su ec2-user
+                    - cd /home/ec2-user
+                    - gpg2 --keyserver hkp://pool.sks-keyservers.net --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3 7D2BAF1CF37B13E2069D6956105BD0E739499BDB
+                    - \curl -sSL https://get.rvm.io | sudo bash -s stable
+                    - source /etc/profile.d/rvm.sh
+                    - rvm requirements
+                    - rvm install ruby-2.3.3
+                    - gem install bundler
+                    - gem install sprockets -v 3.7.2
+                    - gem install nokogiri -v 1.10.10
+                    - gem install rails -v 4.2.8
+                    - rvm docs generate all
+
+  PayGateImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'paygate']]
+      Version: 1.0.4
+      ParentImage: !Join [':', ['arn:aws:imagebuilder', !Ref AWS::Region, !Ref AWS::AccountId, 'image/pchc-amazon-linux/1.0.0/1']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'paygate']]
+      Components: #Max 20
+        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  PayGateBuilder: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters: 
+        Name: paygate
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref PayGateImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
