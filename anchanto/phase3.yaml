@@ -340,6 +340,82 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
+  PHShardClone:
+    Condition: HasDMSReplica
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.4xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], ph-clone]]
+      DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:anchanto-sus-prd-ph-2021-01-18-21-25
+      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+      BackupRetentionPeriod: 0 #Backup disabled
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+
+  PHShardReduced:
+    Condition: HasDMSReplica
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 1000 #1000 Gb for PH
+      DBInstanceClass: db.r5.4xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], ph-reduced]]
+      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+      BackupRetentionPeriod: 0 #Backup disabled
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      Iops: 8000 #For now
+      MasterUsername: root
+      MasterUserPassword: !Ref MasterUserPassword
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+
+  PHShardReductionDMS:
+    Condition: HasDMSReplica
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'ph-small']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint:
+          Fn::GetAtt: 
+            - PHShardClone
+            - Endpoint.Address
+            # - MYShard
+            # - Outputs.ShardDMSReplicaRDSInstanceEndpoint
+        SourceSchemaName: dbpSEAOMSPH01
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - PHShardReduced
+            - Endpoint.Address
+        TargetSchemaName: dbpSEAOMSPH01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: root
+        TargetUserPassword: !Ref MasterUserPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"01\", \"rule-name\": \"01\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSPH01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
 ####
 # MY Shard Section
 ####
