@@ -4,34 +4,40 @@ Description: Regular Odoo setup
 Metadata:
   AWS::CloudFormation::Interface: 
     ParameterGroups:
-      -
-        Label:
+      - Label:
           default: Resource Configuration
         Parameters:
           - Name
           - OrgName
           - EnvName
-      -
-        Label:
+      - Label:
           default: Stack Configuration
         Parameters:
           - NetworkStackName
           - SNSStackName
           - LoadBalancerStackName
-      -
-        Label:
+          - UseOwnLoadBalancer
+      - Label:
           default: Load Balancer Configuration
         Parameters:
           - ClientDomainName
+          - LoadBalancerCertificateArn
           - LoadBalancerPriority
-      -
-        Label:
-          default: Instance Configuration
+          - LoadBalancerHostName
+      - Label:
+          default: DB Instance Configuration
+        Parameters:
+          - DatabaseUser
+          - DatabaseUserPassword
+          - DBSnapshotIdentifier
+          - MasterUser
+          - MasterUserPassword
+      - Label:
+          default: EC2 Instance Configuration
         Parameters:
           - InstanceKeyName
           - InstanceAMI
-      -
-        Label:
+      - Label:
           default: Scheduler Configuration
         Parameters:
           - StartScheduleExpression
@@ -44,6 +50,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      LoadBalancerCertificateArn:
+        default: Load Balancer Certificate ARN
       LoadBalancerPriority:
         default: Load Balancer Rule Priority
       LoadBalancerStackName:
@@ -62,6 +70,8 @@ Metadata:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
+      UseOwnLoadBalancer:
+        default: Use own ELB for this setup?
 
 Parameters:
   Name:
@@ -75,7 +85,6 @@ Parameters:
     Default: iscale
     AllowedPattern: "^[a-z]+(-[a-z]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
-    MaxLength: 10
   EnvName:
     Description: The name of the environment
     Type: String
@@ -91,6 +100,19 @@ Parameters:
     AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
     Default: iscale-software.com
     MinLength: 1
+  DatabaseUser:
+    Description: The name of the database user
+    Type: String
+    Default: dbuser
+  DatabaseUserPassword:
+    Description: The password of the database user
+    NoEcho: true
+    Type: String
+    Default: ''
+  DBSnapshotIdentifier:
+    Description: The name or Amazon Resource Name (ARN) of the DB snapshot to restore. If you specied root user, make sure it matches
+    Type: String
+    Default: ''
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
@@ -99,17 +121,34 @@ Parameters:
     Description: Instance Key Name
     Type: String
     Default: ''
+  LoadBalancerCertificateArn:
+    Description: Load Balancer Certificate ARN (only needed when using own ELB)
+    Type: String
+    Default: ''
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: ''
+    MaxLength: 12
   LoadBalancerPriority:
-    Description: The priority for ELB Listener.
+    Description: The priority for ELB Listener. Not required if using own ELB
     Type: Number
     Default: 750
     MinValue: 1
     MaxValue: 50000
   LoadBalancerStackName:
-    Description: THe name of the load balancer stack.
+    Description: The name of the load balancer stack (only when NOT using own ELB)
     Type: String
     Default: iscale-dev-stg-uw2-alb
-    MinLength: 1
+  MasterUser:
+    Description: The name of the master user for the database instance.
+    Type: String
+    Default: root
+  MasterUserPassword:
+    Description: Master User Password
+    NoEcho: true
+    Type: String
+    Default: ''
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
@@ -128,6 +167,13 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
+  UseOwnLoadBalancer:
+    Description: Do you want to create a dedicated ELB for this Odoo Setup? If no, you will reuse an existing ELB stack
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
 
 Mappings: 
   Fn::Transform:
@@ -139,30 +185,27 @@ Conditions:
   Fn::Transform:
     Name: AWS::Include
     Parameters:
-      Location: s3://iscale-dev-cloudformation/include/conditions.yaml      
-
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasMasterUserPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
+  HasDatabaseUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
+  HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
+  HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
+  HasOwnLoadBalancer: !Equals [!Ref UseOwnLoadBalancer, true]
+  
 Resources:
 
-  # RepoSecrets:
-  #   Condition: HasAmasty
-  #   Type: AWS::SecretsManager::Secret
-  #   Properties:
-  #     Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, repos]]
-  #     Description: !Join [' ', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], Magento Repositories Secrets]]
-  #     GenerateSecretString:
-  #       SecretStringTemplate: !Sub
-  #         - |
-  #           {
-  #             "MAGENTO_USERNAME": "${MAGENTO_USERNAME}",
-  #             "MAGENTO_PASSWORD": "${MAGENTO_PASSWORD}",
-  #             "AMASTY_USERNAME": "${AMASTY_USERNAME}",
-  #             "AMASTY_PASSWORD": "${AMASTY_PASSWORD}"
-  #           }
-  #         - AMASTY_USERNAME: !Ref AmastyUsername
-  #           AMASTY_PASSWORD: !Ref AmastyPassword
-  #           MAGENTO_USERNAME: !Ref MagentoPublicKey
-  #           MAGENTO_PASSWORD: !Ref MagentoPrivateKey
-  #       GenerateStringKey: MagentoRepos
+  ELBStack:
+    Condition: HasOwnLoadBalancer
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
   DBStack: 
     Type: AWS::CloudFormation::Stack
@@ -171,17 +214,21 @@ Resources:
       Parameters: 
         Name: !Ref Name
         DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+        DatabaseUser: !Ref DatabaseUser
+        DatabaseUserPassword: !If [HasDatabaseUserPassword, !Ref DatabaseUserPassword, !Ref 'AWS::NoValue']
         EnableCPUCreditAlarm: !If [IsProd, true, false]
         EnableEnhancedMonitoring: !If [IsProd, true, false]
         EnvName: !Ref EnvName
         Engine: aurora-postgresql
-        EngineVersion: 11.8
-        Family: aurora-postgresql11
-        InstanceType: db.t3.medium
-        MasterUser: root
+        EngineVersion: 12.4
+        Family: aurora-postgresql12
+        InstanceType: db.t3.medium #Can only be medium or large for t class
+        MasterUser: !Ref MasterUser
+        MasterUserPassword: !If [HasMasterUserPassword, !Ref MasterUserPassword, !Ref 'AWS::NoValue']
         Port: 5432
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
+        SnapshotIdentifier: !If [HasDBSnapshotIdentifier, !Ref DBSnapshotIdentifier, !Ref 'AWS::NoValue']
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
@@ -207,6 +254,7 @@ Resources:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
+        ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint: 
           Fn::GetAtt:
             - DBStack
@@ -220,17 +268,18 @@ Resources:
             - DBStack
             - Outputs.SecurityGroupId
         LoadBalancerPriority: !Ref LoadBalancerPriority
-        LoadBalancerStackName: !Ref LoadBalancerStackName
+        LoadBalancerStackName: !If [HasOwnLoadBalancer, !Select [ 1, !Split [ '/', !Ref ELBStack]], !Ref LoadBalancerStackName]
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstanceType: t3.medium
+        LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
         SNSStackName: !Ref SNSStackName
         NetworkStackName: !Ref NetworkStackName
 
   BackupStack:
     DependsOn: 
       - DBStack
-      - AppServerStack
+      # - AppServerStack
     Type: AWS::CloudFormation::Stack
     Properties: 
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -243,36 +292,36 @@ Resources:
           - - Fn::GetAtt:
               - DBStack
               - Outputs.DBClusterARN
-            - Fn::GetAtt:
-              - AppServerStack
-              - Outputs.AppServerEFSArn
+            # - Fn::GetAtt:
+            #   - AppServerStack
+            #   - Outputs.AppServerEFSArn
 
-  SchedulerStack: 
-    DependsOn: 
-      - DBStack
-      - AppServerStack
-    Type: AWS::CloudFormation::Stack
-    Properties: 
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters: 
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
-        UseFriendlyNames: TRUE
-        DatabaseClusterArn:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBClusterARN
-        CodeDeployApplicationName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployApplicationName
-        CodeDeployDeploymentGroupName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployDeploymentGroupName
+  # SchedulerStack: 
+  #   DependsOn: 
+  #     - DBStack
+  #     - AppServerStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties: 
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       StartScheduleExpression: !Ref StartScheduleExpression
+  #       StopScheduleExpression: !Ref StopScheduleExpression
+  #       UseFriendlyNames: TRUE
+  #       DatabaseClusterArn:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBClusterARN
+  #       CodeDeployApplicationName:
+  #         Fn::GetAtt:
+  #           - DeployStack
+  #           - Outputs.CodeDeployApplicationName
+  #       CodeDeployDeploymentGroupName:
+  #         Fn::GetAtt:
+  #           - DeployStack
+  #           - Outputs.CodeDeployDeploymentGroupName
 
 Outputs:
   DeploymentUserGroup:

@@ -4,40 +4,35 @@ Description: This  template provisions a basic EC2 instance with just simple env
 Metadata:
   AWS::CloudFormation::Interface: 
     ParameterGroups:
-      -
-        Label:
+      - Label:
           default: Resource Configuration
         Parameters:
           - OrgName
           - EnvName
-      -
-        Label:
+      - Label:
           default: Cloudformation Stack Configuration
         Parameters:
           - LoadBalancerStackName
           - NetworkStackName
           - SNSStackName
-      -
-        Label:
+          - UseFriendlyNames
+      - Label:
           default: Load Balancer Configuration
         Parameters:
           - LoadBalancerPriority
           - LoadBalancerHostName
-      -
-        Label:
+      - Label:
           default: Instance Configuration
         Parameters:
           - InstanceOS
           - InstanceAMI
           - InstancePort
           - InstanceType
-      -
-        Label:
+      - Label:
           default: Domain Configuration
         Parameters:
           - ClientDomainName
-      -
-        Label:
+      - Label:
           default: Database Configuration
         Parameters:
           - DatabaseEndpoint
@@ -77,7 +72,8 @@ Metadata:
         default: Instance Application Port
       InstanceType:
         default: Instance Type
-      
+      UseFriendlyNames:
+        default: Use Friendly Resource Names
 
 Parameters:
   OrgName:
@@ -168,6 +164,13 @@ Parameters:
     Type: String
     Default: iscale-dev-dev-uw2-sns
     MinLength: 1
+  UseFriendlyNames:
+    Description: Set to TRUE to have nice object names
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: FALSE
 
 Mappings: 
   Fn::Transform:
@@ -182,6 +185,7 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
+  UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
 
 Resources:
   
@@ -262,30 +266,29 @@ Resources:
       AutoScalingReplacingUpdate:
         WillReplace: true
     Properties:
+      AutoScalingGroupName: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, default, ASG]]
+        - !Ref 'AWS::NoValue'
       Cooldown: 60
       MaxSize: 1
       MinSize: 0
       DesiredCapacity: 1
       VPCZoneIdentifier:
-        -
-          Fn::ImportValue:
+        - Fn::ImportValue:
             !Sub "${NetworkStackName}-PublicSubnetId1"
-        -
-          Fn::ImportValue:
+        - Fn::ImportValue:
             !Sub "${NetworkStackName}-PublicSubnetId2"
       TargetGroupARNs: [!Ref AppServerTargetGroup]
       LaunchConfigurationName: !Ref AppServerLaunchConfig
       Tags:
-        - 
-          Key: Name
+        - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
           PropagateAtLaunch: True
-        - 
-          Key: Environment
+        - Key: Environment
           Value: !Ref EnvName
           PropagateAtLaunch: True
-        - 
-          Key: Organization
+        - Key: Organization
           Value: !Ref OrgName
           PropagateAtLaunch: True
 
@@ -299,7 +302,7 @@ Resources:
       HealthCheckTimeoutSeconds: 10
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
-      Matcher: 
+      Matcher:
         HttpCode: 200,302
       Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
       Port: !Ref InstancePort
@@ -308,8 +311,7 @@ Resources:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-VpcId"
       Tags:
-        - 
-          Key: Name
+        - Key: Name
           Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
 
   ####
