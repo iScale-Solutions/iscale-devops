@@ -16,7 +16,7 @@ Metadata:
           - CarinaPassword
           - BackupRetentionPeriod
           - DBSubnetGroup
-          - EnableDMSReplica
+          - EnableDumpAndLoad
           - EnablePerformanceInsights
           - MasterUserPassword
           - SecurityGroup
@@ -43,8 +43,8 @@ Metadata:
         default: DB Subnet Group
       DBInstanceClass:
         default: Instance Class
-      EnableDMSReplica:
-        default: Enable DMS replica for reducing storage
+      EnableDumpAndLoad:
+        default: Enable Dump and Load for reducing storage
       EnablePerformanceInsights:
         default: Enable Performance Insights
       SecurityGroup:
@@ -100,8 +100,8 @@ Parameters:
     Description: VPC to use for shards
     Type: AWS::EC2::VPC::Id
     Default: vpc-32f32f56
-  EnableDMSReplica:
-    Description: Set to true to enable DMS Replica to reduce storage
+  EnableDumpAndLoad:
+    Description: Set to true to enable Dump and Load assets
     Type: String
     Default: false
     AllowedValues:
@@ -150,7 +150,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
-  HasDMSReplica: !Equals [!Ref EnableDMSReplica, true]
+  HasDumpAndLoad: !Equals [!Ref EnableDumpAndLoad, true]
   HasProdSnapshot: !Not [!Equals [!Ref ProdSnapshotIdentifier, '']]
   HasProdSchemaSnapshot: !Not [!Equals [!Ref ProdSchemaSnapshotIdentifier, '']]
 
@@ -291,6 +291,93 @@ Resources:
   #     VPCSecurityGroups: 
   #       - !Ref SecurityGroup
 
+  DumpAndLoadInstanceIamRole:
+    Condition: HasDumpAndLoad
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  DumpAndLoadInstanceProfile:
+    Condition: HasDumpAndLoad
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: DumpAndLoadInstanceIamRole
+  
+  DumpAndLoadServerSecurityGroup:
+    Condition: HasDumpAndLoad
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: DumpAndLoad Server Security Group
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Dump and Load Server Security Group
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  DumpAndLoadDBSecurityGroup:
+    Condition: HasDumpAndLoad
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: DumpAndLoad DB Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol : TCP
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref DumpAndLoadServerSecurityGroup
+          Description: Allow MySQL connection from Dump and Load server
+      Tags:
+        - Key: Name
+          Value: Dump and Load DB Security Group
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+  
+  DumpAndLoadInstance:
+    Condition: HasDumpAndLoad
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: ami-00b8d9cb8a7161e41 #Default amazon linux 2
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref DumpAndLoadInstanceProfile
+      InstanceType: t3.medium
+      BlockDeviceMappings: 
+        - DeviceName: "/dev/sdm"
+          Ebs: 
+            VolumeType: io1
+            Iops: 8000
+            DeleteOnTermination: true
+            VolumeSize: 2000
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: 
+            - Ref: DumpAndLoadServerSecurityGroup
+          SubnetId:
+            Fn::ImportValue:
+              Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], iannis]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
 ####
 # PH Shard Section
 ####
@@ -341,7 +428,7 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   PHShardClone:
-    Condition: HasDMSReplica
+    Condition: HasDumpAndLoad
     DeletionPolicy: Delete
     Type: AWS::RDS::DBInstance
     Properties:
@@ -357,10 +444,10 @@ Resources:
       PubliclyAccessible: false
       StorageType: gp2
       VPCSecurityGroups: 
-        - !Ref SecurityGroup
+        - !Ref DumpAndLoadDBSecurityGroup
 
   PHShardReduced:
-    Condition: HasDMSReplica
+    Condition: HasDumpAndLoad
     DeletionPolicy: Delete
     Type: AWS::RDS::DBInstance
     Properties:
@@ -379,42 +466,42 @@ Resources:
       PubliclyAccessible: false
       StorageEncrypted: true
       VPCSecurityGroups: 
-        - !Ref SecurityGroup
+        - !Ref DumpAndLoadDBSecurityGroup
 
-  PHShardReductionDMS:
-    Condition: HasDMSReplica
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, 'ph-small']]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-        ReplicationInstanceClass: dms.c5.2xlarge
-        SourceEndpoint:
-          Fn::GetAtt: 
-            - PHShardClone
-            - Endpoint.Address
-            # - MYShard
-            # - Outputs.ShardDMSReplicaRDSInstanceEndpoint
-        SourceSchemaName: dbpSEAOMSPH01
-        SourceSecurityGroup: sg-ae866dc9
-        SourceUser: root
-        SourceUserPassword: !Ref CarinaPassword
-        TargetEndpoint: 
-          Fn::GetAtt:
-            - PHShardReduced
-            - Endpoint.Address
-        TargetSchemaName: dbpSEAOMSPH01
-        TargetSecurityGroup: !Ref SecurityGroup
-        TargetUser: root
-        TargetUserPassword: !Ref MasterUserPassword
-        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"01\", \"rule-name\": \"01\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSPH01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
-        ] }"
-        VPC: !Ref VPC
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
+  # PHShardReductionDMS:
+  #   Condition: HasDumpAndLoad
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+  #     Parameters:
+  #       Name: !Join ['-', [!Ref Name, 'ph-small']]
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+  #       ReplicationInstanceClass: dms.c5.2xlarge
+  #       SourceEndpoint:
+  #         Fn::GetAtt: 
+  #           - PHShardClone
+  #           - Endpoint.Address
+  #           # - MYShard
+  #           # - Outputs.ShardDMSReplicaRDSInstanceEndpoint
+  #       SourceSchemaName: dbpSEAOMSPH01
+  #       SourceSecurityGroup: sg-ae866dc9
+  #       SourceUser: root
+  #       SourceUserPassword: !Ref CarinaPassword
+  #       TargetEndpoint: 
+  #         Fn::GetAtt:
+  #           - PHShardReduced
+  #           - Endpoint.Address
+  #       TargetSchemaName: dbpSEAOMSPH01
+  #       TargetSecurityGroup: !Ref SecurityGroup
+  #       TargetUser: root
+  #       TargetUserPassword: !Ref MasterUserPassword
+  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"01\", \"rule-name\": \"01\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSPH01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+  #       ] }"
+  #       VPC: !Ref VPC
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SNSStackName: !Ref SNSStackName
 
 ####
 # MY Shard Section
@@ -446,14 +533,13 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   MYShardClone:
-    Condition: HasDMSReplica
+    Condition: HasDumpAndLoad
     DeletionPolicy: Delete
     Type: AWS::RDS::DBInstance
     Properties:
-      DBInstanceClass: db.r5.8xlarge
+      DBInstanceClass: db.r5.4xlarge
       DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], my-clone]]
       DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:anchanto-sus-prd-my-2021-01-17-21-30
-      # DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:anchanto-sus-prd-my-2021-01-18-21-31
       DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
       BackupRetentionPeriod: 0 #Backup disabled
       DBSubnetGroupName: !Ref DBSubnetGroup
@@ -466,12 +552,12 @@ Resources:
         - !Ref SecurityGroup
 
   MYShardReduced:
-    Condition: HasDMSReplica
+    Condition: HasDumpAndLoad
     DeletionPolicy: Delete
     Type: AWS::RDS::DBInstance
     Properties:
       AllocatedStorage: 500 #500 Gb for MY
-      DBInstanceClass: db.r5.8xlarge
+      DBInstanceClass: db.r5.4xlarge
       DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], my-reduced]]
       DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
       BackupRetentionPeriod: 0 #Backup disabled
@@ -487,40 +573,40 @@ Resources:
       VPCSecurityGroups: 
         - !Ref SecurityGroup
 
-  MYShardReductionDMS:
-    Condition: HasDMSReplica
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, 'my-small']]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-        ReplicationInstanceClass: dms.c5.2xlarge
-        SourceEndpoint:
-          Fn::GetAtt: 
-            - MYShardClone
-            - Endpoint.Address
-            # - MYShard
-            # - Outputs.ShardDMSReplicaRDSInstanceEndpoint
-        SourceSchemaName: dbpSEAOMSMY01
-        SourceSecurityGroup: sg-ae866dc9
-        SourceUser: root
-        SourceUserPassword: !Ref CarinaPassword
-        TargetEndpoint: 
-          Fn::GetAtt:
-            - MYShardReduced
-            - Endpoint.Address
-        TargetSchemaName: dbpSEAOMSMY01
-        TargetSecurityGroup: !Ref SecurityGroup
-        TargetUser: root
-        TargetUserPassword: !Ref MasterUserPassword
-        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"01\", \"rule-name\": \"01\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSMY01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
-        ] }"
-        VPC: !Ref VPC
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
+  # MYShardReductionDMS:
+  #   Condition: HasDumpAndLoad
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+  #     Parameters:
+  #       Name: !Join ['-', [!Ref Name, 'my-small']]
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+  #       ReplicationInstanceClass: dms.c5.2xlarge
+  #       SourceEndpoint:
+  #         Fn::GetAtt: 
+  #           - MYShardClone
+  #           - Endpoint.Address
+  #           # - MYShard
+  #           # - Outputs.ShardDMSReplicaRDSInstanceEndpoint
+  #       SourceSchemaName: dbpSEAOMSMY01
+  #       SourceSecurityGroup: sg-ae866dc9
+  #       SourceUser: root
+  #       SourceUserPassword: !Ref CarinaPassword
+  #       TargetEndpoint: 
+  #         Fn::GetAtt:
+  #           - MYShardReduced
+  #           - Endpoint.Address
+  #       TargetSchemaName: dbpSEAOMSMY01
+  #       TargetSecurityGroup: !Ref SecurityGroup
+  #       TargetUser: root
+  #       TargetUserPassword: !Ref MasterUserPassword
+  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"01\", \"rule-name\": \"01\", \"object-locator\": { \"schema-name\": \"dbpSEAOMSMY01\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+  #       ] }"
+  #       VPC: !Ref VPC
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SNSStackName: !Ref SNSStackName
 
 
 ####
