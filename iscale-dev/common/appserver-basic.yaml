@@ -27,13 +27,14 @@ Metadata:
           - InstanceOS
           - InstanceAMI
           - InstancePort
+          - InstanceSubnet
           - InstanceType
       - Label:
           default: Domain Configuration
         Parameters:
           - ClientDomainName
       - Label:
-          default: Database Configuration
+          default: Database Settings
         Parameters:
           - DatabaseEndpoint
           - DatabasePort
@@ -70,6 +71,8 @@ Metadata:
         default: Instance Operating System
       InstancePort:
         default: Instance Application Port
+      InstanceSubnet:
+        default: Which subnet to use for the instance
       InstanceType:
         default: Instance Type
       UseFriendlyNames:
@@ -130,6 +133,13 @@ Parameters:
     Default: 80 #Assume HTTP port as default on port 80
     MinValue: 1
     MaxValue: 65535
+  InstanceSubnet:
+    Description: Subnet to use for the instance
+    Type: String
+    AllowedValues:
+      - Public
+      - Private
+    Default: Public
   InstanceType:
     Description: Instance Type
     Type: String
@@ -186,6 +196,7 @@ Conditions:
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
+  UsePrivateSubnet: !Equals [!Ref InstanceSubnet, Private]
 
 Resources:
   
@@ -243,7 +254,7 @@ Resources:
       ImageId: !Ref InstanceAMI
       SecurityGroups: [!GetAtt AppServerSecurityGroup.GroupId]
       InstanceType: !Ref InstanceType
-      AssociatePublicIpAddress: true
+      AssociatePublicIpAddress: !If [UsePrivateSubnet, false, true]
       IamInstanceProfile: !GetAtt AppServerIamProfile.Arn
       InstanceMonitoring: true
       UserData:
@@ -274,11 +285,16 @@ Resources:
       MaxSize: 1
       MinSize: 0
       DesiredCapacity: 1
-      VPCZoneIdentifier:
-        - Fn::ImportValue:
-            !Sub "${NetworkStackName}-PublicSubnetId1"
-        - Fn::ImportValue:
-            !Sub "${NetworkStackName}-PublicSubnetId2"
+      VPCZoneIdentifier: !If
+        - UsePrivateSubnet
+        - - Fn::ImportValue:
+              !Sub "${NetworkStackName}-PrivateSubnetId1"
+          - Fn::ImportValue:
+              !Sub "${NetworkStackName}-PrivateSubnetId2"
+        - - Fn::ImportValue:
+              !Sub "${NetworkStackName}-PublicSubnetId1"
+          - Fn::ImportValue:
+              !Sub "${NetworkStackName}-PublicSubnetId2"
       TargetGroupARNs: [!Ref AppServerTargetGroup]
       LaunchConfigurationName: !Ref AppServerLaunchConfig
       Tags:
