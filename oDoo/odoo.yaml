@@ -27,6 +27,7 @@ Metadata:
       - Label:
           default: DB Instance Configuration
         Parameters:
+          - AllowDatabaseBlur
           - DatabaseUser
           - DatabaseUserPassword
           - DBSnapshotIdentifier
@@ -50,6 +51,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      AllowDatabaseBlur:
+        default: Allow database blur
       LoadBalancerCertificateArn:
         default: Load Balancer Certificate ARN
       LoadBalancerPriority:
@@ -94,6 +97,13 @@ Parameters:
       - Staging
       - Development
       - Test
+  AllowDatabaseBlur:
+    Description: Set to true to allow blur script to be enabled
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
     Type: String
@@ -186,6 +196,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasBlur: !Equals [!Ref AllowDatabaseBlur, true]
   HasMasterUserPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
   HasDatabaseUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
   HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
@@ -323,6 +334,200 @@ Resources:
           Fn::GetAtt:
             - DeployStack
             - Outputs.CodeDeployDeploymentGroupName
+
+####
+# Blur Section
+####
+  
+  SSMServiceRole:
+    Condition: HasBlur
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ssm.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ssm-service-role]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - SNS:Publish
+                Resource:
+                  Fn::ImportValue:
+                    !Sub "${SNSStackName}-TopicArn"
+
+  BlurExecutionRole:
+    Condition: HasBlur
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, blur-execution-role]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - iam:PassRole
+                Resource: "*"
+              - Effect: Allow
+                Action: 
+                  - ssm:SendCommand
+                Resource: arn:aws:ssm:*:*:document/*
+              - Effect: Allow
+                Action: 
+                  - ssm:SendCommand
+                Resource: arn:aws:ec2:*:*:instance/*
+                Condition:
+                  StringLike:
+                    ssm:resourceTag/Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  BlurSSMDocument:
+    Condition: HasBlur
+    Type: AWS::SSM::Document
+    Properties: 
+      Content: !Sub
+        - |
+            {
+              "schemaVersion": "1.2",
+              "description": "Run a shell script or specify the commands to run.",
+              "parameters": {
+                "commands": {
+                  "type": "StringList",
+                  "description": "(Required) Specify a shell script or a command to run.",
+                  "minItems": 1,
+                  "displayType": "textarea"
+                },
+                "workingDirectory": {
+                  "type": "String",
+                  "default": "${workdir}",
+                  "description": "(Optional) The path to the working directory on your instance.",
+                  "maxChars": 4096
+                },
+                "executionTimeout": {
+                  "type": "String",
+                  "default": "3600",
+                  "description": "(Optional) The time in seconds for a command to complete before it is considered to have failed. Default is 3600 (1 hour). Maximum is 172800 (48 hours).",
+                  "allowedPattern": "([1-9][0-9]{0,4})|(1[0-6][0-9]{4})|(17[0-1][0-9]{3})|(172[0-7][0-9]{2})|(172800)"
+                }
+              },
+              "runtimeConfig": {
+                "aws:runShellScript": {
+                  "properties": [
+                    {
+                      "id": "0.aws:runShellScript",
+                      "runCommand": "{{ commands }}",
+                      "workingDirectory": "{{ workingDirectory }}",
+                      "timeoutSeconds": "{{ executionTimeout }}"
+                    }
+                  ]
+                }
+              }
+            }
+        - workdir: /var/iscale-odoo/scripts/
+      DocumentType: Command
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  BlurLambdaFunction:
+    Condition: HasBlur
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Blur Prod database and upload it in Dev Instance
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, blur]]
+      Handler: index.lambda_handler
+      Role: !GetAtt BlurExecutionRole.Arn 
+      Runtime: python3.6
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, blur]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+      Timeout: 900
+      Environment:
+        Variables:
+          SSM_SERVICE_ROLE: !GetAtt SSMServiceRole.Arn
+          SNS_ARN:
+            Fn::ImportValue:
+              !Sub "${SNSStackName}-TopicArn"
+          DOCUMENT_NAME: !Ref BlurSSMDocument
+          VALUE: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            documentName=os.environ['DOCUMENT_NAME']
+            value=os.environ['VALUE']
+            snsTopicArn=os.environ['SNS_ARN']
+            ssmServiceRole=os.environ['SSM_SERVICE_ROLE']
+
+            try:
+              ssm = boto3.client('ssm')
+              response = ssm.send_command(
+                          DocumentName=documentName,
+                          Parameters={'commands': ['sudo /var/iscale-odoo/scripts/blur.sh >> /var/log/blur.log ']},
+                          Targets=[
+                                {
+                                    'Key': 'tag:Name',
+                                    'Values': [value]
+                                },
+                            ],
+                          NotificationConfig={
+                              'NotificationArn': snsTopicArn,
+                              'NotificationEvents': ['All'],
+                              'NotificationType': 'Command'
+                            },
+                          ServiceRoleArn=ssmServiceRole
+                          )
+              logger.info(response)
+            except Exception:
+              logger.exception('Error Encountered')
+
+  BlurLambdaLogGroup:
+    Condition: HasBlur
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/lambda', !Ref BlurLambdaFunction]]
+      RetentionInDays: 14
 
 Outputs:
   DeploymentUserGroup:
