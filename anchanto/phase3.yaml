@@ -588,7 +588,6 @@ Resources:
   #       NetworkStackName: !Ref NetworkStackName
   #       SNSStackName: !Ref SNSStackName
 
-
 ####
 # TH / VN Shard Section
 ####
@@ -609,7 +608,7 @@ Resources:
         DeletionProtection: true
         EnableReadReplica: false
         EnablePerformanceInsights: !Ref EnablePerformanceInsights
-        InstanceClass: db.r5.2xlarge
+        InstanceClass: db.r5.xlarge
         MultiAZ: false
         SecurityGroup: !Ref SecurityGroup
         ShardName: thvn
@@ -735,131 +734,117 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
 ###
-# KR / ROW Shard
+# KR Shard
 ###
 
-  #Not prod yet, KR still running in dbss-prd-zone-02.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
-  # KRROWShard:
-  #   Condition: HasProdSchemaSnapshot
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       # AllocatedStorage: 433
-  #       # DBSchemaName: dbpSEAOMSKR01
-  #       BackupRetentionPeriod: 0 #!Ref BackupRetentionPeriod
-  #       DBParameterGroupName: !Ref MySQL8ParameterGroup
-  #       DBSnapshotIdentifier: !Ref ProdSchemaSnapshotIdentifier
-  #       DBSubnetGroup: !Ref DBSubnetGroup
-  #       DeletionProtection: false
-  #       EnableReadReplica: false #!If [IsProd, true, false]
-  #       EnablePerformanceInsights: !Ref EnablePerformanceInsights
-  #       # InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
-  #       InstanceClass: !If [IsProd, db.r5.2xlarge, db.r5.large] #Can be made xlarge only after migration
-  #       # Iops: 15000 #Set this for now - will need to remove later
-  #       # MasterUser: ssdba
-  #       # MasterUserPassword: !Ref MasterUserPassword
-  #       # MaxAllocatedStorage: 1000
-  #       MultiAZ: false
-  #       SecurityGroup: !Ref SecurityGroup
-  #       ShardName: krrow
-  #       VPC: !Ref VPC
-  #       VPCDNSStackName: !Ref VPCDNSStackName
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  #Not prod yet - Going prod now
+  KRShard:
+    Condition: HasProdSchemaSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupRetentionPeriod: !Ref BackupRetentionPeriod
+        DBParameterGroupName: !Ref MySQL8ProdParameterGroup
+        DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:dbss-prd-zone-02-before-kr-shard-jan-23-2021
+        DBSubnetGroup: !Ref DBSubnetGroup
+        DeletionProtection: false
+        EnableReadReplica: false
+        EnablePerformanceInsights: !Ref EnablePerformanceInsights
+        InstanceClass: db.r5.xlarge
+        MultiAZ: false
+        SecurityGroup: !Ref SecurityGroup
+        ShardName: kr
+        VPC: !Ref VPC
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
-  # ProdCloneForROW:
-  #   Condition: HasProdSnapshot
-  #   DeletionPolicy: Delete
-  #   Type: AWS::RDS::DBInstance
-  #   Properties:
-  #     DBInstanceClass: db.r5.8xlarge
-  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-ROW]]
-  #     DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
-  #     DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
-  #     DBSubnetGroupName: !Ref DBSubnetGroup
-  #     BackupRetentionPeriod: 0
-  #     Engine: mysql
-  #     EngineVersion: 8.0.21
-  #     MultiAZ: false
-  #     PubliclyAccessible: false
-  #     StorageType: gp2
-  #     VPCSecurityGroups: 
-  #       - !Ref SecurityGroup
+###
+# ROW Shard
+###
 
-  # KRDMS:
-  #   Condition: HasProdSchemaSnapshot
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-  #     Parameters:
-  #       Name: !Join ['-', [!Ref Name, 'krrow']]
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-  #       MultiAZ: false
-  #       ReplicationInstanceClass: dms.c5.2xlarge
-  #       SourceEndpoint: dbss-prd-zone-02.cbudzbiqnbgm.ap-southeast-1.rds.amazonaws.com
-  #       SourceSchemaName: dbSelluSeller
-  #       SourceSecurityGroup: sg-ae866dc9
-  #       SourceUser: ssdba
-  #       SourceUserPassword: anchantoSS0918$
-  #       TargetEndpoint: 
-  #         Fn::GetAtt:
-  #           - KRROWShard
-  #           - Outputs.ShardRDSInstanceEndpoint
-  #       TargetSchemaName: !If [IsStaging, dbpSEAOMSKRROW02, dbpSEAOMSKR01]
-  #       TargetSecurityGroup: !Ref SecurityGroup
-  #       TargetUser: ssdba
-  #       TargetUserPassword: !Ref MasterUserPassword
-  #       #For Korean, Grab everything, global tables are included, but ignore some junk tables
-  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"%\" }, \"rule-action\": \"include\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"2\", \"rule-name\": \"2\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"tmp2%\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"3\", \"rule-name\": \"3\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_addresses_08NOV_BaK\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"4\", \"rule-name\": \"4\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_orders_bak\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"5\", \"rule-name\": \"5\", \"object-locator\": { \"schema-name\": \"dbSelluSeller\", \"table-name\": \"mpc_sellers_bak_09_10\" }, \"rule-action\": \"exclude\" }
-  #                       ] }"
-  #       VPC: !Ref VPC
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  #Not prod yet
+  ROWShard:
+    Condition: HasProdSchemaSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupRetentionPeriod: 0 #!Ref BackupRetentionPeriod
+        DBParameterGroupName: !Ref MySQL8ParameterGroup
+        DBSnapshotIdentifier: !Ref ProdSchemaSnapshotIdentifier
+        DBSubnetGroup: !Ref DBSubnetGroup
+        DeletionProtection: false
+        EnableReadReplica: false
+        EnablePerformanceInsights: !Ref EnablePerformanceInsights
+        InstanceClass: db.r5.xlarge #Needs to be large 
+        MultiAZ: false
+        SecurityGroup: !Ref SecurityGroup
+        ShardName: row
+        VPC: !Ref VPC
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
-  # ROWDMS:
-  #   Condition: HasProdSchemaSnapshot
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-  #     Parameters:
-  #       Name: !Join ['-', [!Ref Name, 'ROW']]
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-  #       ReplicationInstanceClass: dms.c5.2xlarge
-  #       SourceEndpoint:
-  #         Fn::GetAtt: 
-  #           - ProdCloneForROW
-  #           - Endpoint.Address
-  #       SourceSchemaName: dbSSOMS
-  #       SourceSecurityGroup: sg-ae866dc9
-  #       SourceUser: root
-  #       SourceUserPassword: !Ref CarinaPassword
-  #       TargetEndpoint: 
-  #         Fn::GetAtt:
-  #           - KRROWShard
-  #           - Outputs.ShardRDSInstanceEndpoint
-  #       TargetSchemaName: dbpSEAOMSROW01
-  #       TargetSecurityGroup: !Ref SecurityGroup
-  #       TargetUser: root
-  #       TargetUserPassword: !Ref CarinaPassword
-  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"01\", \"rule-name\": \"01\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_stock_histories\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"02\", \"rule-name\": \"02\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
-  #       ] }"
-  #       VPC: !Ref VPC
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  ProdCloneForROW:
+    Condition: HasProdSnapshot
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-ROW]]
+      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      BackupRetentionPeriod: 0
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
 
+  ROWDMS:
+    Condition: HasProdSchemaSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'ROW']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint:
+          Fn::GetAtt: 
+            - ProdCloneForROW
+            - Endpoint.Address
+        SourceSchemaName: dbSSOMS
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - ROWShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSROW01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: root
+        TargetUserPassword: !Ref CarinaPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"01\", \"rule-name\": \"01\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_stock_histories\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"02\", \"rule-name\": \"02\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
 ###
 # AU / NZ Shard
@@ -913,15 +898,15 @@ Resources:
             - Fn::GetAtt:
               - GlobalShard
               - Outputs.ShardRDSInstanceARN
-            # - Fn::GetAtt:
-            #   - KRROWShard
-            #   - Outputs.ShardRDSInstanceARN
             - Fn::GetAtt:
               - MYShard
               - Outputs.ShardRDSInstanceARN
             - Fn::GetAtt:
               - PHShard
               - Outputs.ShardRDSInstanceARN
+            # - Fn::GetAtt:
+            #   - ROWShard
+            #   - Outputs.ShardRDSInstanceARN
             # - Fn::GetAtt:
             #   - SGIDShard
             #   - Outputs.ShardRDSInstanceARN
