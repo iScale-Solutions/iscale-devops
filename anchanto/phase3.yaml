@@ -272,111 +272,111 @@ Resources:
 
   # Enable for migration
 
-  # ProdCloneForInterim:
-  #   Condition: HasProdSnapshot
-  #   DeletionPolicy: Delete
-  #   Type: AWS::RDS::DBInstance
+  ProdCloneForInterim:
+    Condition: HasProdSnapshot
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], interim-migration]]
+      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+      BackupRetentionPeriod: 0
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+
+  # DumpAndLoadInstanceIamRole:
+  #   Condition: HasDumpAndLoad
+  #   Type: AWS::IAM::Role
   #   Properties:
-  #     DBInstanceClass: db.r5.8xlarge
-  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], interim-migration]]
-  #     DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
-  #     DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
-  #     BackupRetentionPeriod: 0
-  #     DBSubnetGroupName: !Ref DBSubnetGroup
-  #     Engine: mysql
-  #     EngineVersion: 8.0.21
-  #     MultiAZ: false
-  #     PubliclyAccessible: false
-  #     StorageType: gp2
-  #     VPCSecurityGroups: 
-  #       - !Ref SecurityGroup
+  #     AssumeRolePolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Sid: 1
+  #           Effect: Allow
+  #           Action: sts:AssumeRole
+  #           Principal:
+  #             Service: ec2.amazonaws.com
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
-  DumpAndLoadInstanceIamRole:
-    Condition: HasDumpAndLoad
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: 1
-            Effect: Allow
-            Action: sts:AssumeRole
-            Principal:
-              Service: ec2.amazonaws.com
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
-  DumpAndLoadInstanceProfile:
-    Condition: HasDumpAndLoad
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles:
-        - Ref: DumpAndLoadInstanceIamRole
+  # DumpAndLoadInstanceProfile:
+  #   Condition: HasDumpAndLoad
+  #   Type: AWS::IAM::InstanceProfile
+  #   Properties:
+  #     Roles:
+  #       - Ref: DumpAndLoadInstanceIamRole
   
-  DumpAndLoadServerSecurityGroup:
-    Condition: HasDumpAndLoad
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: DumpAndLoad Server Security Group
-      VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: Dump and Load Server Security Group
-        - Key: Environment
-          Value: !Ref EnvName
-        - Key: Organization
-          Value: !Ref OrgName
+  # DumpAndLoadServerSecurityGroup:
+  #   Condition: HasDumpAndLoad
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: DumpAndLoad Server Security Group
+  #     VpcId: !Ref VPC
+  #     Tags:
+  #       - Key: Name
+  #         Value: Dump and Load Server Security Group
+  #       - Key: Environment
+  #         Value: !Ref EnvName
+  #       - Key: Organization
+  #         Value: !Ref OrgName
 
-  DumpAndLoadDBSecurityGroup:
-    Condition: HasDumpAndLoad
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: DumpAndLoad DB Security Group
-      VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol : TCP
-          FromPort: 3306
-          ToPort: 3306
-          SourceSecurityGroupId: !Ref DumpAndLoadServerSecurityGroup
-          Description: Allow MySQL connection from Dump and Load server
-      Tags:
-        - Key: Name
-          Value: Dump and Load DB Security Group
-        - Key: Environment
-          Value: !Ref EnvName
-        - Key: Organization
-          Value: !Ref OrgName
+  # DumpAndLoadDBSecurityGroup:
+  #   Condition: HasDumpAndLoad
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: DumpAndLoad DB Security Group
+  #     VpcId: !Ref VPC
+  #     SecurityGroupIngress:
+  #       - IpProtocol : TCP
+  #         FromPort: 3306
+  #         ToPort: 3306
+  #         SourceSecurityGroupId: !Ref DumpAndLoadServerSecurityGroup
+  #         Description: Allow MySQL connection from Dump and Load server
+  #     Tags:
+  #       - Key: Name
+  #         Value: Dump and Load DB Security Group
+  #       - Key: Environment
+  #         Value: !Ref EnvName
+  #       - Key: Organization
+  #         Value: !Ref OrgName
   
-  DumpAndLoadInstance:
-    Condition: HasDumpAndLoad
-    Type: AWS::EC2::Instance
-    Properties: 
-      ImageId: ami-00b8d9cb8a7161e41 #Default amazon linux 2
-      InstanceType: !Ref InstanceType
-      IamInstanceProfile: !Ref DumpAndLoadInstanceProfile
-      InstanceType: t3.medium
-      BlockDeviceMappings: 
-        - DeviceName: "/dev/sdm"
-          Ebs: 
-            VolumeType: io1
-            Iops: 8000
-            DeleteOnTermination: true
-            VolumeSize: 2000
-      NetworkInterfaces: 
-        - AssociatePublicIpAddress: true
-          DeviceIndex: 0
-          GroupSet: 
-            - Ref: DumpAndLoadServerSecurityGroup
-          SubnetId:
-            Fn::ImportValue:
-              Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
-      Tags:
-        - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], iannis]]
-        - Key: Environment
-          Value: !Ref EnvName
-        - Key: Organization
-          Value: !Ref OrgName
+  # DumpAndLoadInstance:
+  #   Condition: HasDumpAndLoad
+  #   Type: AWS::EC2::Instance
+  #   Properties: 
+  #     ImageId: ami-00b8d9cb8a7161e41 #Default amazon linux 2
+  #     InstanceType: !Ref InstanceType
+  #     IamInstanceProfile: !Ref DumpAndLoadInstanceProfile
+  #     InstanceType: t3.medium
+  #     BlockDeviceMappings: 
+  #       - DeviceName: "/dev/sdm"
+  #         Ebs: 
+  #           VolumeType: io1
+  #           Iops: 8000
+  #           DeleteOnTermination: true
+  #           VolumeSize: 2000
+  #     NetworkInterfaces: 
+  #       - AssociatePublicIpAddress: true
+  #         DeviceIndex: 0
+  #         GroupSet: 
+  #           - Ref: DumpAndLoadServerSecurityGroup
+  #         SubnetId:
+  #           Fn::ImportValue:
+  #             Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], iannis]]
+  #       - Key: Environment
+  #         Value: !Ref EnvName
+  #       - Key: Organization
+  #         Value: !Ref OrgName
 
 ####
 # PH Shard Section
@@ -384,15 +384,15 @@ Resources:
   
   #Per Shafique - keep around for now (stopped)
   ProdCloneForPH:
-    Condition: HasProdSnapshot
     DeletionPolicy: Delete
     Type: AWS::RDS::DBInstance
     Properties:
       DBInstanceClass: db.r5.8xlarge
       DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-PH]]
-      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:dbselluseller-carina-prod-2tb-before-sharding-jan-16-2021-encrypted
       DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
       DBSubnetGroupName: !Ref DBSubnetGroup
+      DeletionProtection: true #to make sure it is not deleted by mistake
       BackupRetentionPeriod: 0
       Engine: mysql
       EngineVersion: 8.0.21
@@ -427,46 +427,46 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
-  PHShardClone:
-    Condition: HasDumpAndLoad
-    DeletionPolicy: Delete
-    Type: AWS::RDS::DBInstance
-    Properties:
-      DBInstanceClass: db.r5.4xlarge
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], ph-clone]]
-      DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:anchanto-sus-prd-ph-2021-01-18-21-25
-      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
-      BackupRetentionPeriod: 0 #Backup disabled
-      DBSubnetGroupName: !Ref DBSubnetGroup
-      Engine: mysql
-      EngineVersion: 8.0.21
-      MultiAZ: false
-      PubliclyAccessible: false
-      StorageType: gp2
-      VPCSecurityGroups: 
-        - !Ref DumpAndLoadDBSecurityGroup
+  # PHShardClone:
+  #   Condition: HasDumpAndLoad
+  #   DeletionPolicy: Delete
+  #   Type: AWS::RDS::DBInstance
+  #   Properties:
+  #     DBInstanceClass: db.r5.4xlarge
+  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], ph-clone]]
+  #     DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:anchanto-sus-prd-ph-2021-01-18-21-25
+  #     DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+  #     BackupRetentionPeriod: 0 #Backup disabled
+  #     DBSubnetGroupName: !Ref DBSubnetGroup
+  #     Engine: mysql
+  #     EngineVersion: 8.0.21
+  #     MultiAZ: false
+  #     PubliclyAccessible: false
+  #     StorageType: gp2
+  #     VPCSecurityGroups: 
+  #       - !Ref DumpAndLoadDBSecurityGroup
 
-  PHShardReduced:
-    Condition: HasDumpAndLoad
-    DeletionPolicy: Delete
-    Type: AWS::RDS::DBInstance
-    Properties:
-      AllocatedStorage: 1000 #1000 Gb for PH
-      DBInstanceClass: db.r5.4xlarge
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], ph-reduced]]
-      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
-      BackupRetentionPeriod: 0 #Backup disabled
-      DBSubnetGroupName: !Ref DBSubnetGroup
-      Engine: mysql
-      EngineVersion: 8.0.21
-      Iops: 8000 #For now
-      MasterUsername: root
-      MasterUserPassword: !Ref MasterUserPassword
-      MultiAZ: false
-      PubliclyAccessible: false
-      StorageEncrypted: true
-      VPCSecurityGroups: 
-        - !Ref DumpAndLoadDBSecurityGroup
+  # PHShardReduced:
+  #   Condition: HasDumpAndLoad
+  #   DeletionPolicy: Delete
+  #   Type: AWS::RDS::DBInstance
+  #   Properties:
+  #     AllocatedStorage: 1000 #1000 Gb for PH
+  #     DBInstanceClass: db.r5.4xlarge
+  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], ph-reduced]]
+  #     DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+  #     BackupRetentionPeriod: 0 #Backup disabled
+  #     DBSubnetGroupName: !Ref DBSubnetGroup
+  #     Engine: mysql
+  #     EngineVersion: 8.0.21
+  #     Iops: 8000 #For now
+  #     MasterUsername: root
+  #     MasterUserPassword: !Ref MasterUserPassword
+  #     MultiAZ: false
+  #     PubliclyAccessible: false
+  #     StorageEncrypted: true
+  #     VPCSecurityGroups: 
+  #       - !Ref DumpAndLoadDBSecurityGroup
 
   # PHShardReductionDMS:
   #   Condition: HasDumpAndLoad
@@ -532,46 +532,46 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
-  MYShardClone:
-    Condition: HasDumpAndLoad
-    DeletionPolicy: Delete
-    Type: AWS::RDS::DBInstance
-    Properties:
-      DBInstanceClass: db.r5.4xlarge
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], my-clone]]
-      DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:anchanto-sus-prd-my-2021-01-17-21-30
-      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
-      BackupRetentionPeriod: 0 #Backup disabled
-      DBSubnetGroupName: !Ref DBSubnetGroup
-      Engine: mysql
-      EngineVersion: 8.0.21
-      MultiAZ: false
-      PubliclyAccessible: false
-      StorageType: gp2
-      VPCSecurityGroups: 
-        - !Ref SecurityGroup
+  # MYShardClone:
+  #   Condition: HasDumpAndLoad
+  #   DeletionPolicy: Delete
+  #   Type: AWS::RDS::DBInstance
+  #   Properties:
+  #     DBInstanceClass: db.r5.4xlarge
+  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], my-clone]]
+  #     DBSnapshotIdentifier: arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:anchanto-sus-prd-my-2021-01-17-21-30
+  #     DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+  #     BackupRetentionPeriod: 0 #Backup disabled
+  #     DBSubnetGroupName: !Ref DBSubnetGroup
+  #     Engine: mysql
+  #     EngineVersion: 8.0.21
+  #     MultiAZ: false
+  #     PubliclyAccessible: false
+  #     StorageType: gp2
+  #     VPCSecurityGroups: 
+  #       - !Ref DumpAndLoadDBSecurityGroup
 
-  MYShardReduced:
-    Condition: HasDumpAndLoad
-    DeletionPolicy: Delete
-    Type: AWS::RDS::DBInstance
-    Properties:
-      AllocatedStorage: 500 #500 Gb for MY
-      DBInstanceClass: db.r5.4xlarge
-      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], my-reduced]]
-      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
-      BackupRetentionPeriod: 0 #Backup disabled
-      DBSubnetGroupName: !Ref DBSubnetGroup
-      Engine: mysql
-      EngineVersion: 8.0.21
-      Iops: 8000 #For now
-      MasterUsername: root
-      MasterUserPassword: !Ref MasterUserPassword
-      MultiAZ: false
-      PubliclyAccessible: false
-      StorageEncrypted: true
-      VPCSecurityGroups: 
-        - !Ref SecurityGroup
+  # MYShardReduced:
+  #   Condition: HasDumpAndLoad
+  #   DeletionPolicy: Delete
+  #   Type: AWS::RDS::DBInstance
+  #   Properties:
+  #     AllocatedStorage: 500 #500 Gb for MY
+  #     DBInstanceClass: db.r5.4xlarge
+  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], my-reduced]]
+  #     DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+  #     BackupRetentionPeriod: 0 #Backup disabled
+  #     DBSubnetGroupName: !Ref DBSubnetGroup
+  #     Engine: mysql
+  #     EngineVersion: 8.0.21
+  #     Iops: 8000 #For now
+  #     MasterUsername: root
+  #     MasterUserPassword: !Ref MasterUserPassword
+  #     MultiAZ: false
+  #     PubliclyAccessible: false
+  #     StorageEncrypted: true
+  #     VPCSecurityGroups: 
+  #       - !Ref DumpAndLoadDBSecurityGroup
 
   # MYShardReductionDMS:
   #   Condition: HasDumpAndLoad
@@ -643,91 +643,84 @@ Resources:
 ####
   
   # Not yet in production
-  # SGIDShard:
-  #   Condition: HasProdSchemaSnapshot
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       # AllocatedStorage: 650
-  #       # DBSchemaName: dbpSEAOMSSGID01
-  #       DBParameterGroupName: !Ref MySQL8ParameterGroup
-  #       BackupRetentionPeriod: 0 #!Ref BackupRetentionPeriod
-  #       DBSnapshotIdentifier: !Ref ProdSchemaSnapshotIdentifier
-  #       DBSubnetGroup: !Ref DBSubnetGroup
-  #       DeletionProtection: false
-  #       EnableReadReplica: false #!If [IsProd, true, false]
-  #       EnablePerformanceInsights: !Ref EnablePerformanceInsights
-  #       # InstanceClass: !If [IsProd, db.r5.xlarge, db.r5.large]
-  #       InstanceClass: !If [IsProd, db.r5.2xlarge, db.r5.large] #Can be made xlarge only after migration
-  #       # Iops: 15000 #Set this for now - will need to remove later
-  #       # MasterUser: ssdba
-  #       # MasterUserPassword: !Ref MasterUserPassword
-  #       # MaxAllocatedStorage: 1000
-  #       MultiAZ: false
-  #       SecurityGroup: !Ref SecurityGroup
-  #       ShardName: sgid
-  #       VPC: !Ref VPC 
-  #       VPCDNSStackName: !Ref VPCDNSStackName
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  SGIDShard:
+    Condition: HasProdSchemaSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DBParameterGroupName: !Ref MySQL8ParameterGroup
+        BackupRetentionPeriod: 0 #!Ref BackupRetentionPeriod
+        DBSnapshotIdentifier: !Ref ProdSchemaSnapshotIdentifier
+        DBSubnetGroup: !Ref DBSubnetGroup
+        DeletionProtection: false #true
+        EnableReadReplica: false #!If [IsProd, true, false]
+        EnablePerformanceInsights: false #!Ref EnablePerformanceInsights
+        InstanceClass: !If [IsProd, db.r5.2xlarge, db.r5.large] #Can be made xlarge only after migration
+        MultiAZ: false
+        SecurityGroup: !Ref SecurityGroup
+        ShardName: sgid
+        VPC: !Ref VPC 
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
-  # ProdCloneForSGID:
-  #   Condition: HasProdSnapshot
-  #   DeletionPolicy: Delete
-  #   Type: AWS::RDS::DBInstance
-  #   Properties:
-  #     DBInstanceClass: db.r5.8xlarge
-  #     DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-SGID]]
-  #     DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
-  #     DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
-  #     DBSubnetGroupName: !Ref DBSubnetGroup
-  #     BackupRetentionPeriod: 0
-  #     Engine: mysql
-  #     EngineVersion: 8.0.21
-  #     MultiAZ: false
-  #     PubliclyAccessible: false
-  #     StorageType: gp2
-  #     VPCSecurityGroups: 
-  #       - !Ref SecurityGroup
+  ProdCloneForSGID:
+    Condition: HasProdSnapshot
+    DeletionPolicy: Delete
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: db.r5.8xlarge
+      DBInstanceIdentifier: !Join ['-',[!Ref OrgName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], carina-script-SGID]]
+      DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+      DBParameterGroupName: !Ref MySQL8CarinaScriptParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      BackupRetentionPeriod: 0
+      Engine: mysql
+      EngineVersion: 8.0.21
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
 
   # Not yet in production
-  # SGIDDMS:
-  #   Condition: HasProdSchemaSnapshot
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
-  #     Parameters:
-  #       Name: !Join ['-', [!Ref Name, 'SGID']]
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
-  #       ReplicationInstanceClass: dms.c5.2xlarge
-  #       SourceEndpoint:
-  #         Fn::GetAtt: 
-  #           - ProdCloneForSGID
-  #           - Endpoint.Address
-  #       SourceSchemaName: dbSSOMS
-  #       SourceSecurityGroup: sg-ae866dc9
-  #       SourceUser: root
-  #       SourceUserPassword: !Ref CarinaPassword
-  #       TargetEndpoint: 
-  #         Fn::GetAtt:
-  #           - SGIDShard
-  #           - Outputs.ShardRDSInstanceEndpoint
-  #       TargetSchemaName: dbpSEAOMSSGID01
-  #       TargetSecurityGroup: !Ref SecurityGroup
-  #       TargetUser: root
-  #       TargetUserPassword: !Ref CarinaPassword
-  #       TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"01\", \"rule-name\": \"01\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_stock_histories\" }, \"rule-action\": \"exclude\" },
-  #                                       { \"rule-type\": \"selection\", \"rule-id\": \"02\", \"rule-name\": \"02\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
-  #       ] }"
-  #       VPC: !Ref VPC
-  #       NetworkStackName: !Ref NetworkStackName
-  #       SNSStackName: !Ref SNSStackName
+  SGIDDMS:
+    Condition: HasProdSchemaSnapshot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/dms.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'SGID']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DMSReplicationSubnetGroup: !Ref DMSReplicationSubnetGroup
+        ReplicationInstanceClass: dms.c5.2xlarge
+        SourceEndpoint:
+          Fn::GetAtt: 
+            - ProdCloneForSGID
+            - Endpoint.Address
+        SourceSchemaName: dbSSOMS
+        SourceSecurityGroup: sg-ae866dc9
+        SourceUser: root
+        SourceUserPassword: !Ref CarinaPassword
+        TargetEndpoint: 
+          Fn::GetAtt:
+            - SGIDShard
+            - Outputs.ShardRDSInstanceEndpoint
+        TargetSchemaName: dbpSEAOMSSGID01
+        TargetSecurityGroup: !Ref SecurityGroup
+        TargetUser: root
+        TargetUserPassword: !Ref CarinaPassword
+        TableMappings: "{ \"rules\": [  { \"rule-type\": \"selection\", \"rule-id\": \"01\", \"rule-name\": \"01\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"mpc_stock_histories\" }, \"rule-action\": \"exclude\" },
+                                        { \"rule-type\": \"selection\", \"rule-id\": \"02\", \"rule-name\": \"02\", \"object-locator\": { \"schema-name\": \"dbSSOMS\", \"table-name\": \"%\" }, \"rule-action\": \"include\" }
+        ] }"
+        VPC: !Ref VPC
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
 ####
 # Global Shard Section
