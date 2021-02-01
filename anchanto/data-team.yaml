@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Privision Assets for Data team
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Shards Configuration
+        Parameters:
+          - DBInstanceClass
+          - ProdSnapshotIdentifier
+          - VPC
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - VPCDNSStackName
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DBInstanceClass:
+        default: Instance Class
+      NetworkStackName:
+        default: Network Stack
+      VPCDNSStackName:
+        default: VPC DNS Stack
+      SNSStackName:
+        default: SNS Stack
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+    Default: sus
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: anchanto
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  VPC:
+    Description: VPC to use for shards
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-c59c5ea1 #Staging
+  ProdSnapshotIdentifier:
+    Description: Name of the production copy to use in the source DBs
+    Type: String
+    Default: 'arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:anchanto-sus-prd-sgid-2021-01-31-21-31'
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: anchanto-stg-network
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: anchanto-prd-sns
+  VPCDNSStackName:
+    Description: VPC DNS Stack Name
+    Type: String
+    Default: anchanto-stg-vpc-dns
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+###
+# Global DB Resources
+###
+
+  MySQL8ParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, data, params]]
+      Family: mysql8.0
+      Parameters:
+        general_log: 0
+        log_output: FILE
+        long_query_time: 5
+        slow_query_log: 1
+        binlog_format: ROW
+        binlog_checksum: NONE
+        binlog_row_image: full
+        innodb_autoinc_lock_mode: 2
+      Tags:
+        - Key: Name
+          Value: MySQL 8 Parameter Group for data team
+
+  ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Data Team - Server Security Group
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Data Team Server Security Group
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Data Team - DB Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol : TCP
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref ServerSecurityGroup
+          Description: Connection from Data team server
+      Tags:
+        - Key: Name
+          Value: Data Team DB Security Group
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+  
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+        DBSubnetGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'DB Subnet Group']]
+        SubnetIds:
+          - !ImportValue 
+              'Fn::Sub': '${NetworkStackName}-PrivateSubnetId1'
+          - !ImportValue 
+              'Fn::Sub': '${NetworkStackName}-PrivateSubnetId2'
+        Tags:
+          - Key: Name
+            Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'DB Subnet Group']]
+
+####
+# SG / ID Section
+####
+  
+  SGIDData:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DBParameterGroupName: !Ref MySQL8ParameterGroup
+        DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+        DBSubnetGroup: !Ref DBSubnetGroup
+        InstanceClass: db.r5.large
+        SecurityGroup: !Ref DBSecurityGroup
+        ShardName: sgid
+        VPC: !Ref VPC
+        VPCDNSStackName: !Ref VPCDNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
