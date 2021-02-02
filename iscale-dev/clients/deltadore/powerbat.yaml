@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: powerbat Setup
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+          - ClientDomainName
+          - LoadBalancerCertificateArn
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceAMI:
+        default: Instance AMI
+      LoadBalancerCertificateArn:
+        default: Load Balancer SSL certificate
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: powerbat
+    MinLength: 3
+    MaxLength: 9
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: deltadore
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: powerbat.ph
+    MinLength: 1
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-066e57c4833864061 #Basic Amazon Linux AMI
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  LoadBalancerCertificateArn:
+    Description: The priority for ELB Listener
+    Type: String
+    Default: arn:aws:acm:ap-southeast-1:767970794407:certificate/ef3606b5-12e7-469f-a107-b695d912f4ec
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: deltadore-stg-ase1-network
+    MinLength: 1
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: deltadore-prd-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+      
+Resources:
+
+  ELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  # DBStack: 
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties: 
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+  #       EnableCPUCreditAlarm: true
+  #       EnableEnhancedMonitoring: true
+  #       EnvName: !Ref EnvName
+  #       Engine: aurora-mysql
+  #       EngineVersion: 5.7.mysql_aurora.2.09.1
+  #       Family: aurora-mysql5.7
+  #       InstanceType: db.t3.small
+  #       MasterUser: root
+  #       NetworkStackName: !Ref NetworkStackName
+  #       OrgName: !Ref OrgName
+  #       SNSStackName: !Ref SNSStackName
+  #       StorageEncrypted: true
+  
+  # AppServerStack: 
+  #   DependsOn: 
+  #     - DBStack
+  #     - DeployStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties: 
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-magento.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       LoadBalancerPriority: !Ref LoadBalancerPriority
+  #       DatabaseClusterARN:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBClusterARN
+  #       DatabaseEndpoint: 
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.ClusterEndpointAddress
+  #       DatabasePort: 
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.ClusterPort
+  #       DatabaseSecurityGroupId:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.SecurityGroupId
+  #       LoadBalancerStackName: !Ref LoadBalancerStackName
+  #       InstanceAMI: !Ref InstanceAMI
+  #       InstanceKeyName: !Ref InstanceKeyName
+  #       InstanceSpotPrice: 0.5
+  #       InstanceType: t3.medium
+  #       SNSStackName: !Ref SNSStackName
+  #       NetworkStackName: !Ref NetworkStackName
+  #       ClientDomainName: !Ref ClientDomainName
+  #       MagentoPublicKey: !Ref MagentoPublicKey
+  #       MagentoPrivateKey: !Ref MagentoPrivateKey
+  #       UseFriendlyNames: FALSE
+
+  # BackupStack:
+  #   DependsOn: 
+  #     - DBStack
+  #     - AppServerStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties: 
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       BackupARNList: !Join
+  #         - ','
+  #         - - Fn::GetAtt:
+  #             - DBStack
+  #             - Outputs.DBClusterARN
+  #           - Fn::GetAtt:
+  #             - AppServerStack
+  #             - Outputs.AppServerEFSArn
+
+  # SchedulerStack: 
+  #   DependsOn: 
+  #     - DBStack
+  #     - AppServerStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties: 
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+  #     Parameters: 
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       StartScheduleExpression: !Ref StartScheduleExpression
+  #       StopScheduleExpression: !Ref StopScheduleExpression
+  #       UseFriendlyNames: TRUE
+  #       DatabaseClusterArn:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBClusterARN
+        # CodeDeployApplicationName:
+        #   Fn::GetAtt:
+        #     - DeployStack
+        #     - Outputs.CodeDeployApplicationName
+        # CodeDeployDeploymentGroupName:
+        #   Fn::GetAtt:
+        #     - DeployStack
+        #     - Outputs.CodeDeployDeploymentGroupName
+        
+# Outputs:
+#   DeploymentUserGroup:
+#     Description: Add the BitBucket user into this group
+#     Value: 
+#       Fn::GetAtt:
+#         - DeployStack
+#         - Outputs.DeploymentUserGroup
