@@ -14,7 +14,7 @@ Metadata:
           default: Shards Configuration
         Parameters:
           - DBInstanceClass
-          - ProdSnapshotIdentifier
+          - DBSnapshotIdentifier
           - VPC
       - Label:
           default: Cloudformation Stack Configuration
@@ -45,7 +45,7 @@ Parameters:
     Type: String
     MinLength: 3
     MaxLength: 8
-    Default: sus
+    Default: datalake
   OrgName:
     Description: The name of the organization.
     Type: String
@@ -55,7 +55,7 @@ Parameters:
   EnvName:
     Description: The name of the environment
     Type: String
-    Default: Staging
+    Default: Development
     AllowedValues:
       - Production
       - Staging
@@ -64,23 +64,23 @@ Parameters:
   VPC:
     Description: VPC to use for shards
     Type: AWS::EC2::VPC::Id
-    Default: vpc-c59c5ea1 #Staging
-  ProdSnapshotIdentifier:
-    Description: Name of the production copy to use in the source DBs
+    Default: vpc-00225838fec7973aa
+  DBSnapshotIdentifier:
+    Description: Name of the DB snapshot to use as source
     Type: String
-    Default: 'arn:aws:rds:ap-southeast-1:337564481418:snapshot:rds:anchanto-sus-prd-sgid-2021-01-31-21-31'
+    Default: arn:aws:rds:us-west-2:270124848746:snapshot:anchanto-data-stg-sgid-for-data-team-feb-03-2021
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
-    Default: anchanto-stg-network
+    Default: anchanto-dev-uw2-network
   SNSStackName:
     Description: The name of the cloudformation SNS stack
     Type: String
-    Default: anchanto-prd-sns
+    Default: anchanto-stg-uw2-sns
   VPCDNSStackName:
     Description: VPC DNS Stack Name
     Type: String
-    Default: anchanto-stg-vpc-dns
+    Default: anchanto-dev-vpc-dns
 
 Mappings: 
   Fn::Transform:
@@ -156,18 +156,14 @@ Resources:
         DBSubnetGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'DB Subnet Group']]
         SubnetIds:
           - !ImportValue 
-              'Fn::Sub': '${NetworkStackName}-PrivateSubnetId1'
+              'Fn::Sub': '${NetworkStackName}-InternalSubnetId1'
           - !ImportValue 
-              'Fn::Sub': '${NetworkStackName}-PrivateSubnetId2'
+              'Fn::Sub': '${NetworkStackName}-InternalSubnetId2'
         Tags:
           - Key: Name
             Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'DB Subnet Group']]
 
-####
-# SG / ID Section
-####
-  
-  SGIDData:
+  SGIDShard:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-shard.yaml
@@ -176,7 +172,7 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         DBParameterGroupName: !Ref MySQL8ParameterGroup
-        DBSnapshotIdentifier: !Ref ProdSnapshotIdentifier
+        DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
         DBSubnetGroup: !Ref DBSubnetGroup
         InstanceClass: db.r5.large
         SecurityGroup: !Ref DBSecurityGroup
@@ -186,3 +182,146 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
+  RawS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'raw']]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'raw']]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  ProcessedS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'processed']]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'processed']]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  PublishedS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'published']]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'published']]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  ScriptS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'script']]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'script']]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  GlueIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: glue.amazonaws.com
+      # ManagedPolicyArns:
+      #   - arn:aws:iam::aws:policy/AdministratorAccess
+      Path: /
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - s3:Get*
+                  - s3:List*
+                Resource: 
+                  - !GetAtt [RawS3Bucket, Arn]
+                  - !Join ['/', [!GetAtt [RawS3Bucket, Arn], '*']]
+              - Effect: Allow
+                Action: 
+                  - s3:Get*
+                  - s3:List*
+                  - s3:Put*
+                  - s3:Delete
+                Resource: 
+                  - !GetAtt [ProcessedS3Bucket, Arn]
+                  - !Join ['/', [!GetAtt [ProcessedS3Bucket, Arn], '*']]
+                  - !GetAtt [PublishedS3Bucket, Arn]
+                  - !Join ['/', [!GetAtt [PublishedS3Bucket, Arn], '*']]
+                  - !GetAtt [ScriptS3Bucket, Arn]
+                  - !Join ['/', [!GetAtt [ScriptS3Bucket, Arn], '*']]
+
+  # RDSGlueConnection:
+  #   Type: AWS::Glue::Connection
+  #   Properties: 
+  #     CatalogId: !Ref AWS::AccountId
+  #     ConnectionInput: 
+  #       ConnectionProperties: Json 
+  #       ConnectionType: String
+  #       Description: String
+  #       MatchCriteria: 
+  #         - String
+  #       Name: String
+  #       PhysicalConnectionRequirements: 
+  #         PhysicalConnectionRequirements
