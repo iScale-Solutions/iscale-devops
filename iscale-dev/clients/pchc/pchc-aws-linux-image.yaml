@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: PCHC Image builder
+Description:  Base Linux Images
 
 Metadata:
   AWS::CloudFormation::Interface: 
@@ -91,6 +91,44 @@ Resources:
 ###
 # Common components
 ###
+
+  CloudWatchLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: CloudWatch Log
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs CloudWatch Logs Agent
+      ChangeDescription: Initial version
+      Data: |
+        name: MySQL Client - InlineData
+        description: Installation of MySQL Client
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallCloudWatchLogsAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y awslogs
+              - name: ConfigureCloudWatchLogsAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      echo "[plugins]" > /etc/awslogs/awscli.conf
+                      echo "cwlogs = cwlogs" >> /etc/awslogs/awscli.conf
+                      echo "[default]" >> /etc/awslogs/awscli.conf
+                      REGION=`curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/\(.*\)[a-z]/\1/'`
+                      echo "region = $REGION" >> /etc/awslogs/awscli.conf
+              - name: EnableCloudWatchLogsAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo systemctl enable awslogsd.service
 
   CodeDeployComponent:
     Type: AWS::ImageBuilder::Component
@@ -232,16 +270,16 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'amazon-linux']]
-      Version: 1.0.0
+      Version: 1.0.1
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':aws:image/amazon-linux-2-x86/2019.11.21']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'amazon-linux']]
       Components: #Max 20
-        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/amazon-cloudwatch-agent-linux/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-linux/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux-kernel-mainline/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux/1.0.0/1']]
         - ComponentArn: !Ref AWSLinuxUtilitiesComponent
+        - ComponentArn: !Ref CloudWatchLogComponent
         - ComponentArn: !Ref CodeDeployComponent
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/stig-build-linux-high/2.8.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/reboot-linux/1.0.1/1']]
