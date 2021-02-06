@@ -17,6 +17,11 @@ Metadata:
           - SNSStackName
           - UseFriendlyNames
       - Label:
+          default: EFS Configuration
+        Parameters:
+          - ExternalEFSID
+          - ExternalEFSSecurityGroup
+      - Label:
           default: Load Balancer Configuration
         Parameters:
           - LoadBalancerPriority
@@ -58,6 +63,10 @@ Metadata:
         default: Database Port
       DatabaseSecurityGroupId:
         default: Database Security Group
+      ExternalEFSID:
+        default: External EFS ID
+      ExternalEFSSecurityGroup:
+        default: External EFS Security Group
       LoadBalancerStackName:
         default: Load Balancer Stack Name
       LoadBalancerHostName:
@@ -121,6 +130,14 @@ Parameters:
     Description: Database Security Group
     Type: String
     MinLength: 1
+  ExternalEFSID:
+    Description: EFS ID (leave blank to create appserver specific EFS)
+    Type: String
+    Default: ''
+  ExternalEFSSecurityGroup:
+    Description: EFS Security Group (Only utilized when ExternalEFSID is provided)
+    Type: String
+    Default: ''
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
@@ -169,14 +186,14 @@ Parameters:
     MinValue: 1
     MaxValue: 50000
   LoadBalancerStackName:
-    Description: Name of the ELB Stack Name
+    Description: (Optional) Name of the ELB Stack Name. ELB priority and HostName are ignored if this is left blank
     Type: String
-    MinLength: 1
+    Default: ''
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
     MinLength: 3
-    MaxLength: 9
+    MaxLength: 14
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
@@ -211,11 +228,15 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
+  HasLoadBalancerStackName: !Not [!Equals [!Ref LoadBalancerStackName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
+  HasProdLoadBalancerStackName: !And [!Condition IsProd, !Condition HasLoadBalancerStackName]
   HasSharedSecretId: !Not [!Equals [!Ref SharedSecretId, '']]
   HasSpotPrice: !Not [!Equals [!Ref InstanceSpotPrice, 0]]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
   UsePrivateSubnet: !Equals [!Ref InstanceSubnet, Private]
+  UseExternalEFS: !Not [!Equals [!Ref ExternalEFSID, '']]
+  UseInternalEFS: !Not [!Condition UseExternalEFS]
 
 Resources:
   
@@ -259,7 +280,10 @@ Resources:
                   CLIENT_NAME: !Ref Name
                   APPLICATION_SITE: !Ref OrgName
                   INSTANCE_ROLE: !Ref AppServerIamRole
-                  EFS_ID: !Ref AppServerFileSystem
+                  EFS_ID: !If
+                    - UseInternalEFS
+                    - !Ref AppServerFileSystem
+                    - !Ref ExternalEFSID
                   SECRET_ID: !If
                     - HasSharedSecretId
                     - !Ref SharedSecretId
@@ -284,9 +308,6 @@ Resources:
         Fn::Base64: !Sub
           - |
             #!/bin/bash -xe
-            # yum update -y
-            # Install the files and packages from the metadata
-            # yum install -y aws-cfn-bootstrap
             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchConfig -c Basic --region ${AWS::Region} --role ${ROLE}
             # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
              /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
@@ -295,6 +316,7 @@ Resources:
           - ROLE: !Ref AppServerIamRole
 
   AppServerAutoScalingGroup:
+    # Iannis - make it conditional
     Type: AWS::AutoScaling::AutoScalingGroup
     UpdatePolicy:
       AutoScalingReplacingUpdate:
@@ -318,7 +340,10 @@ Resources:
               !Sub "${NetworkStackName}-PublicSubnetId1"
           - Fn::ImportValue:
               !Sub "${NetworkStackName}-PublicSubnetId2"
-      TargetGroupARNs: [!Ref AppServerTargetGroup]
+      TargetGroupARNs: !If
+        - HasLoadBalancerStackName
+        - [!Ref AppServerTargetGroup]
+        - !Ref 'AWS::NoValue'
       LaunchConfigurationName: !Ref AppServerLaunchConfig
       Tags:
         - Key: Name
@@ -333,6 +358,7 @@ Resources:
 
   # Application Server ELB Target Group 
   AppServerTargetGroup:
+    Condition: HasLoadBalancerStackName
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckIntervalSeconds: 30
@@ -357,8 +383,8 @@ Resources:
   # CloudWatch Section
   ####
   UnhealthyHostCountCloudWatchAlarm:
+    Condition: HasProdLoadBalancerStackName
     Type: AWS::CloudWatch::Alarm
-    Condition: IsProd
     Properties:
       AlarmName: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], 'alb', !Ref Name, 'unhealthy-host-count']]
       MetricName: UnHealthyHostCount
@@ -383,8 +409,8 @@ Resources:
           Value: !Ref AppServerTargetGroup
 
   SlowTargetResponseTimeCloudWatchAlarm:
+    Condition: HasProdLoadBalancerStackName
     Type: AWS::CloudWatch::Alarm
-    Condition: IsProd
     Properties:
       AlarmName: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], 'alb', !Ref Name, 'slow-response-time']]
       MetricName: TargetResponseTime
@@ -412,8 +438,30 @@ Outputs:
 
   AppServerEFSArn:
     Description: ARN of the AppServer EFS
-    Value: !GetAtt AppServerFileSystem.Arn
+    Value: !If
+      - UseInternalEFS
+      - !Join ['', ['arn:aws:elasticfilesystem:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':file-system/', !Ref AppServerFileSystem]]
+      - !Join ['', ['arn:aws:elasticfilesystem:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':file-system/', !Ref ExternalEFSID]]
+
+  AppServerEFS:
+    Description: ID of the AppServer EFS
+    Value: !If
+      - UseInternalEFS
+      - !Ref AppServerFileSystem
+      - !Ref ExternalEFSID
+
+  AppServerEFSSecurityGroup:
+    Description: EFS Security Group
+    Value: !If
+      - UseInternalEFS
+      - !Ref EFSSecurityGroup
+      - !Ref ExternalEFSSecurityGroup
+
+  AppServerSecurityGroup:
+    Description: AppServer Security Group
+    Value: !Ref AppServerSecurityGroup
 
   AppServerTargetGroup:
+    Condition: HasProdLoadBalancerStackName
     Description: Target Group for the AppServer
     Value: !Ref AppServerTargetGroup

@@ -138,65 +138,137 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
-  # DBStack: 
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties: 
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
-  #     Parameters: 
-  #       Name: !Ref Name
-  #       DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
-  #       EnableCPUCreditAlarm: true
-  #       EnableEnhancedMonitoring: true
-  #       EnvName: !Ref EnvName
-  #       Engine: aurora-mysql
-  #       EngineVersion: 5.7.mysql_aurora.2.09.1
-  #       Family: aurora-mysql5.7
-  #       InstanceType: db.t3.small
-  #       MasterUser: root
-  #       NetworkStackName: !Ref NetworkStackName
-  #       OrgName: !Ref OrgName
-  #       SNSStackName: !Ref SNSStackName
-  #       StorageEncrypted: true
-  
-  # AppServerStack: 
-  #   DependsOn: 
-  #     - DBStack
-  #     - DeployStack
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties: 
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-magento.yaml
-  #     Parameters: 
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       LoadBalancerPriority: !Ref LoadBalancerPriority
-  #       DatabaseClusterARN:
-  #         Fn::GetAtt:
-  #           - DBStack
-  #           - Outputs.DBClusterARN
-  #       DatabaseEndpoint: 
-  #         Fn::GetAtt:
-  #           - DBStack
-  #           - Outputs.ClusterEndpointAddress
-  #       DatabasePort: 
-  #         Fn::GetAtt:
-  #           - DBStack
-  #           - Outputs.ClusterPort
-  #       DatabaseSecurityGroupId:
-  #         Fn::GetAtt:
-  #           - DBStack
-  #           - Outputs.SecurityGroupId
-  #       LoadBalancerStackName: !Ref LoadBalancerStackName
-  #       InstanceAMI: !Ref InstanceAMI
-  #       InstanceKeyName: !Ref InstanceKeyName
-  #       InstanceSpotPrice: 0.5
-  #       InstanceType: t3.medium
-  #       SNSStackName: !Ref SNSStackName
-  #       NetworkStackName: !Ref NetworkStackName
-  #       ClientDomainName: !Ref ClientDomainName
-  #       MagentoPublicKey: !Ref MagentoPublicKey
-  #       MagentoPrivateKey: !Ref MagentoPrivateKey
-  #       UseFriendlyNames: FALSE
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+        EnableCPUCreditAlarm: false
+        EnableEnhancedMonitoring: false
+        EnvName: !Ref EnvName
+        Engine: aurora-mysql
+        EngineVersion: 5.7.mysql_aurora.2.09.1
+        Family: aurora-mysql5.7
+        InstanceType: db.t3.small
+        MasterUser: root
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
+  FrontEndStack:
+    DependsOn:
+      - DBStack
+      - ELBStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'ui']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        LoadBalancerPriority: 100
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterEndpointAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterPort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstanceSpotPrice: 0.5
+        InstanceType: t3.micro
+        SNSStackName: !Ref SNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        UseFriendlyNames: FALSE
+
+  CalculationStack: 
+    DependsOn:
+      - DBStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'calc']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterEndpointAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterPort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        ExternalEFSID:
+          Fn::GetAtt:
+            - FrontEndStack
+            - Outputs.AppServerEFS
+        ExternalEFSSecurityGroup:
+          Fn::GetAtt:
+            - FrontEndStack
+            - Outputs.AppServerEFSSecurityGroup
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstanceSpotPrice: 0.5
+        InstanceType: t3.micro
+        SNSStackName: !Ref SNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        UseFriendlyNames: FALSE
+
+  DataProcessorStack: 
+    DependsOn:
+      - DBStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, 'proc']]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterEndpointAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterPort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        ExternalEFSID:
+          Fn::GetAtt:
+            - FrontEndStack
+            - Outputs.AppServerEFS
+        ExternalEFSSecurityGroup:
+          Fn::GetAtt:
+            - FrontEndStack
+            - Outputs.AppServerEFSSecurityGroup
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstanceSpotPrice: 0.5
+        InstanceType: t3.micro
+        SNSStackName: !Ref SNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        UseFriendlyNames: FALSE
 
   # BackupStack:
   #   DependsOn: 

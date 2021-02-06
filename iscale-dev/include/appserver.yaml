@@ -7,7 +7,6 @@
       Roles:
         - Ref: AppServerIamRole
 
-
   DataS3Bucket:
     Type: AWS::S3::Bucket
     # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
@@ -112,6 +111,7 @@
             Ref: OrgName
 
   AppServerSecurityGroupHTTPIngress:
+    Condition: HasLoadBalancerStackName
     Type: AWS::EC2::SecurityGroupIngress
     Properties: 
       GroupId: 
@@ -299,14 +299,15 @@
   ####
 
   EFSSecurityGroup:
+    Condition: UseInternalEFS
     Type: AWS::EC2::SecurityGroup
     Properties:
       #GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
       GroupDescription:
-        Fn::Join: 
+        Fn::Join:
           - '-'
           - - Ref: OrgName
-            - Fn::FindInMap: 
+            - Fn::FindInMap:
               - EnvShort
               - Ref: EnvName
               - Name
@@ -321,11 +322,11 @@
           Fn::Sub: "${NetworkStackName}-VpcId"
       Tags:
         - Key: Name
-          Value: 
-            Fn::Join: 
+          Value:
+            Fn::Join:
               - '-'
               - - Ref: OrgName
-                - Fn::FindInMap: 
+                - Fn::FindInMap:
                   - EnvShort
                   - Ref: EnvName
                   - Name
@@ -336,19 +337,34 @@
                 - Ref: Name
                 - efs
         - Key: Environment
-          Value: 
+          Value:
             Ref: EnvName
         - Key: Organization
-          Value: 
+          Value:
             Ref: OrgName
   
-  EFSSecurityGroupIngress:
+  InternalEFSSecurityGroupIngress:
+    Condition: UseInternalEFS
     Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
-      GroupId: 
+    Properties:
+      GroupId:
         Fn::GetAtt:
           - EFSSecurityGroup
           - GroupId
+      IpProtocol: TCP
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - AppServerSecurityGroup
+          - GroupId
+  
+  ExternalEFSSecurityGroupIngress:
+    Condition: UseExternalEFS
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Ref: ExternalEFSSecurityGroup
       IpProtocol: TCP
       FromPort: 2049
       ToPort: 2049
@@ -358,6 +374,7 @@
         - GroupId
   
   AppServerFileSystem:
+    Condition: UseInternalEFS
     Type: AWS::EFS::FileSystem
     DeletionPolicy: Retain
     Properties:
@@ -366,11 +383,11 @@
         - TransitionToIA: AFTER_30_DAYS
       FileSystemTags:
         - Key: Name
-          Value: 
-            Fn::Join: 
+          Value:
+            Fn::Join:
               - '-'
               - - Ref: OrgName
-                - Fn::FindInMap: 
+                - Fn::FindInMap:
                   - EnvShort
                   - Ref: EnvName
                   - Name
@@ -381,38 +398,41 @@
                 - Ref: Name
                 - efs
         - Key: Environment
-          Value: 
+          Value:
             Ref: EnvName
         - Key: Organization
-          Value: 
+          Value:
             Ref: OrgName
 
-  EFSMountTarget1: 
+  EFSMountTarget1:
+    Condition: UseInternalEFS
     Type: AWS::EFS::MountTarget
-    Properties: 
-      FileSystemId: 
+    Properties:
+      FileSystemId:
         Ref: AppServerFileSystem
       SubnetId:
         Fn::ImportValue:
           Fn::Sub: "${NetworkStackName}-InternalSubnetId1"
-      SecurityGroups: 
+      SecurityGroups:
         - Ref: EFSSecurityGroup
 
-  EFSMountTarget2: 
+  EFSMountTarget2:
+    Condition: UseInternalEFS
     Type: AWS::EFS::MountTarget
-    Properties: 
+    Properties:
       FileSystemId:
         Ref: AppServerFileSystem
       SubnetId:
         Fn::ImportValue:
           Fn::Sub: "${NetworkStackName}-InternalSubnetId2"
-      SecurityGroups: 
+      SecurityGroups:
         - Ref: EFSSecurityGroup
 
   #####
   # Link the setup to the Load Balancer
   #####
   LoadBalancerDNSRecord:
+    Condition: HasLoadBalancerStackName
     Type: AWS::Route53::RecordSetGroup
     Properties:
       HostedZoneName:
@@ -448,6 +468,7 @@
                 Fn::Sub: "${LoadBalancerStackName}-DNSName"
 
   ELBSSLListenerRule:
+    Condition: HasLoadBalancerStackName
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
       Actions:
