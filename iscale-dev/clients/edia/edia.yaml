@@ -13,9 +13,11 @@ Metadata:
       - Label:
           default: Stack Configuration
         Parameters:
+          - DatabaseStackName
           - NetworkStackName
           - SNSStackName
           - LoadBalancerStackName
+          - SharedSecretId
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -44,6 +46,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      DatabaseStackName:
+        default: Database Stack Name
       LoadBalancerPriority:
         default: Load Balancer Rule Priority
       LoadBalancerStackName:
@@ -62,6 +66,8 @@ Metadata:
         default: Magento Public Key
       MagentoPrivateKey:
         default: Magento Private Key
+      SharedSecretId:
+        default: Shared secret id (only use for prod, else leave blank)
       StartScheduleExpression:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
@@ -95,6 +101,10 @@ Parameters:
     AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
     Default: iscale-software.com
     MinLength: 1
+  DatabaseStackName:
+    Description: Database Stack Name (leave blank to create own DB Stack)
+    Type: String
+    Default: ''
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
@@ -129,6 +139,10 @@ Parameters:
     Type: String
     Default: iscale-dev-dev-uw2-network
     MinLength: 1
+  SharedSecretId:
+    Description: Name of the secret Id to use. Can leave blank for default.
+    Type: String
+    Default: edia-prd-uw2-shop
   SNSStackName:
     Description: the name of the SNS stack.
     Type: String
@@ -154,10 +168,13 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasExternalDBStack: !Not [!Equals [!Ref DatabaseStackName, '']]
+  HasOwnDBStack: !Not [!Condition HasExternalDBStack]
 
 Resources:
 
   DBStack:
+    Condition: HasOwnDBStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -189,9 +206,6 @@ Resources:
         SNSStackName: !Ref SNSStackName
   
   AppServerStack:
-    DependsOn:
-      - DBStack
-      - DeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-magento.yaml
@@ -200,20 +214,32 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         LoadBalancerPriority: !Ref LoadBalancerPriority
-        DatabaseClusterARN:
-          Fn::GetAtt:
+        DatabaseClusterARN: !If
+          - HasExternalDBStack
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-ClusterArn"
+          - Fn::GetAtt:
             - DBStack
             - Outputs.DBClusterARN
-        DatabaseEndpoint:
-          Fn::GetAtt:
+        DatabaseEndpoint: !If
+          - HasExternalDBStack
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-ClusterEndpointAddress"
+          - Fn::GetAtt:
             - DBStack
             - Outputs.ClusterEndpointAddress
-        DatabasePort:
-          Fn::GetAtt:
+        DatabasePort: !If
+          - HasExternalDBStack
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-ClusterPort"
+          - Fn::GetAtt:
             - DBStack
             - Outputs.ClusterPort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
+        DatabaseSecurityGroupId: !If
+          - HasExternalDBStack
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-SecurityGroupId"
+          - Fn::GetAtt:
             - DBStack
             - Outputs.SecurityGroupId
         LoadBalancerStackName: !Ref LoadBalancerStackName
@@ -226,12 +252,11 @@ Resources:
         ClientDomainName: !Ref ClientDomainName
         MagentoPublicKey: !Ref MagentoPublicKey
         MagentoPrivateKey: !Ref MagentoPrivateKey
+        SharedSecretId: !If [IsProd, !Ref SharedSecretId, !Ref 'AWS::NoValue']
         UseFriendlyNames: FALSE
 
   BackupStack:
-    DependsOn:
-      - DBStack
-      - AppServerStack
+    Condition: HasOwnDBStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -249,9 +274,7 @@ Resources:
               - Outputs.AppServerEFSArn
 
   SchedulerStack:
-    DependsOn:
-      - DBStack
-      - AppServerStack
+    Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -274,6 +297,21 @@ Resources:
           Fn::GetAtt:
             - DeployStack
             - Outputs.CodeDeployDeploymentGroupName
+
+  HostedZone: 
+    Condition: IsProd
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join [' ',[INACTIVE Hosted Zone for, !Ref ClientDomainName]]
+      Name: !Ref ClientDomainName
+      HostedZoneTags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], hostedzone]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
 
 Outputs:
   DeploymentUserGroup:

@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Privision Assets for Data team
+Description: Provision assets for Data team
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -96,9 +96,9 @@ Conditions:
 
 Resources:
 
-###
-# Global DB Resources
-###
+####
+# Data Lake Sources
+####
 
   MySQL8ParameterGroup:
     Type: AWS::RDS::DBParameterGroup
@@ -118,14 +118,14 @@ Resources:
         - Key: Name
           Value: MySQL 8 Parameter Group for data team
 
-  ServerSecurityGroup:
+  CrawlerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Data Team - Server Security Group
+      GroupDescription: Glue Crawler Security Group
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: Data Team Server Security Group
+          Value: Glue Crawler Security Group
         - Key: Environment
           Value: !Ref EnvName
         - Key: Organization
@@ -138,10 +138,11 @@ Resources:
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol : TCP
-          FromPort: 3306
-          ToPort: 3306
-          SourceSecurityGroupId: !Ref ServerSecurityGroup
-          Description: Connection from Data team server
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+          # SourceSecurityGroupId: !Ref CrawlerSecurityGroup
+          # Description: Connection from Crawler Security Group
       Tags:
         - Key: Name
           Value: Data Team DB Security Group
@@ -149,16 +150,16 @@ Resources:
           Value: !Ref EnvName
         - Key: Organization
           Value: !Ref OrgName
-  
+
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
         DBSubnetGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'DB Subnet Group']]
         SubnetIds:
           - !ImportValue 
-              'Fn::Sub': '${NetworkStackName}-InternalSubnetId1'
+              'Fn::Sub': '${NetworkStackName}-PublicSubnetId1'
           - !ImportValue 
-              'Fn::Sub': '${NetworkStackName}-InternalSubnetId2'
+              'Fn::Sub': '${NetworkStackName}-PublicSubnetId2'
         Tags:
           - Key: Name
             Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'DB Subnet Group']]
@@ -174,13 +175,17 @@ Resources:
         DBParameterGroupName: !Ref MySQL8ParameterGroup
         DBSnapshotIdentifier: !Ref DBSnapshotIdentifier
         DBSubnetGroup: !Ref DBSubnetGroup
-        InstanceClass: db.r5.large
+        InstanceClass: db.t3.small
         SecurityGroup: !Ref DBSecurityGroup
         ShardName: sgid
         VPC: !Ref VPC
         VPCDNSStackName: !Ref VPCDNSStackName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+
+###
+# Data Lake S3 Buckets
+###
 
   RawS3Bucket:
     Type: AWS::S3::Bucket
@@ -270,6 +275,40 @@ Resources:
         - Key: Organization
           Value: !Ref OrgName
 
+###
+# IAM Section
+###
+
+  DataLakeAdminGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
+        - arn:aws:iam::aws:policy/AwsGlueDataBrewFullAccessPolicy
+      Policies:
+        - PolicyName: AccessS3Buckets
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource: 
+                  - !GetAtt [RawS3Bucket, Arn]
+                  - !Join ['/', [!GetAtt [RawS3Bucket, Arn], '*']]
+                  - !GetAtt [ProcessedS3Bucket, Arn]
+                  - !Join ['/', [!GetAtt [ProcessedS3Bucket, Arn], '*']]
+                  - !GetAtt [PublishedS3Bucket, Arn]
+                  - !Join ['/', [!GetAtt [PublishedS3Bucket, Arn], '*']]
+                  - !GetAtt [ScriptS3Bucket, Arn]
+                  - !Join ['/', [!GetAtt [ScriptS3Bucket, Arn], '*']]
+
+  DataLakeDeveloperGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
+        - arn:aws:iam::aws:policy/AwsGlueDataBrewFullAccessPolicy
+
   GlueIamRole:
     Type: AWS::IAM::Role
     Properties:
@@ -283,8 +322,8 @@ Resources:
             Action: sts:AssumeRole
             Principal:
               Service: glue.amazonaws.com
-      # ManagedPolicyArns:
-      #   - arn:aws:iam::aws:policy/AdministratorAccess
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
       Path: /
       Policies:
         - PolicyName: S3Access
@@ -312,16 +351,78 @@ Resources:
                   - !GetAtt [ScriptS3Bucket, Arn]
                   - !Join ['/', [!GetAtt [ScriptS3Bucket, Arn], '*']]
 
-  # RDSGlueConnection:
-  #   Type: AWS::Glue::Connection
-  #   Properties: 
-  #     CatalogId: !Ref AWS::AccountId
-  #     ConnectionInput: 
-  #       ConnectionProperties: Json 
-  #       ConnectionType: String
-  #       Description: String
-  #       MatchCriteria: 
-  #         - String
-  #       Name: String
-  #       PhysicalConnectionRequirements: 
-  #         PhysicalConnectionRequirements
+###
+# Glue Setup
+###
+
+  S3VPCEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - 's3:GetObject'
+            Resource:
+              - !Join ['/', [!GetAtt [ScriptS3Bucket, Arn], '*']]
+
+      RouteTableIds:
+        - rtb-0cad6f87ed7d92c27 #Need to get this from network stack
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref VPC
+
+  GlueSGIDConnection:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Description: Connect to SGID MySQL source database
+        ConnectionType: JDBC
+        # MatchCriteria: none
+        PhysicalConnectionRequirements:
+          # AvailabilityZone: !Ref AvailabilityZone
+          SecurityGroupIdList:
+            - !Ref DBSecurityGroup
+            - !Ref CrawlerSecurityGroup
+          SubnetId:
+            !ImportValue
+              'Fn::Sub': '${NetworkStackName}-PublicSubnetId1'
+        ConnectionProperties:
+          #"jdbc:mysql://create-rds-databasecluster-10458bf7lghmb.cluster-cu74pzqocy8l.us-west-2.rds.amazonaws.com:5432/dbpSEAOMSSGID01"
+          JDBC_CONNECTION_URL:
+            !Join
+              - ''
+              - - 'jdbc:mysql://'
+                - Fn::GetAtt:
+                  - SGIDShard
+                  - Outputs.ShardRDSInstanceEndpoint
+                - :3306/dbpSEAOMSSGID01
+          USERNAME: preetk
+          PASSWORD: 7r4coFovl6Lnob3S
+        Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, mysql, sgid]]
+
+  SGIDCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role: !Ref GlueIamRole
+      DatabaseName: dbpSEAOMSSGID01 #Make parameter
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref GlueSGIDConnection
+      # TablePrefix: SGID
+      # SchemaChangePolicy:
+      #   UpdateBehavior: UPDATE_IN_DATABASE
+      #   DeleteBehavior: LOG
+      Configuration: "{\"Version\":1.0,\"CrawlerOutput\":{\"Partitions\":{\"AddOrUpdateBehavior\":\"InheritFromTable\"},\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
+
+Outputs:
+
+  DataLakeAdminGroup:
+    Description: Data Lake Admin Group
+    Value: !Ref DataLakeAdminGroup
+
+  DataLakeDeveloperGroup:
+    Description: Data Lake Developer Group
+    Value: !Ref DataLakeDeveloperGroup
