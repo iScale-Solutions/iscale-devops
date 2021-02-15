@@ -117,12 +117,12 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasStartSchedule: !Not [!Equals [!Ref StartScheduleExpression, ""]]
   HasStopSchedule: !Not [!Equals [!Ref StopScheduleExpression, ""]]
-  HasDBCluster: !Not [!Equals [!Ref DatabaseClusterArn, ""]]
-  HasDBInstance: !Not [!Equals [!Ref DatabaseInstanceName, ""]]
-  HasDBClusterAndStartSchedule: !And [Condition: HasDBCluster, Condition: HasStartSchedule]
-  HasDBInstanceAndStartSchedule: !And [Condition: HasDBInstance, Condition: HasStartSchedule]
-  HasDBClusterAndStopSchedule: !And [Condition: HasDBCluster, Condition: HasStopSchedule]
-  HasDBInstanceAndStopSchedule: !And [Condition: HasDBInstance, Condition: HasStopSchedule]
+  HasRDSCluster: !Not [!Equals [!Ref DatabaseClusterArn, ""]]
+  HasRDSInstance: !Not [!Equals [!Ref DatabaseInstanceName, ""]]
+  HasRDSClusterAndStartSchedule: !And [Condition: HasRDSCluster, Condition: HasStartSchedule]
+  HasRDSInstanceAndStartSchedule: !And [Condition: HasRDSInstance, Condition: HasStartSchedule]
+  HasRDSClusterAndStopSchedule: !And [Condition: HasRDSCluster, Condition: HasStopSchedule]
+  HasRDSInstanceAndStopSchedule: !And [Condition: HasRDSInstance, Condition: HasStopSchedule]
   HasEC2Instance: !Not [!Equals [!Ref EC2InstanceId, ""]]
   HasEC2InstanceAndStartSchedule: !And [Condition: HasEC2Instance, Condition: HasStartSchedule]
   HasEC2InstanceAndStopSchedule: !And [Condition: HasEC2Instance, Condition: HasStopSchedule]
@@ -137,36 +137,32 @@ Resources:
 # IAM Section
 ####
 
-  LambdaScheduleDBClusterRole:
-    Condition: HasDBCluster
+  LambdaScheduleRDSClusterRole:
+    Condition: HasRDSCluster
     Type: AWS::IAM::Role
     Properties:
       Path: /
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
-          -
-            Effect: Allow
+          - Effect: Allow
             Principal:
               Service:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
       Policies:
-        -
-          PolicyName: ScheduleDBClusterPolicy
+        - PolicyName: ScheduleRDSClusterPolicy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              -
-                Effect: Allow
+              - Effect: Allow
                 Action:
                   - rds:DescribeDBClusters
                   - rds:StopDBCluster
                   - rds:StartDBCluster
                 Resource: !Ref DatabaseClusterArn
-              -
-                Effect: Allow
+              - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
@@ -174,35 +170,31 @@ Resources:
                 Resource: "arn:aws:logs:*:*:*"
 
   LambdaScheduleDBInstanceRole:
-    Condition: HasDBInstance
+    Condition: HasRDSInstance
     Type: AWS::IAM::Role
     Properties:
       Path: /
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
-          -
-            Effect: Allow
+          - Effect: Allow
             Principal:
               Service:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
       Policies:
-        -
-          PolicyName: ScheduleDBClusterPolicy
+        - PolicyName: ScheduleRDSClusterPolicy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              -
-                Effect: Allow
+              - Effect: Allow
                 Action:
                   - rds:DescribeDBInstances
                   - rds:StopDBInstance
                   - rds:StartDBInstance
                 Resource: !Join [":", ["arn:aws:rds", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "db", !Ref DatabaseInstanceName]]
-              -
-                Effect: Allow
+              - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
@@ -217,28 +209,24 @@ Resources:
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
-          -
-            Effect: Allow
+          - Effect: Allow
             Principal:
               Service:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
       Policies:
-        -
-          PolicyName: ScheduleEC2InstancePolicy
+        - PolicyName: ScheduleEC2InstancePolicy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              -
-                Effect: Allow
+              - Effect: Allow
                 Action:
                   - ec2:DescribeInstances
                   - ec2:StartInstances
                   - ec2:StopInstances
                 Resource: !Join [":", ["arn", "aws", "ec2", !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref EC2InstanceId]]]]
-              -
-                Effect: Allow
+              - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
@@ -278,13 +266,13 @@ Resources:
 # Lambda Section
 ####
 
-  StartDBClusterFunction:
-    Condition: HasDBClusterAndStartSchedule
+  StartRDSClusterFunction:
+    Condition: HasRDSClusterAndStartSchedule
     Type: AWS::Lambda::Function
     Properties:
       Description: Lambda Function starting a DB cluster
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaScheduleDBClusterRole.Arn
+      Role: !GetAtt LambdaScheduleRDSClusterRole.Arn
       Runtime: python3.6
       Timeout: 60
       Environment:
@@ -314,7 +302,7 @@ Resources:
               logger.exception('Error Encountered')
 
   StartDBInstanceFunction:
-    Condition: HasDBInstanceAndStartSchedule
+    Condition: HasRDSInstanceAndStartSchedule
     Type: AWS::Lambda::Function
     Properties:
       Description: Lambda Function starting a DB instance
@@ -383,13 +371,13 @@ Resources:
             except Exception:
               logger.exception('Error Encountered')
 
-  StopDBClusterFunction:
-    Condition: HasDBClusterAndStopSchedule
+  StopRDSClusterFunction:
+    Condition: HasRDSClusterAndStopSchedule
     Type: AWS::Lambda::Function
     Properties:
       Description: Lambda Function stopping a DB cluster
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaScheduleDBClusterRole.Arn
+      Role: !GetAtt LambdaScheduleRDSClusterRole.Arn
       Runtime: python3.6
       Timeout: 60
       Environment:
@@ -418,8 +406,8 @@ Resources:
             except Exception:
               logger.exception('Error Encountered')
   
-  StopDBInstanceFunction:
-    Condition: HasDBInstanceAndStopSchedule
+  StopRDSInstanceFunction:
+    Condition: HasRDSInstanceAndStopSchedule
     Type: AWS::Lambda::Function
     Properties:
       Description: Lambda Function stopping a DB instance
@@ -602,9 +590,9 @@ Resources:
 # CloudWatch Section
 ####
 
-  StartScheduledDBClusterEventRule:
+  StartScheduledRDSClusterEventRule:
     Type: AWS::Events::Rule
-    Condition: HasDBClusterAndStartSchedule
+    Condition: HasRDSClusterAndStartSchedule
     Properties:
       Name: !If
         - UseFriendlyNames
@@ -614,12 +602,12 @@ Resources:
       ScheduleExpression: !Ref StartScheduleExpression
       State:  ENABLED
       Targets:
-        - Arn: !GetAtt StartDBClusterFunction.Arn
+        - Arn: !GetAtt StartRDSClusterFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstart]]
 
   StartScheduledDBInstanceEventRule:
     Type: AWS::Events::Rule
-    Condition: HasDBInstanceAndStartSchedule
+    Condition: HasRDSInstanceAndStartSchedule
     Properties:
       Name: !If
         - UseFriendlyNames
@@ -662,17 +650,17 @@ Resources:
         - Arn: !GetAtt StartDeploymentASGFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscalingstart]]
 
-  ScheduledEventPermissionToStartDBCluster:
-    Condition: HasDBClusterAndStartSchedule
+  ScheduledEventPermissionToStartRDSCluster:
+    Condition: HasRDSClusterAndStartSchedule
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref StartDBClusterFunction
+      FunctionName: !Ref StartRDSClusterFunction
       Action:  lambda:InvokeFunction
       Principal:  events.amazonaws.com
-      SourceArn: !GetAtt StartScheduledDBClusterEventRule.Arn
+      SourceArn: !GetAtt StartScheduledRDSClusterEventRule.Arn
 
   ScheduledEventPermissionToStartDBInstance:
-    Condition: HasDBInstanceAndStartSchedule
+    Condition: HasRDSInstanceAndStartSchedule
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref StartDBInstanceFunction
@@ -698,9 +686,9 @@ Resources:
       Principal:  events.amazonaws.com
       SourceArn: !GetAtt StartScheduledASGEventRule.Arn
 
-  StopScheduledDBClusterEventRule:
+  StopScheduledRDSClusterEventRule:
     Type: AWS::Events::Rule
-    Condition: HasDBClusterAndStopSchedule
+    Condition: HasRDSClusterAndStopSchedule
     Properties:
       Name: !If
         - UseFriendlyNames
@@ -710,12 +698,12 @@ Resources:
       ScheduleExpression: !Ref StopScheduleExpression
       State: ENABLED
       Targets:
-        - Arn: !GetAtt StopDBClusterFunction.Arn
+        - Arn: !GetAtt StopRDSClusterFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstop]]
 
   StopScheduledDBInstanceEventRule:
     Type: AWS::Events::Rule
-    Condition: HasDBInstanceAndStopSchedule
+    Condition: HasRDSInstanceAndStopSchedule
     Properties:
       Name: !If
         - UseFriendlyNames
@@ -725,7 +713,7 @@ Resources:
       ScheduleExpression: !Ref StopScheduleExpression
       State: ENABLED
       Targets:
-        - Arn: !GetAtt StopDBInstanceFunction.Arn
+        - Arn: !GetAtt StopRDSInstanceFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dbstop]]
 
   StopScheduledEC2InstanceEventRule:
@@ -758,20 +746,20 @@ Resources:
         - Arn: !GetAtt StopDeploymentASGFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscalingstop]]
 
-  ScheduledEventPermissionToStopDBCluster:
-    Condition: HasDBClusterAndStopSchedule
+  ScheduledEventPermissionToStopRDSCluster:
+    Condition: HasRDSClusterAndStopSchedule
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref StopDBClusterFunction
+      FunctionName: !Ref StopRDSClusterFunction
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt StopScheduledDBClusterEventRule.Arn
+      SourceArn: !GetAtt StopScheduledRDSClusterEventRule.Arn
 
   ScheduledEventPermissionToStopDBInstance:
-    Condition: HasDBInstanceAndStopSchedule
+    Condition: HasRDSInstanceAndStopSchedule
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref StopDBInstanceFunction
+      FunctionName: !Ref StopRDSInstanceFunction
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt StopScheduledDBInstanceEventRule.Arn
