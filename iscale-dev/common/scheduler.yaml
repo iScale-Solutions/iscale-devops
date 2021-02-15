@@ -15,6 +15,7 @@ Metadata:
         Parameters:
           - DatabaseClusterArn
           - DatabaseKInstanceArn
+          - DocDBClusterArn
           - CodeDeployApplicationName
           - CodeDeployDeploymentGroupName
           - EC2InstanceId
@@ -36,9 +37,11 @@ Metadata:
       CodeDeployDeploymentGroupName:
         default: CodeDeploy Deployment Group name (for autoscale)
       DatabaseClusterArn:
-        default: Database Cluster ARN
+        default: RDS Database Cluster ARN
       DatabaseInstanceName:
-        default: Database Instance Name
+        default: RDS Database Instance Name
+      DocDBClusterArn:
+        default: DocumentDB Cluster ARN
       EC2InstanceId:
         default: EC2 Instance Id
       StartScheduleExpression:
@@ -84,6 +87,10 @@ Parameters:
     Description: The name of a database instance
     Type: String
     Default: ''
+  DocDBClusterArn:
+    Description: The name of a DocumentDB database cluster
+    Type: String
+    Default: ''
   EC2InstanceId:
     Description: Id of EC2 instance
     Type: String
@@ -118,6 +125,9 @@ Conditions:
   HasStartSchedule: !Not [!Equals [!Ref StartScheduleExpression, ""]]
   HasStopSchedule: !Not [!Equals [!Ref StopScheduleExpression, ""]]
   HasRDSCluster: !Not [!Equals [!Ref DatabaseClusterArn, ""]]
+  HasDocDBCluster: !Not [!Equals [!Ref DocDBClusterArn, ""]]
+  HasDocDBClusterAndStartSchedule: !And [Condition: HasDocDBCluster, Condition: HasStartSchedule]
+  HasDocDBClusterAndStopSchedule: !And [Condition: HasDocDBCluster, Condition: HasStopSchedule]
   HasRDSInstance: !Not [!Equals [!Ref DatabaseInstanceName, ""]]
   HasRDSClusterAndStartSchedule: !And [Condition: HasRDSCluster, Condition: HasStartSchedule]
   HasRDSInstanceAndStartSchedule: !And [Condition: HasRDSInstance, Condition: HasStartSchedule]
@@ -200,6 +210,38 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: "arn:aws:logs:*:*:*"
+  
+  LambdaScheduleDocDBClusterRole:
+    Condition: HasDocDBCluster
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ScheduleDocDBClusterPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - docdb:DescribeDBClusters
+                  - docdb:StopDBCluster
+                  - docdb:StartDBCluster
+                Resource: !Ref DocDBClusterArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
 
   LambdaScheduleEC2InstanceRole:
     Condition: HasEC2Instance
@@ -266,6 +308,41 @@ Resources:
 # Lambda Section
 ####
 
+  StartDocDBClusterFunction:
+    Condition: HasDocDBClusterAndStartSchedule
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function starting a DocumentDB cluster
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleDocDBClusterRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          CLUSTER_ID: !Ref DatabaseClusterArn
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            ClusterID=os.environ['CLUSTER_ID']
+
+            try:
+              docdb = boto3.client('docdb',region_name=region)
+
+              logger.info('Starting DocumentDB Cluster : ' + str(ClusterID))
+              docdb.start_db_cluster(DBClusterIdentifier=ClusterID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
   StartRDSClusterFunction:
     Condition: HasRDSClusterAndStartSchedule
     Type: AWS::Lambda::Function
@@ -305,7 +382,7 @@ Resources:
     Condition: HasRDSInstanceAndStartSchedule
     Type: AWS::Lambda::Function
     Properties:
-      Description: Lambda Function starting a DB instance
+      Description: Lambda Function starting an RDS DB instance
       Handler: index.lambda_handler
       Role: !GetAtt LambdaScheduleDBInstanceRole.Arn
       Runtime: python3.6
@@ -330,7 +407,7 @@ Resources:
             try:
               rds = boto3.client('rds',region_name=region)
 
-              logger.info('Starting DB Instance : ' + str(InstanceID))
+              logger.info('Starting RDS DB Instance : ' + str(InstanceID))
               rds.start_db_instance(DBInstanceIdentifier=InstanceID)
 
             except Exception:
@@ -371,11 +448,46 @@ Resources:
             except Exception:
               logger.exception('Error Encountered')
 
+  StopDocDBClusterFunction:
+    Condition: HasDocDBClusterAndStopSchedule
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function stopping a DocumentDB cluster
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleDocDBClusterRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          CLUSTER_ID: !Ref DatabaseClusterArn
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            ClusterID=os.environ['CLUSTER_ID']
+
+            try:
+              docdb = boto3.client('docdb',region_name=region)
+
+              logger.info('Stopping DocumentDB Cluster : ' + str(ClusterID))
+              docdb.stop_db_cluster(DBClusterIdentifier=ClusterID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
   StopRDSClusterFunction:
     Condition: HasRDSClusterAndStopSchedule
     Type: AWS::Lambda::Function
     Properties:
-      Description: Lambda Function stopping a DB cluster
+      Description: Lambda Function stopping an RDS DB cluster
       Handler: index.lambda_handler
       Role: !GetAtt LambdaScheduleRDSClusterRole.Arn
       Runtime: python3.6
@@ -410,7 +522,7 @@ Resources:
     Condition: HasRDSInstanceAndStopSchedule
     Type: AWS::Lambda::Function
     Properties:
-      Description: Lambda Function stopping a DB instance
+      Description: Lambda Function stopping an RDS DB instance
       Handler: index.lambda_handler
       Role: !GetAtt LambdaScheduleDBInstanceRole.Arn 
       Runtime: python3.6
@@ -435,7 +547,7 @@ Resources:
             try:
               rds = boto3.client('rds',region_name=region)
 
-              logger.info('Stopping DB Instance : ' + str(InstanceID))
+              logger.info('Stopping RDS DB Instance : ' + str(InstanceID))
               rds.stop_db_instance(DBInstanceIdentifier=InstanceID)
 
             except Exception:
@@ -620,6 +732,21 @@ Resources:
         - Arn: !GetAtt StartDBInstanceFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, rds, db, start]]
 
+  StartScheduledDocDBClusterEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasDocDBClusterAndStartSchedule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, docdb, cluster, start]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ "Start", !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], "at a specified time"]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StartDocDBClusterFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, docdb, cluster, start]]
+
   StartScheduledEC2InstanceEventRule:
     Type: AWS::Events::Rule
     Condition: HasEC2InstanceAndStartSchedule
@@ -668,6 +795,15 @@ Resources:
       Principal:  events.amazonaws.com
       SourceArn: !GetAtt StartScheduledDBInstanceEventRule.Arn
 
+  ScheduledEventPermissionToStartDocDBCluster:
+    Condition: HasRDSClusterAndStartSchedule
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartDocDBClusterFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartScheduledDocDBClusterEventRule.Arn
+
   ScheduledEventPermissionToStartEC2Instance:
     Condition: HasEC2InstanceAndStartSchedule
     Type: AWS::Lambda::Permission
@@ -685,6 +821,21 @@ Resources:
       Action:  lambda:InvokeFunction
       Principal:  events.amazonaws.com
       SourceArn: !GetAtt StartScheduledASGEventRule.Arn
+
+  StopScheduledDocDBClusterEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasDocDBClusterAndStopSchedule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, docdb, cluster, stop]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ "Stop", !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], "at a specified time"]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StopDocDBClusterFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, docdb, cluster, stop]]
 
   StopScheduledRDSClusterEventRule:
     Type: AWS::Events::Rule
@@ -745,6 +896,15 @@ Resources:
       Targets:
         - Arn: !GetAtt StopDeploymentASGFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscaling, stop]]
+
+  ScheduledEventPermissionToStopDocDBCluster:
+    Condition: HasRDSClusterAndStopSchedule
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopDocDBClusterFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopScheduledDocDBClusterEventRule.Arn
 
   ScheduledEventPermissionToStopRDSCluster:
     Condition: HasRDSClusterAndStopSchedule
