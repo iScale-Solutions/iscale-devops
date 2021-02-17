@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: wraps around an existing odoo stack to register waymaker URL and DNS entry with existing odoo stack ELB
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - OdooStackName
+          - SNSStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - OdooDomainName
+          - OdooHostName
+          - LoadBalancerCertificate
+          - LoadBalancerPriority
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      LoadBalancerCertificate:
+        default: Load Balancer Certificate (optional)
+      LoadBalancerPriority:
+        default: Load Balancer Rule Priority
+      OdooDomainName:
+        default: Domain name to use for this odoo setup
+      OdooHostName:
+        default: Host name to use for this odoo setups
+      OdooStackName:
+        default: Odoo Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: odoo
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 15
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  OdooDomainName:
+    Description: Domain name to use on the ELB
+    Type: String
+    AllowedPattern: ^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$
+    Default: iscale-solutions.com
+    MinLength: 1
+  OdooHostName:
+    Description: Host name to use on the ELB
+    Type: String
+    Default: odoo
+    MinLength: 1
+  OdooStackName:
+    Description: The name of the odoo stack
+    Type: String
+    Default: my-odoo-stack
+    MinLength: 1
+  LoadBalancerCertificate:
+    Description: Load Balancer Certificate
+    Type: String
+    Default: ''
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 900
+    MinValue: 1
+    MaxValue: 50000
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-sns
+    MinLength: 1
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasLoadBalancerCertificate: !Not [!Equals [!Ref LoadBalancerCertificate, '']]
+      
+Resources:
+
+  OdooDNSEntry:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['', [!Ref OdooDomainName, '.']]
+      Name: !Join ['.', [!Ref OdooHostName, !Ref OdooDomainName]]
+      Type: CNAME
+      TTL: 3600
+      Comment: DNS entry mapping to odoo ELB
+      ResourceRecords:
+        - Fn::ImportValue:
+            Fn::Sub: "${OdooStackName}-ApplicationELBDNSName"
+
+  ELBSSLListenerCertificate:
+    Condition: HasLoadBalancerCertificate
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties: 
+      Certificates: 
+        - CertificateArn: !Ref LoadBalancerCertificate
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${OdooStackName}-ApplicationELBListenerArn"
+
+  ELBSSLListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions:
+        - Type: forward
+          TargetGroupArn:
+            Fn::ImportValue:
+              Fn::Sub: "${OdooStackName}-AppServerTargetGroup"
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', [!Ref OdooHostName, !Ref OdooDomainName]]
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${OdooStackName}-ApplicationELBListenerArn"
+      Priority: !Ref LoadBalancerPriority
