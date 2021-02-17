@@ -20,6 +20,7 @@ Metadata:
           - DatabaseUser
           - DatabaseUserPassword
           - DeletionProtection
+          - ParameterGroup
           - Port
           - StorageEncrypted
           - InstanceType
@@ -95,6 +96,8 @@ Metadata:
         default: Family
       MonitoringInterval:
         default: Monitoring Interval
+      ParameterGroup:
+        default: Parameter Group
       EnableEnhancedMonitoring:
         default: Enable Enhanced Monitoring
       LogRetentionPeriod:
@@ -168,6 +171,10 @@ Parameters:
   DatabaseUserPassword:
     Description: The password of the database user
     NoEcho: true
+    Type: String
+    Default: ''
+  ParameterGroup:
+    Description: (optional) custom parameter group name
     Type: String
     Default: ''
   Port:
@@ -280,20 +287,22 @@ Conditions:
   IsAuroraPostgreSQL: !Equals [!Ref Engine, aurora-postgresql]
   IsAuroraMySQL: !Equals [!Ref Engine, aurora-mysql]
   IsAurora: !Or [Condition: IsAuroraPostgreSQL, Condition: IsAuroraMySQL]
-  HasDBUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, ""]]
-  HasDBRootPassword: !Not [!Equals [!Ref MasterUserPassword, ""]]
+  HasDBUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
+  HasDBRootPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
   HasDBPasswords: !Or [Condition: HasDBUserPassword, Condition: HasDBRootPassword]
   HasNoCluster: !Not [Condition: IsAurora]
   HasCluster: !Not [Condition: HasNoCluster]
-  HasSnapshot: !Not [!Equals [!Ref SnapshotIdentifier, ""]]
+  HasSnapshot: !Not [!Equals [!Ref SnapshotIdentifier, '']]
   HasNoSnapshot: !Not [Condition: HasSnapshot]
   HasClusterSnapshot: !And [Condition: HasCluster, Condition: HasSnapshot]
   HasClusterAndClusterSnapshot: !And [Condition: HasCluster, Condition: HasClusterSnapshot]
+  HasExternalParameterGroup: !Not [!Equals [!Ref ParameterGroup, '']]
+  HasNoExternalParameterGroup: !Not [Condition: HasExternalParameterGroup]
   HasPerformanceInsights: !Equals [!Ref EnablePerformanceInsights, true]
   HasSnapshotAndNoCluster: !And [Condition: HasSnapshot, Condition: HasNoCluster]
   HasNoSnapshotAndNoCluster: !And [Condition: HasNoSnapshot, Condition: HasNoCluster]
-  HasSourceDbInstanceIdentifier: !Not [!Equals [!Ref SourceDbInstanceIdentifier, ""]]
-  HasBackupWindow: !Not [!Equals [!Ref BackupWindow, ""]]
+  HasSourceDbInstanceIdentifier: !Not [!Equals [!Ref SourceDbInstanceIdentifier, '']]
+  HasBackupWindow: !Not [!Equals [!Ref BackupWindow, '']]
   IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
   IsEncrypted: !Equals [!Ref StorageEncrypted, true]
   IsEnableEnhancedMonitoring: !Equals [!Ref EnableEnhancedMonitoring, true]
@@ -425,6 +434,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
   RDSParameterGroup:
+    Condition: HasNoExternalParameterGroup
     Type: AWS::RDS::DBParameterGroup
     Properties:
       Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -435,6 +445,7 @@ Resources:
         - sql_mode: IGNORE_SPACE
           slow_query_log: 1
           long_query_time: 2
+          log_bin_trust_function_creators: 1
           log_output: FILE
       Tags:
         - Key: Name
@@ -518,7 +529,6 @@ Resources:
       - RDSLogGroup
       - UpgradeLogGroup
       - RDSIamRole
-      - RDSParameterGroup
     Properties:
       AllocatedStorage: !If [IsAurora, !Ref 'AWS::NoValue', !Ref AllocatedStorage]
       BackupRetentionPeriod:
@@ -535,7 +545,13 @@ Resources:
           - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
           - !Ref 'AWS::NoValue'
       DBName: !If [HasNoCluster, !Ref DatabaseName, !Ref 'AWS::NoValue']
-      DBParameterGroupName: !If [IsAuroraMySQL, !Ref AuroraMySQLDBParameterGroup, !Ref RDSParameterGroup]
+      DBParameterGroupName: !If
+        - HasExternalParameterGroup
+        - !Ref ParameterGroup
+        - !If 
+          - IsAuroraMySQL
+          - !Ref AuroraMySQLDBParameterGroup
+          - !Ref RDSParameterGroup
       DBSnapshotIdentifier: !If [HasSnapshotAndNoCluster, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
       DBSubnetGroupName: !Ref DBSubnetGroup
       DeletionProtection: !If [HasNoCluster, !Ref DeletionProtection, !Ref 'AWS::NoValue']
