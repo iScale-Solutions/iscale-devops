@@ -26,6 +26,7 @@ Metadata:
         Parameters:
           - LoadBalancerPriority
           - LoadBalancerHostName
+          - AllowJustDomainName
       - Label:
           default: Instance Configuration
         Parameters:
@@ -57,6 +58,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      AllowJustDomainName:
+        default:  Allows the resource to be reachable just via domain name (e.g. https://foo.com)
       DatabaseEndpoint:
         default: Database Endpoint
       DatabasePort:
@@ -112,6 +115,13 @@ Parameters:
       - Staging
       - Development
       - Test
+  AllowJustDomainName:
+    Description: Set to TRUE to redirect from domain name to system name (e.g. foo.com to www.foo.com)
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: FALSE
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
     Type: String
@@ -227,6 +237,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasAllowJustDomainName: !Equals [!Ref AllowJustDomainName, TRUE]
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
   HasLoadBalancerStackName: !Not [!Equals [!Ref LoadBalancerStackName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
@@ -378,6 +389,82 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
+
+  LambdaSumFunctionExecutionRole:
+    Condition: HasAllowJustDomainName
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [lambda.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Path: "/"
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  
+  LambdaAddFunction:
+    Condition: HasAllowJustDomainName
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaSumFunctionExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          var response = require('cfn-response');
+          exports.handler = function(event, context) {
+            var result = parseInt(event.ResourceProperties.Num1) + parseInt(event.ResourceProperties.Num2);
+            response.send(event, context, response.SUCCESS, {Value: result});
+          };
+      Runtime: nodejs12.x
+  
+  IncrementPriority:
+    Condition: HasAllowJustDomainName
+    Type: Custom::LambdaAdd
+    Properties:
+      ServiceToken: !GetAtt LambdaAddFunction.Arn
+      Num1: !Ref LoadBalancerPriority
+      Num2: 1
+
+  DomainRedirectELBListenerRule:
+    Condition: HasAllowJustDomainName
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            Host: !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+            Path: "/#{path}"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Ref ClientDomainName
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority: !GetAtt IncrementPriority.Value
+
+  LoadBalancerDomainOnlyDNSRecord:
+    Condition: HasAllowJustDomainName
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
+      Comment: !Join ['', [Default Domain Name Record for, !Ref ClientDomainName]]
+      RecordSets:
+        - Name: !Ref ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
 
   ####
   # CloudWatch Section
