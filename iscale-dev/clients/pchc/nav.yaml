@@ -20,6 +20,12 @@ Metadata:
         Parameters:
           - InstanceKeyName
           - InstanceAMI
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
 
     ParameterLabels:
       Name:
@@ -36,6 +42,11 @@ Metadata:
         default: Network Stack Name
       SNSStackName:
         default: SNS Topic Stack Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
 
 Parameters:
   Name:
@@ -83,6 +94,14 @@ Parameters:
     Type: String
     Default: pchc-prd-ase1-sns
     MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 1 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
 
 Mappings:
   Fn::Transform:
@@ -262,7 +281,7 @@ Resources:
       DisableApiTermination: !If [IsProd, true, false]
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], NAV]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], NAV]]
       SubnetId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-PublicSubnetId1"
@@ -286,6 +305,26 @@ Resources:
           - - Fn::GetAtt:
               - DBStack
               - Outputs.DBInstanceARN
+
+  SchedulerStack: 
+    DependsOn: 
+      - DBStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
+        EC2InstanceId: !Ref NAVInstance
+
 Outputs:
 
   DBInstanceAddress:
