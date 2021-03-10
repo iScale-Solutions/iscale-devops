@@ -202,6 +202,7 @@ Parameters:
       - aurora-mysql
       - aurora-postgresql
       - mysql
+      - sqlserver-web
   EngineVersion:
     Description: The version number of the database engine to use.
     Type: String
@@ -286,6 +287,7 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsAuroraPostgreSQL: !Equals [!Ref Engine, aurora-postgresql]
   IsAuroraMySQL: !Equals [!Ref Engine, aurora-mysql]
+  IsSQLServer: !Equals [!Ref Engine, sqlserver-web]
   IsAurora: !Or [Condition: IsAuroraPostgreSQL, Condition: IsAuroraMySQL]
   HasDBUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
   HasDBRootPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
@@ -442,11 +444,14 @@ Resources:
       Parameters: !If
         - IsAuroraPostgreSQL
         - log_connections: 1
-        - sql_mode: IGNORE_SPACE
-          slow_query_log: 1
-          long_query_time: 2
-          log_bin_trust_function_creators: 1
-          log_output: FILE
+        - !If
+          - IsSQLServer
+          - "default trace enabled": 1
+          - sql_mode: IGNORE_SPACE #else MySQL
+            slow_query_log: 1
+            long_query_time: 2
+            log_bin_trust_function_creators: 1
+            log_output: FILE
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -544,7 +549,7 @@ Resources:
           - HasNoCluster
           - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
           - !Ref 'AWS::NoValue'
-      DBName: !If [HasNoCluster, !Ref DatabaseName, !Ref 'AWS::NoValue']
+      DBName: !If [IsSQLServer, !Ref 'AWS::NoValue', !If [HasNoCluster, !Ref DatabaseName, !Ref 'AWS::NoValue']]
       DBParameterGroupName: !If
         - HasExternalParameterGroup
         - !Ref ParameterGroup
@@ -571,7 +576,7 @@ Resources:
       StorageType: !If [HasNoCluster, gp2, !Ref 'AWS::NoValue']
       MonitoringRoleArn: !If [IsEnableEnhancedMonitoring, !GetAtt RDSIamRole.Arn, !Ref 'AWS::NoValue']
       MonitoringInterval: !If [IsEnableEnhancedMonitoring, !Ref MonitoringInterval, !Ref 'AWS::NoValue']
-      MultiAZ: !Ref MultiAz
+      MultiAZ: !If [IsSQLServer, !Ref 'AWS::NoValue', !Ref MultiAz]
       Port: !If [HasNoCluster, !Ref Port, !Ref 'AWS::NoValue']
       PubliclyAccessible: false
       SourceDBInstanceIdentifier: !If [ HasSourceDbInstanceIdentifier, !Ref SourceDbInstanceIdentifier, !Ref 'AWS::NoValue']
