@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for Maris's Touch
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: marias
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+    Default: mariastouchjewelry.com
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: HostingProductionELB
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone: 
+    Type: AWS::Route53::HostedZone
+    Properties: 
+      HostedZoneConfig: 
+        Comment: !Join [' ',[Hosted Zone for, !Ref ClientDomainName]]
+      Name: !Ref ClientDomainName
+      HostedZoneTags: 
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], fpua]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  # GoogleMXRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId : !Ref HostedZone
+  #     Name: !Ref ClientDomainName
+  #     Comment: "Google MX Records"
+  #     ResourceRecords: 
+  #       - "\"1 ASPMX.L.GOOGLE.COM\""
+  #       - "\"5 ALT1.ASPMX.L.GOOGLE.COM\""
+  #       - "\"5 ALT2.ASPMX.L.GOOGLE.COM\""
+  #       - "\"10 ALT3.ASPMX.L.GOOGLE.COM\""
+  #       - "\"10 ALT4.ASPMX.L.GOOGLE.COM\""
+  #     TTL: 60
+  #     Type: TXT
+
+  # GoogleTXTRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId : !Ref HostedZone
+  #     Name: !Join ['.', ['@', !Ref ClientDomainName]]
+  #     Comment: "Google TXT Record"
+  #     ResourceRecords: 
+  #       - "\"google-site-verification=zkDQKPcUDLyciJK7bwk0lK5LUP3BdaGrB-6OSFuaaGI\""
+  #     TTL: 60
+  #     Type: TXT
+
+  # WWWRecord:
+  #   Type: AWS::Route53::RecordSetGroup
+  #   Properties:
+  #     HostedZoneId : !Ref HostedZone
+  #     Comment: WWW Record
+  #     RecordSets:
+  #       - Name: !Join ['.',[www, !Ref ClientDomainName]]
+  #         Type: A
+  #         AliasTarget:
+  #           HostedZoneId:
+  #             Fn::ImportValue:
+  #               !Sub "${LoadBalancerStackName}-PublicELBCanonicalHostedZoneID" 
+  #           DNSName:
+  #             Fn::ImportValue:
+  #               !Sub "${LoadBalancerStackName}-PublicELBDNS"
+
+  # NoWWWRecord:
+  #   Type: AWS::Route53::RecordSetGroup
+  #   Properties:
+  #     HostedZoneId : !Ref HostedZone
+  #     Comment: No WWW Record
+  #     RecordSets:
+  #       - Name: !Ref ClientDomainName
+  #         Type: A
+  #         AliasTarget:
+  #           HostedZoneId:
+  #             Fn::ImportValue:
+  #               !Sub "${LoadBalancerStackName}-PublicELBCanonicalHostedZoneID" 
+  #           DNSName:
+  #             Fn::ImportValue:
+  #               !Sub "${LoadBalancerStackName}-PublicELBDNS"
+  
+  SSLDomainCertificateRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[_86eeda2d759bdb934a6011dc707964e1, !Ref ClientDomainName]]
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+      - _ed85c03649e36522f6ba64a65be238b6.nfyddsqlcy.acm-validations.aws.
