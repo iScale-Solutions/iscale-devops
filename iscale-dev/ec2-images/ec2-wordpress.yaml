@@ -257,6 +257,74 @@ Resources:
                     owner: apache
                     group: apache
 
+  Wordpress570Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Wordpress 5_7_0
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs Wordpress 5.7.0
+      ChangeDescription: Initial version
+      Data: |
+        name: Wordpress - InlineData
+        description: Installation of Wordpress
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateDirs
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - mkdir -p /var/www/html
+              - name: DownloadWordpress
+                action: WebDownload
+                maxAttempts: 3
+                inputs:
+                  - source: https://wordpress.org/wordpress-5.7.tar.gz
+                    destination: /tmp/wordpress-5.7.0.tar.gz
+              - name: UnzipWordpress
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - tar xvfz /tmp/wordpress-5.7.tar.gz -C /var/www/html
+                    - mv -fv /var/www/html/wordpress/* /var/www/html/
+                    - mv -fv /var/www/html/wordpress/.* /var/www/html/
+                    - rm -fr /var/www/html/wordpress/
+                    - rm -f /tmp/wordpress-5.7.tar.gz
+              - name: CreateHTAccess
+                action: CreateFile
+                inputs:
+                  - path: /var/www/html/.htaccess
+                    content: |
+                      <IfModule mod_rewrite.c>
+                        RewriteEngine On
+                        RewriteBase /
+                        RewriteRule ^index\.php$ - [L]
+                        RewriteCond %{REQUEST_FILENAME} !-f
+                        RewriteCond %{REQUEST_FILENAME} !-d
+                        RewriteRule . /index.php [L]
+                      </IfModule>
+                    overwrite: false
+              - name: AllowOverrideAllForWWWRoot
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sed -i '0,/AllowOverride None/! {0,/AllowOverride None/ s/AllowOverride None/AllowOverride All/}' /etc/httpd/conf/httpd.conf
+              - name: DefaultWPConfig
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - mv -fv /var/www/html/wp-config-sample.php /var/www/html/wp-config.php
+              - name: SetPermissions
+                action: SetFolderOwner
+                inputs:
+                  - path: /var/www/html
+                    owner: apache
+                    group: apache
+
   Wordpress562ImageRecipe:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
@@ -279,6 +347,28 @@ Resources:
             VolumeType: gp2
             VolumeSize: 8
 
+  Wordpress570ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'wordpress 5_7_0']]
+      Version: 1.0.0
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.0.3/1']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', [!Ref OrgName, 'wordpress 5.7.0']]
+      Components: #Max 20
+        - ComponentArn: !Ref WordpressPHPComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/mysql-client/1.0.0/1']]
+        - ComponentArn: !Ref Wordpress570Component
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0/1']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
   Wordpress562ImageBuilder: 
     Type: AWS::CloudFormation::Stack
     Properties: 
@@ -289,5 +379,18 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
         ImageRecipeARN: !Ref Wordpress562ImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
+
+  Wordpress570ImageBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: wordpress-570
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref Wordpress570ImageRecipe
         ShareImage: !Ref ShareImage
         SNSStackName: !Ref SNSStackName
