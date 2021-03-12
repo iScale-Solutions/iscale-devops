@@ -1,0 +1,220 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: FPUA Website
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - DatabaseStackName
+          - LoadBalancerStackName
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerHostName
+          - LoadBalancerPriority
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DatabaseStackName:
+        default: Database Stack Name
+      LoadBalancerHostName:
+        default: Load balancer Hostname
+      LoadBalancerPriority:
+        default: Load Balancer Rule Priority
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceAMI:
+        default: Instance AMI
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: www
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: fpua
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: fpua.ph
+    MinLength: 1
+  DatabaseStackName:
+    Description: The name of the database stack
+    Type: String
+    Default: HostingProductionDB
+    MinLength: 1
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-09dcc87b859080af7
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: iscale-hosting
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: www
+    MaxLength: 12
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 970
+    MinValue: 1
+    MaxValue: 50000
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: HostingProductionELB
+    MinLength: 1
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: HostingProductionNetwork
+    MinLength: 1
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-sns
+    MinLength: 1
+  SSLCertificateArn:
+    Description: SSL Certificate ARN for ELB
+    Type: String
+    Default: arn:aws:acm:us-west-2:178070162686:certificate/7ab98b1e-55d1-4cee-8ac7-15b026f86cca
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+      
+Resources:
+
+  DeployStack: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+  
+  AppServerStack: 
+    DependsOn: 
+      - DeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AllowJustDomainName: TRUE
+        LoadBalancerPriority: !Ref LoadBalancerPriority
+        DatabaseEndpoint: !ImportValue
+          'Fn::Sub': '${DatabaseStackName}-ClusterEndpointAddress'
+        DatabasePort: !ImportValue
+          'Fn::Sub': '${DatabaseStackName}-ClusterPort'
+        DatabaseSecurityGroupId: !ImportValue
+          'Fn::Sub': '${DatabaseStackName}-SecurityGroupId'
+        LoadBalancerHostName: !Ref LoadBalancerHostName
+        LoadBalancerStackName: !Ref LoadBalancerStackName
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstanceSpotPrice: 0.5
+        InstanceType: t3.medium
+        SNSStackName: !Ref SNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        UseFriendlyNames: FALSE
+
+  BackupStack:
+    DependsOn: 
+      - AppServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - AppServerStack
+              - Outputs.AppServerEFSArn
+
+####
+# Certificate Section
+####
+
+  SSLListenerCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties: 
+      Certificates: 
+        - CertificateArn: !Ref SSLCertificateArn
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
+
+Outputs:
+  DeploymentUserGroup:
+    Description: Add the BitBucket user into this group
+    Value: 
+      Fn::GetAtt:
+        - DeployStack
+        - Outputs.DeploymentUserGroup
