@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: AWS Backup for a list of ARNs
+Description: Backup plan with parameters
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -14,7 +14,14 @@ Metadata:
           default: Backup Configuration
         Parameters:
           - BackupARNList
-    
+          - BackupTime
+          - ColdStorageTrigger
+          - DailyExpiration
+          - MonthlyExpiration
+          - TagName
+          - TagValue
+          - WeeklyExpiration
+
     ParameterLabels:
       Name:
         default: Resource Name
@@ -22,8 +29,18 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
-      MultiAz:
-        BackupARNList: List of ARNs to backup
+      BackupTime:
+        default: UTC time of the backup
+      BackupARNList:
+        default: List of ARNs to backup
+      ColdStorageTrigger:
+        default: Number of days after which the backup goes to cold storage
+      DailyExpiration:
+        default: Number of days for daily backup expiration
+      MonthlyExpiration:
+        default: Number of days for monthly backup expiration
+      WeeklyExpiration:
+        default: Number of days for weekly backup expiration
 
 Parameters:
   Name:
@@ -49,6 +66,36 @@ Parameters:
   BackupARNList:
     Description: The list of ARN resources that need to be backed up
     Type: CommaDelimitedList
+  BackupTime:
+    Description: UTC time for the backup
+    Type: Number
+    Default: 15 #3PM UTC
+    MinValue: 0
+    MaxValue: 23
+  ColdStorageTrigger:
+    Description: Number of days after which the backup goes to cold storage
+    Type: Number
+    Default: 90 # 3 months
+  DailyExpiration:
+    Description: Number of days after which the daily backup expires
+    Type: Number
+    Default: 30 # 1 month
+  MonthlyExpiration:
+    Description: Number of days after which the monthly backup expires
+    Type: Number
+    Default: 1825 # 5 years
+  TagName:
+    Description: Name of the tag name to include
+    Type: String
+    Default: Name
+  TagValue:
+    Description: Name of the tag value to include
+    Type: String
+    Default: ''
+  WeeklyExpiration:
+    Description: Number of days after which the weekly backup expires
+    Type: Number
+    Default: 365 # 1 year
 
 Mappings: 
   Fn::Transform:
@@ -61,6 +108,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  UseTagInclusion: !And [!Not [!Equals [!Ref TagName, ""]], !Not [!Equals [!Ref TagValue, ""]]]
 
 Resources:
 
@@ -95,26 +143,27 @@ Resources:
         BackupPlanRule:
           - RuleName: DailyBackup
             TargetBackupVault: !Ref ProdBackupVault
-            ScheduleExpression: "cron(0 15 ? * * *)"
-            StartWindowMinutes: 480
-            CompletionWindowMinutes: 10080
+            ScheduleExpression: !Join [' ', ['cron(0', !Ref BackupTime, '?', '*', '*', '*)']]
+            StartWindowMinutes: 120
+            CompletionWindowMinutes: 300
             Lifecycle:
-              DeleteAfterDays: 35
+              DeleteAfterDays: !Ref DailyExpiration
           - RuleName: WeeklyBackup
             TargetBackupVault: !Ref ProdBackupVault
-            ScheduleExpression: "cron(0 15 ? * 7 *)"
-            StartWindowMinutes: 480
-            CompletionWindowMinutes: 10080
+            ScheduleExpression: !Join [' ', ['cron(0', !Ref BackupTime, '?', '*', 7, '*)']]
+            StartWindowMinutes: 120
+            CompletionWindowMinutes: 300
             Lifecycle:
-              DeleteAfterDays: 90
+              MoveToColdStorageAfterDays: !Ref ColdStorageTrigger
+              DeleteAfterDays: !Ref WeeklyExpiration
           - RuleName: MonthlyBackup
             TargetBackupVault: !Ref ProdBackupVault
-            ScheduleExpression: "cron(0 15 1 * ? *)"
-            StartWindowMinutes: 480
-            CompletionWindowMinutes: 10080
+            ScheduleExpression: !Join [' ', ['cron(0', !Ref BackupTime, 1, '*', '?', '*)']]
+            StartWindowMinutes: 120
+            CompletionWindowMinutes: 300
             Lifecycle:
-              MoveToColdStorageAfterDays: 90
-              DeleteAfterDays: 1825
+              MoveToColdStorageAfterDays: !Ref ColdStorageTrigger
+              DeleteAfterDays: !Ref MonthlyExpiration
       BackupPlanTags:
         Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup, plan]]
         Environment: !Ref EnvName
@@ -132,14 +181,14 @@ Resources:
             TargetBackupVault: !Ref NonProdBackupVault
             ScheduleExpression: "cron(0 9 ? * * *)" #Non prod usually only open during day time
             StartWindowMinutes: 480
-            CompletionWindowMinutes: 10080
+            CompletionWindowMinutes: 300
             Lifecycle:
-              DeleteAfterDays: 35
+              DeleteAfterDays: !Ref DailyExpiration
       BackupPlanTags:
         Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup, plan]]
         Environment: !Ref EnvName
         Organization: !Ref OrgName
-          
+
   BackupRole:
     Type: AWS::IAM::Role
     Properties:
@@ -164,3 +213,9 @@ Resources:
         SelectionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-selection]]
         IamRoleArn: !GetAtt BackupRole.Arn
         Resources: !Ref BackupARNList
+        ListOfTags: !If
+          - UseTagInclusion
+          - - ConditionType: STRINGEQUALS
+              ConditionKey: !Ref TagName
+              ConditionValue: !Ref TagValue
+          - !Ref 'AWS::NoValue'
