@@ -196,7 +196,7 @@ Resources:
 # PDDTS Application
 ####
 
-  PDDTSDeployStack:
+  DeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
@@ -207,10 +207,25 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
-  PDDTSServerStack:
+  CacheStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        NodeType: cache.t3.micro
+        NumCacheClusters: 1
+        OrgName: !Ref OrgName
+        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: TRUE
+
+  ServerStack:
     DependsOn:
       - DBStack
-      - PayGateDeployStack
+      - DeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
@@ -218,6 +233,18 @@ Resources:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint:
           Fn::GetAtt:
@@ -239,66 +266,63 @@ Resources:
         LoadBalancerPriority: 100
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId: 
+        SharedSecretId:
           Fn::GetAtt:
             - DBStack
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
-  
-  # PDDTSSchedulerStack:
-  #   DependsOn:
-  #     - DBStack
-  #     - PDDTSServerStack
-  #   Condition: IsNotProd
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       StartScheduleExpression: !Ref StartScheduleExpression
-  #       StopScheduleExpression: !Ref StopScheduleExpression
-  #       UseFriendlyNames: FALSE
-  #       CodeDeployApplicationName:
-  #         Fn::GetAtt:
-  #           - PDDTSDeployStack
-  #           - Outputs.CodeDeployApplicationName
-  #       CodeDeployDeploymentGroupName:
-  #         Fn::GetAtt:
-  #           - PDDTSDeployStack
-  #           - Outputs.CodeDeployDeploymentGroupName
 
-###
-# Backup Section
-###
+  SchedulerStack:
+    DependsOn:
+      - DBStack
+      - ServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployDeploymentGroupName
 
-#   BackupStack:
-#     DependsOn: 
-#       - DBStack
-#       - PDDTSServerStack
-#     Type: AWS::CloudFormation::Stack
-#     Properties:
-#       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
-#       Parameters:
-#         Name: !Ref Name
-#         EnvName: !Ref EnvName
-#         OrgName: !Ref OrgName
-#         BackupARNList: !Join
-#           - ','
-#           - - Fn::GetAtt:
-#               - DBStack
-#               - Outputs.DBInstanceARN
-#             - Fn::GetAtt:
-#               - PDDTSServerStack
-#               - Outputs.AppServerEFSArn
+  BackupStack:
+    DependsOn: 
+      - DBStack
+      - ServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstanceARN
+            - Fn::GetAtt:
+              - ServerStack
+              - Outputs.AppServerEFSArn
+        BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
 
-# Outputs:
+Outputs:
 
-#   PDDTSDeploymentUserGroup:
-#     Description: Add the BitBucket user into this group
-#     Value:
-#       Fn::GetAtt:
-#         - PDDTSDeployStack
-#         - Outputs.DeploymentUserGroup
+  DeploymentUserGroup:
+    Description: Add the BitBucket user into this group
+    Value:
+      Fn::GetAtt:
+        - DeployStack
+        - Outputs.DeploymentUserGroup

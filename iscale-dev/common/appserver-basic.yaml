@@ -41,6 +41,12 @@ Metadata:
         Parameters:
           - ClientDomainName
       - Label:
+          default: Cache Settings
+        Parameters:
+          - CacheEndpoint
+          - CachePort
+          - CacheSecurityGroupId
+      - Label:
           default: Database Settings
         Parameters:
           - DatabaseEndpoint
@@ -60,12 +66,18 @@ Metadata:
         default: Environment Name
       AllowJustDomainName:
         default:  Allows the resource to be reachable just via domain name (e.g. https://foo.com)
+      CacheEndpoint:
+        default: Cache Endpoint
+      CachePort:
+        default: Cache Port
+      CacheSecurityGroupId:
+        default: Cache Security Group ID
       DatabaseEndpoint:
         default: Database Endpoint
       DatabasePort:
         default: Database Port
       DatabaseSecurityGroupId:
-        default: Database Security Group
+        default: Database Security Group ID
       ExternalEFSID:
         default: External EFS ID
       ExternalEFSSecurityGroup:
@@ -122,6 +134,20 @@ Parameters:
       - TRUE
       - FALSE
     Default: FALSE
+  CacheEndpoint:
+    Description: Cache Endpoint
+    Type: String
+    Default: ''
+  CachePort:
+    Description: Cache Port Number
+    Type: Number
+    MinValue: 1
+    MaxValue: 65535
+    Default: 6379
+  CacheSecurityGroupId:
+    Description: Cache Security Group
+    Type: String
+    Default: ''
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
     Type: String
@@ -238,6 +264,7 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasAllowJustDomainName: !Equals [!Ref AllowJustDomainName, TRUE]
+  HasCache: !And [!Not [!Equals [!Ref CacheEndpoint, '']], !Not [!Equals [!Ref CacheSecurityGroupId, '']]]
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
   HasLoadBalancerStackName: !Not [!Equals [!Ref LoadBalancerStackName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
@@ -256,7 +283,18 @@ Resources:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/appserver.yaml
-      
+
+  # When the setup has a cache, allow the cache access from the AppServer
+  AllowCacheAccessFromAppServer:
+    Condition: HasCache
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: TCP
+      GroupId: !Ref CacheSecurityGroupId
+      FromPort: !Ref CachePort
+      ToPort: !Ref CachePort
+      SourceSecurityGroupId: !GetAtt AppServerSecurityGroup.GroupId
+
 ####
 # AutoScaling Group 
 ####
@@ -300,6 +338,14 @@ Resources:
                     - !Ref SharedSecretId
                     - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
                   BUCKET_NAME: !Ref DataS3Bucket
+                  CACHE_HOST: !If
+                    - HasCache
+                    - !Ref CacheEndpoint
+                    - ''
+                  CACHE_PORT: !If
+                    - HasCache
+                    - !Ref DatabasePort
+                    - ''
                   DB_HOST: !Ref DatabaseEndpoint
                   DB_PORT: !Ref DatabasePort
               permissions: 0700

@@ -10,6 +10,7 @@ Metadata:
           - Name
           - OrgName
           - EnvName
+          - ExportOutputs
           - UseFriendlyNames
       - Label:
           default: Stack Configuration
@@ -23,6 +24,7 @@ Metadata:
           - NodeType
           - NumCacheClusters
           - AccessFromAnywhere
+          - SnapshotRetentionLimit
 
     ParameterLabels:
       Name:
@@ -31,6 +33,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      ExportOutputs:
+        default: Export Stack Outputs
       Port:
         default: Port Number
       NetworkStackName:
@@ -38,7 +42,9 @@ Metadata:
       NodeType:
         default: Cache Node Type
       NumCacheClusters:
-        default: Number of Cache Clusters
+        default: Number of cache Clusters
+      SnapshotRetentionLimit:
+        default: Number of daily backups to keep
       SNSStackName:
         default: SNS Topic Stack Name
       UseFriendlyNames:
@@ -65,6 +71,13 @@ Parameters:
       - Staging
       - Development
       - Test
+  ExportOutputs:
+    Description: Set to TRUE to export stack output
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: FALSE
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
@@ -91,6 +104,12 @@ Parameters:
     Default: 6379
     MinValue: 1
     MaxValue: 65535
+  SnapshotRetentionLimit:
+    Description: Number of daily snapshots to keep for backup
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 30
   SNSStackName:
     Description: The name of the cloudformation SNS stack
     Type: String
@@ -104,7 +123,6 @@ Parameters:
       - FALSE
     Default: TRUE
 
-
 Mappings: 
   Fn::Transform:
     Name: AWS::Include
@@ -116,6 +134,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasExportOutputs: !Equals [!Ref ExportOutputs, TRUE]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
   AllowAccessFromAnywhere: !Equals [!Ref AccessFromAnywhere, TRUE]
 
@@ -163,7 +182,7 @@ Resources:
             !Sub "${NetworkStackName}-InternalSubnetId2"  
 
   ElasticacheReplicationGroup:
-    DeletionPolicy: Delete
+    DeletionPolicy: Snapshot
     Type: AWS::ElastiCache::ReplicationGroup
     Properties:
       ReplicationGroupId: !If
@@ -178,6 +197,7 @@ Resources:
       Port: !Ref Port
       CacheSubnetGroupName: !Ref ElasticacheSubnetGroup
       SecurityGroupIds: [!GetAtt ElasticacheSecurityGroup.GroupId]
+      SnapshotRetentionLimit: !Ref SnapshotRetentionLimit
       NotificationTopicArn:
         Fn::ImportValue:
           !Sub "${SNSStackName}-TopicArn"
@@ -201,9 +221,31 @@ Outputs:
       Fn::GetAtt: [ ElasticacheReplicationGroup, PrimaryEndPoint.Address ]
   
   SecurityGroupId:
-    Description: The security group id of the Cache instance
+    Description: The security group id of the cache instance
     Value: !GetAtt ElasticacheSecurityGroup.GroupId
 
   ClusterPort:
     Description: The port number of the cache cluster
     Value: !Ref Port
+
+  ExportCachePrimaryEndpoint:
+    Condition: HasExportOutputs
+    Description: The DNS address of the primary read-write cache node.
+    Value:
+      Fn::GetAtt: [ ElasticacheReplicationGroup, PrimaryEndPoint.Address ]
+    Export:
+      Name: !Sub '${AWS::StackName}-CachePrimaryEndpoint'
+
+  ExportSecurityGroupId:
+    Condition: HasExportOutputs
+    Description: The security group id of the cache instance
+    Value: !GetAtt ElasticacheSecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroupId'
+
+  ExportClusterPort:
+    Condition: HasExportOutputs
+    Description: The port number of the cache cluster
+    Value: !Ref Port
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterPort'
