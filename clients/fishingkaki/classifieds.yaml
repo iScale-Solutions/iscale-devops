@@ -1,0 +1,400 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Fishingkaki Classifieds
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerCertificateArn
+          - LoadBalancerHostName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - BackEndInstanceAMI
+          - WebInstanceAMI
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      BackEndInstanceAMI:
+        default: Backend AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      LoadBalancerCertificateArn:
+        default: Load Balancer SSL Certificate ARN
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+      WebInstanceAMI:
+        default: Web AMI ID
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+    Default: classfds
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: fk
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 8
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  BackEndInstanceAMI:
+    Description: BackEnd AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-072b3398219313921 #Historical FK AMI
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com)
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: fishingkaki.net
+    MinLength: 1
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: classifieds
+    MaxLength: 12
+  LoadBalancerCertificateArn:
+    Description: SSL Certificate for the ELB
+    Type: String
+    Default: arn:aws:acm:us-west-2:482643916846:certificate/a7df2317-2025-4c33-918a-b48f6aa7a262
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: fishingkaki-stg-uw2-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: fishingkaki-stg-uw2-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+  WebInstanceAMI:
+    Description: Web AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-041ed892c3f9f56ea #Historical FK AMI
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  ELBStack:
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  DBStack:
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters: 
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+        EnableCPUCreditAlarm: !If [IsProd, true, false]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: aurora-mysql
+        EngineVersion: 5.7.mysql_aurora.2.07.2
+        Family: aurora-mysql5.7
+        InstanceType: db.t3.small
+        MasterUser: root
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
+  DBSchedulerStack:
+    DependsOn:
+      - DBStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBClusterARN
+
+####
+# Web Application
+####
+
+  WebDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: clas-web
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  WebServerStack:
+    DependsOn:
+      - DBStack
+      - WebDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters:
+        Name: clas-web
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterEndpointAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterPort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref WebInstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstanceSpotPrice: 0.5
+        InstancePort: 80
+        InstanceType: t3.medium
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: 100
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId: 
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+  
+  WebServerSchedulerStack:
+    DependsOn:
+      - DBStack
+      - WebServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - WebDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - WebDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+####
+# Backend
+####
+
+  BackEndDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: clas-bac
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  BackEndServerStack:
+    DependsOn:
+      - DBStack
+      - BackEndDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters:
+        Name: clas-bac
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterEndpointAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterPort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref BackEndInstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstanceSpotPrice: 0.5
+        InstancePort: 80
+        InstanceType: t3.medium
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: 101
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+
+  BackEndServerSchedulerStack:
+    DependsOn:
+      - DBStack
+      - BackEndServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - BackEndDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - BackEndDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+###
+# Backup Section
+###
+
+  BackupStack:
+    DependsOn: 
+      - DBStack
+      - WebServerStack
+      - BackEndServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBClusterARN
+            - Fn::GetAtt:
+              - WebServerStack
+              - Outputs.AppServerEFSArn
+            - Fn::GetAtt:
+              - BackEndServerStack
+              - Outputs.AppServerEFSArn
+
+Outputs:
+
+  WebDeploymentUserGroup:
+    Description: Add the BitBucket user into this group
+    Value:
+      Fn::GetAtt:
+        - WebDeployStack
+        - Outputs.DeploymentUserGroup
+
+  BackEndDeploymentUserGroup:
+    Description: Add the BitBucket user into this group
+    Value:
+      Fn::GetAtt:
+        - BackEndDeployStack
+        - Outputs.DeploymentUserGroup
