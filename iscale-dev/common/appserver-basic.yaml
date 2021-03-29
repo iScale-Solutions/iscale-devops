@@ -22,6 +22,10 @@ Metadata:
           - ExternalEFSID
           - ExternalEFSSecurityGroup
       - Label:
+          default: S3 Configuration
+        Parameters:
+          - ExternalS3BucketArn
+      - Label:
           default: Load Balancer Configuration
         Parameters:
           - LoadBalancerPriority
@@ -174,6 +178,10 @@ Parameters:
     Description: EFS Security Group (Only utilized when ExternalEFSID is provided)
     Type: String
     Default: ''
+  ExternalS3BucketArn:
+    Description: External shared S3 ARN (leave blank to create appserver specific S3)
+    Type: String
+    Default: ''
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
@@ -214,7 +222,6 @@ Parameters:
     Description: (Optional) Custom Hostname for load balancer URL
     Type: String
     Default: ''
-    MaxLength: 12
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
     Type: Number
@@ -274,7 +281,9 @@ Conditions:
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
   UsePrivateSubnet: !Equals [!Ref InstanceSubnet, Private]
   UseExternalEFS: !Not [!Equals [!Ref ExternalEFSID, '']]
+  UseExternalS3: !Not [!Equals [!Ref ExternalS3BucketArn, '']]
   UseInternalEFS: !Not [!Condition UseExternalEFS]
+  UseInternalS3: !Not [!Condition UseExternalS3]
 
 Resources:
   
@@ -322,6 +331,8 @@ Resources:
                   SECRET_ID=${SECRET_ID}
                   BASE_URL=https://${DOMAIN}/
                   BUCKET_NAME=${BUCKET_NAME}
+                  CACHE_HOST=${CACHE_HOST}
+                  CACHE_PORT=${CACHE_PORT}
                   DB_HOST=${DB_HOST}
                   DB_PORT=${DB_PORT}
                 - DOMAIN: !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
@@ -337,7 +348,10 @@ Resources:
                     - HasSharedSecretId
                     - !Ref SharedSecretId
                     - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-                  BUCKET_NAME: !Ref DataS3Bucket
+                  BUCKET_NAME: !If
+                    - UseInternalS3
+                    - !Ref DataS3Bucket
+                    - !Select [ 5, !Split [ ':', !Ref ExternalS3BucketArn]]
                   CACHE_HOST: !If
                     - HasCache
                     - !Ref CacheEndpoint
@@ -593,6 +607,13 @@ Outputs:
   AppServerSecurityGroup:
     Description: AppServer Security Group
     Value: !Ref AppServerSecurityGroup
+
+  AppServerS3BucketArn:
+    Description: EFS Security Group
+    Value: !If
+      - UseInternalS3
+      - !GetAtt [DataS3Bucket, Arn]
+      - !Ref ExternalS3BucketArn
 
   AppServerTargetGroup:
     Condition: HasLoadBalancerStackName
