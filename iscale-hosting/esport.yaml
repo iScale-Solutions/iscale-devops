@@ -1,0 +1,879 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: eSports Masterclass Deployment
+Parameters:
+  instanceType:
+    Description: The type of the Instance
+    Type: String
+    Default: t3.medium
+  GlobalDomainName:
+    Description: Global domain name
+    MinLength: '1'
+    Type: String
+    Default: esportmasterclass.com
+    ConstraintDescription: Domain Name cannot be empty
+  NetworkStack:
+    Description: Name of the Network Stack
+    MinLength: '1'
+    Type: String
+    ConstraintDescription: Network stack Name cannot be null
+  ELBStack:
+    Description: Name of the ELB Stack
+    MinLength: '1'
+    Type: String
+    ConstraintDescription: ELB stack Name cannot be null
+  AppServerAMI:
+    Description: Name of AppServer AMI
+    MinLength: '1'
+    Type: 'AWS::EC2::Image::Id'
+    ConstraintDescription: AppServer AMI cannot be null
+  AppServerAMIV2:
+    Description: Name of AppServerV2 AMI
+    MinLength: '1'
+    Type: 'AWS::EC2::Image::Id'
+    ConstraintDescription: AppServerV2 AMI cannot be null
+  PublicELBSecurityGroup:
+    Description: Name of the public ELB Security Group
+    MinLength: '1'
+    Type: String
+    ConstraintDescription: AppServer AMI cannot be null
+  name:
+    Description: Name of the client
+    Type: String
+    Default: esport
+  environment:
+    Description: 'The environment (production, staging, development, etc)'
+    Type: String
+    Default: production
+    AllowedValues:
+      - production
+      - staging
+      - development
+  envShort:
+    Description: 'The environment (prd, stg, dev, etc)'
+    Type: String
+    Default: prd
+    AllowedValues:
+      - prd
+      - stg
+      - dev
+  organization:
+    Description: The organization (iScale)
+    Type: String
+    Default: iscale
+  regionShort:
+    Description: >-
+      Region where the the resource is hosted (eu1 - EU-Central-1, uw2 -
+      US-West-2, uw1 - US-West-1)
+    Type: String
+    Default: uw2
+  snsTopicStack:
+    Description: name of the SNS Topic Stack
+    Type: String
+  SSLCertificateArn:
+    Description: ELB SSL Certificate ARN
+    Type: String
+
+
+Resources:
+
+  HostedZone:
+    Type: 'AWS::Route53::HostedZone'
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join 
+          - ' '
+          - - Hosted Zone for
+            - !Ref GlobalDomainName
+      Name: !Ref GlobalDomainName
+
+  DomainMXRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn: HostedZone
+    Properties:
+      HostedZoneName: !Join 
+        - ''
+        - - !Ref GlobalDomainName
+          - .
+      Comment: MX Record
+      Name: !Ref GlobalDomainName
+      Type: MX
+      TTL: '3600'
+      ResourceRecords:
+        - 0 esportmasterclass-com.mail.protection.outlook.com.
+  AutoDiscoverCNAMERecord:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneName: !Join 
+        - ''
+        - - !Ref GlobalDomainName
+          - .
+      Comment: Autodiscover CNAME record
+      Name: !Join 
+        - .
+        - - autodiscover
+          - !Ref GlobalDomainName
+      Type: CNAME
+      TTL: '3600'
+      ResourceRecords:
+        - autodiscover.outlook.com.
+  SipCNAMERecord:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneName: !Join 
+        - ''
+        - - !Ref GlobalDomainName
+          - .
+      Comment: Sip CNAME record
+      Name: !Join 
+        - .
+        - - sip
+          - !Ref GlobalDomainName
+      Type: CNAME
+      TTL: '3600'
+      ResourceRecords:
+        - sipdir.online.lync.com.
+  LyncDiscoverCNAMERecord:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneName: !Join 
+        - ''
+        - - !Ref GlobalDomainName
+          - .
+      Comment: LyncDiscover CNAME record
+      Name: !Join 
+        - .
+        - - lyncdiscover
+          - !Ref GlobalDomainName
+      Type: CNAME
+      TTL: '3600'
+      ResourceRecords:
+        - webdir.online.lync.com.
+  EnterpriseRegistrationCNAMERecord:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneName: !Join 
+        - ''
+        - - !Ref GlobalDomainName
+          - .
+      Comment: EnterpriseRegistration CNAME record
+      Name: !Join 
+        - .
+        - - enterpriseregistration
+          - !Ref GlobalDomainName
+      Type: CNAME
+      TTL: '3600'
+      ResourceRecords:
+        - enterpriseregistration.windows.net.
+  EnterpriseEnrollmentCNAMERecord:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneName: !Join 
+        - ''
+        - - !Ref GlobalDomainName
+          - .
+      Comment: EnterpriseEnrollment CNAME record
+      Name: !Join 
+        - .
+        - - enterpriseenrollment
+          - !Ref GlobalDomainName
+      Type: CNAME
+      TTL: '3600'
+      ResourceRecords:
+        - enterpriseenrollment.manage.windows.com.
+  DomainTxtRecord:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneName: !Join 
+        - ''
+        - - !Ref GlobalDomainName
+          - .
+      Comment: Outlook verification TXT record
+      Name: !Join 
+        - .
+        - - '@'
+          - !Ref GlobalDomainName
+      Type: TXT
+      TTL: '3600'
+      ResourceRecords:
+        - '"v=spf1 include:spf.protection.outlook.com -all"'
+  SipTlsSRVRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn: HostedZone
+    Properties:
+      HostedZoneName: !Join 
+        - ''
+        - - !Ref GlobalDomainName
+          - .
+      Comment: _sip.tls SRV Record
+      Name: !Join 
+        - .
+        - - _sip.tls
+          - !Ref GlobalDomainName
+      Type: SRV
+      TTL: '3600'
+      ResourceRecords:
+        - 100 1 443 sipdir.online.lync.com.
+  SipFedSRVRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn: HostedZone
+    Properties:
+      HostedZoneName: !Join 
+        - ''
+        - - !Ref GlobalDomainName
+          - .
+      Comment: _sipfederationtls._tcp SRV Record
+      Name: !Join 
+        - .
+        - - _sipfederationtls._tcp
+          - !Ref GlobalDomainName
+      Type: SRV
+      TTL: '3600'
+      ResourceRecords:
+        - 100 1 5061 sipfed.online.lync.com.
+  AppServerTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: '10'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: '2'
+      HealthyThresholdCount: '2'
+      UnhealthyThresholdCount: '3'
+      HealthCheckPath: /health.php
+      Matcher:
+        HttpCode: '200'
+      Port: '80'
+      Protocol: HTTP
+      TargetGroupAttributes: []
+      Targets:
+        - Id: !Ref AppServerInstance
+          Port: 80
+      TargetType: instance
+      VpcId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-VPC'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ' '
+            - - !ImportValue 
+                'Fn::Sub': '${NetworkStack}-SetupName'
+              - eSport AppServer Target Group
+  AppServerTargetGroupV2:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: '10'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: '2'
+      HealthyThresholdCount: '2'
+      UnhealthyThresholdCount: '3'
+      HealthCheckPath: /health.php
+      Matcher:
+        HttpCode: '200'
+      Port: '80'
+      Protocol: HTTP
+      TargetGroupAttributes: []
+      VpcId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-VPC'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ' '
+            - - !ImportValue 
+                'Fn::Sub': '${NetworkStack}-SetupName'
+              - eSport AppServer Target Group V2
+  HTTPListenerRuleV2:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref AppServerTargetGroupV2
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Join 
+              - ''
+              - - test.
+                - !Ref GlobalDomainName
+      ListenerArn: !ImportValue 
+        'Fn::Sub': '${ELBStack}-HTTPListener'
+      Priority: 101
+  DefaultListenerCertificate:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerCertificate'
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref SSLCertificateArn
+      ListenerArn: !ImportValue 
+        'Fn::Sub': '${ELBStack}-SSLListener'
+  HTTPListenerRule:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref AppServerTargetGroup
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Join 
+              - ''
+              - - '*.'
+                - !Ref GlobalDomainName
+      ListenerArn: !ImportValue 
+        'Fn::Sub': '${ELBStack}-HTTPListener'
+      Priority: 801
+  HTTPListenerRuleDomain:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref AppServerTargetGroup
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref GlobalDomainName
+      ListenerArn: !ImportValue 
+        'Fn::Sub': '${ELBStack}-HTTPListener'
+      Priority: 802
+  SSLListenerRule:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref AppServerTargetGroup
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Join 
+              - ''
+              - - '*.'
+                - !Ref GlobalDomainName
+      ListenerArn: !ImportValue 
+        'Fn::Sub': '${ELBStack}-SSLListener'
+      Priority: 801
+  SSLListenerRuleV2:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref AppServerTargetGroupV2
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Join 
+              - ''
+              - - test.
+                - !Ref GlobalDomainName
+      ListenerArn: !ImportValue 
+        'Fn::Sub': '${ELBStack}-SSLListener'
+      Priority: 101
+  SSLListenerRuleDomain:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref AppServerTargetGroup
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref GlobalDomainName
+      ListenerArn: !ImportValue 
+        'Fn::Sub': '${ELBStack}-SSLListener'
+      Priority: 802
+  AppServerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+  AllowAccessToS3:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: AllowAccessToS3
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:Get*'
+              - 's3:List*'
+            Resource: '*'
+      Roles:
+        - !Ref AppServerRole
+  GetSecretValuePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: GetSecretValue
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'secretsmanager:GetSecretValue'
+            Resource: '*'
+      Roles:
+        - !Ref AppServerRole
+  AllowSendAWSLogsPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: AllowSendAWSLogs
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:DescribeLogGroups'
+              - 'logs:DescribeLogStreams'
+              - 'logs:PutLogEvents'
+            Resource: '*'
+      Roles:
+        - !Ref AppServerRole
+  AllowEC2InfoPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: AllowAccessToEC2Info
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:DescribeInstanceStatus'
+              - 'ec2:DescribeTags'
+            Resource: '*'
+      Roles:
+        - !Ref AppServerRole
+  CloudwatchMetricsPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: CloudwatchMetricsPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'cloudwatch:PutMetricData'
+              - 'cloudwatch:GetMetricStatistics'
+              - 'cloudwatch:ListMetrics'
+            Resource: '*'
+      Roles:
+        - !Ref AppServerRole
+  AppServerSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-VPC'
+      GroupDescription: !Join 
+        - ' '
+        - - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-SetupName'
+          - eSport AppServer Security Group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          SourceSecurityGroupId: !ImportValue 
+            'Fn::Sub': '${NetworkStack}-BastionSecurityGroup'
+          Description: SSH Access from Bastion
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+          Description: SSH Access from the world
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref PublicELBSecurityGroup
+          Description: HTTP Access from Public ELB
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ' '
+            - - !ImportValue 
+                'Fn::Sub': '${NetworkStack}-SetupName'
+              - eSport AppServer Security Group
+  AppServerInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref AppServerRole
+  DefaultLaunchConfiguration:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      IamInstanceProfile: !Ref AppServerInstanceProfile
+      ImageId: !Ref AppServerAMIV2
+      InstanceMonitoring: true
+      InstanceType: !Ref instanceType
+      KeyName: kmelchor
+      AssociatePublicIpAddress: true
+      SecurityGroups:
+        - !Ref AppServerSecurityGroup
+      UserData: !Base64 
+        'Fn::Join':
+          - ''
+          - - |
+              #!/bin/bash
+            - |
+              yum -y update
+            - |
+              yum -y install jq
+            - |
+              yum -y install ruby
+            - |
+              yum -y install wget
+            - |
+              cd /home/ec2-user
+            - 'wget https://aws-codedeploy-'
+            - !Ref 'AWS::Region'
+            - |
+              .s3.amazonaws.com/latest/install
+            - |
+              chmod +x ./install
+            - |
+              ./install auto
+  AppServerInstance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: !Ref AppServerAMI
+      KeyName: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-InstanceKeyName'
+      InstanceType: !Ref instanceType
+      IamInstanceProfile: !Ref AppServerInstanceProfile
+      DisableApiTermination: false
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: 'true'
+          DeviceIndex: '0'
+          GroupSet:
+            - !Ref AppServerSecurityGroup
+          SubnetId: !ImportValue 
+            'Fn::Sub': '${NetworkStack}-PublicSubnetAZ1'
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ' '
+            - - !ImportValue 
+                'Fn::Sub': '${NetworkStack}-SetupName'
+              - eSport AppServer Instance
+        - Key: Retention
+          Value: '60'
+        - Key: LambdaBackupConfiguration
+          Value: '30,8,12,2'
+  EFS:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      Encrypted: 'true'
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+      FileSystemTags:
+        - Key: Name
+          Value: !Join 
+            - '-'
+            - - !Ref organization
+              - !Ref envShort
+              - !Ref regionShort
+              - !Ref name
+              - esport
+        - Key: Environment
+          Value: !Ref environment
+        - Key: Organization
+          Value: !Ref organization
+  EFSSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-VPC'
+      GroupDescription: !Join 
+        - ' '
+        - - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-SetupName'
+          - eSport EFS Security Group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '2049'
+          ToPort: '2049'
+          SourceSecurityGroupId: !Ref AppServerSecurityGroup
+          Description: EFS Access from AppServer
+      Tags:
+        - Key: Name
+          Value: !Join 
+            - ' '
+            - - !ImportValue 
+                'Fn::Sub': '${NetworkStack}-SetupName'
+              - eSport EFS Security Group
+  EFSMountTargetAZ1:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !Ref EFS
+      SubnetId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-PrivateSubnetAZ1'
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+  EFSMountTargetAZ2:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !Ref EFS
+      SubnetId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-PrivateSubnetAZ2'
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+  EFSRoute53Record:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      HostedZoneId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-LocalDNSHostedZoneId'
+      Comment: Local DNS for DB
+      Name: !Join 
+        - ''
+        - - efs.esport.
+          - !ImportValue 
+            'Fn::Sub': '${NetworkStack}-LocalDomainName'
+      Type: CNAME
+      TTL: '3600'
+      ResourceRecords:
+        - !Join 
+          - .
+          - - !Ref EFS
+            - efs
+            - !Ref 'AWS::Region'
+            - amazonaws.com
+  WWWRecordV2:
+    Type: 'AWS::Route53::RecordSetGroup'
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: WWW Record
+      RecordSets:
+        - Name: !Join 
+            - ''
+            - - test.
+              - !Ref GlobalDomainName
+              - .
+          Type: A
+          AliasTarget:
+            HostedZoneId: !ImportValue 
+              'Fn::Sub': '${ELBStack}-PublicELBCanonicalHostedZoneID'
+            DNSName: !ImportValue 
+              'Fn::Sub': '${ELBStack}-PublicELBDNS'
+  WWWRecord:
+    Type: 'AWS::Route53::RecordSetGroup'
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: WWW Record
+      RecordSets:
+        - Name: !Join 
+            - ''
+            - - www.
+              - !Ref GlobalDomainName
+              - .
+          Type: A
+          AliasTarget:
+            HostedZoneId: !ImportValue 
+              'Fn::Sub': '${ELBStack}-PublicELBCanonicalHostedZoneID'
+            DNSName: !ImportValue 
+              'Fn::Sub': '${ELBStack}-PublicELBDNS'
+  NoWWWRecord:
+    Type: 'AWS::Route53::RecordSetGroup'
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: No WWW Record
+      RecordSets:
+        - Name: !Ref GlobalDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId: !ImportValue 
+              'Fn::Sub': '${ELBStack}-PublicELBCanonicalHostedZoneID'
+            DNSName: !ImportValue 
+              'Fn::Sub': '${ELBStack}-PublicELBDNS'
+  cloudWatchAlarmCPUUtilization:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: !Join 
+        - '-'
+        - - !Ref organization
+          - !Ref envShort
+          - !Ref regionShort
+          - !Ref name
+          - cpu-utilization
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Average
+      Threshold: '80'
+      AlarmActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      OKActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref AppServerInstance
+  cloudWatchAlarmStatusChecks:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: !Join 
+        - '-'
+        - - !Ref organization
+          - !Ref envShort
+          - !Ref regionShort
+          - !Ref name
+          - status-checks
+      MetricName: StatusCheckFailed
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Minimum
+      Threshold: '1'
+      AlarmActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      OKActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref AppServerInstance
+  cloudWatchAlarmCPUCreditBalance:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: !Join 
+        - '-'
+        - - !Ref organization
+          - !Ref envShort
+          - !Ref regionShort
+          - !Ref name
+          - cpu-credit-balance
+      MetricName: CPUCreditBalance
+      Namespace: AWS/EC2
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Minimum
+      Threshold: '24'
+      AlarmActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      OKActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref AppServerInstance
+  cloudWatchAlarmUnhealthyHostCount:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: !Join 
+        - '-'
+        - - !Ref organization
+          - !Ref envShort
+          - !Ref regionShort
+          - !Ref name
+          - unhealthy-host-count
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '60'
+      Statistic: Maximum
+      Threshold: '1'
+      AlarmActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      OKActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !ImportValue 
+            'Fn::Sub': '${ELBStack}-LoadBalancerFullName'
+        - Name: TargetGroup
+          Value: !GetAtt 
+            - AppServerTargetGroup
+            - TargetGroupFullName
+  cloudWatchAlarmDiskSpaceUtilization:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: !Join 
+        - '-'
+        - - !Ref organization
+          - !Ref envShort
+          - !Ref regionShort
+          - !Ref name
+          - disk-space-utilization
+      MetricName: DiskSpaceUtilization
+      Namespace: System/Linux
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '60'
+      Statistic: Maximum
+      Threshold: '86'
+      AlarmActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      OKActions:
+        - !ImportValue 
+          'Fn::Sub': '${snsTopicStack}-Arn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref AppServerInstance
+        - Name: MountPath
+          Value: /
+        - Name: Filesystem
+          Value: /dev/nvme0n1p1
+  
+  DefaultSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Join 
+        - '-'
+        - - !Ref organization
+          - !Ref envShort
+          - !Ref regionShort
+          - !Ref name
+          - parameters
+
+  IannisSecGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Temp
+      VpcId: !ImportValue 
+        'Fn::Sub': '${NetworkStack}-VPC'
+
+Outputs:
+  
+  Name:
+    Description: Unique name/identifier
+    Value: !Join 
+      - '-'
+      - - !Ref organization
+        - !Ref envShort
+        - !Ref regionShort
+        - !Ref name
+    Export:
+      Name: !Sub '${AWS::StackName}-Name'
+  
+  TargetGroupV2FullName:
+    Description: The Target Group V2 Full Name
+    Value: !GetAtt 
+      - AppServerTargetGroupV2
+      - TargetGroupFullName
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroupV2FullName'
+  
+  TargetGroupName:
+    Description: The Target Group V2 Name
+    Value: !GetAtt 
+      - AppServerTargetGroupV2
+      - TargetGroupName
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroupName'
