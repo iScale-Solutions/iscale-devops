@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for Le Cellier
+
+Parameters:
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: lecellier
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+  DNSSECKey:
+    Description: Enter the KMS key (from us-east-1) for DNSSSec (optional)
+    Type: String
+    Default: arn:aws:kms:us-east-1:383761724374:key/cdcd5739-9c6f-41e1-b8f6-010e2ab3182d
+  DomainName:
+    Description: The domain name (e.g. example.com).
+    Type: String
+    Default: lecellier-wines.com
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasDNSSEC: !Not [!Equals [!Ref DNSSECKey, ""]]
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join [' ',[Hosted Zone for, !Ref DomainName]]
+      Name: !Ref DomainName
+      HostedZoneTags:
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+        - Key: Organization
+          Value: !Ref OrgName
+
+  DefaultDomainKeyTXTRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.', [default, _domainkey, !Ref DomainName]]
+      ResourceRecords:
+        - '"v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4+siH/dhvqpiUs5nhiytBh+VPbjgGfITyGMtM/1rTeyTkofi3QC7OOTj7HevEi8+tXfSID16UZN3eVh5Ix73RdLHLEglvz8Keh7Sq8AF00b0LdsZ+fimP9zJuaFQvDzf9wEPrtUROV/cjINZB9xVF/KEm/" "znhiKR566O2ssIYPqUoxZl0jFEfBbpBKg+EhiZePipqZ9QyTlcPhfdUu868rz3+btHXbJ3qjTq5OhUDuZXi60ggkyehacm8oinvY4yqnPnhZp8HDH1fUuJs/Np8W5IVculbFmL2kWYoipu4QNc4Uf0pQ69ATVJfU5OX91vrxeETFQijQrNr/O78oE/xQIDAQAB;"'
+      TTL: 14400
+      Comment: !Join [' ', ['Domain TXT verification for', !Ref DomainName]]
+      Type: TXT
+
+  DomainTXTRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      ResourceRecords:
+        - '"v=spf1 a mx include:websitewelcome.com ~all"'
+      TTL: 14400
+      Comment: !Join [' ', ['Domain TXT verification for', !Ref DomainName]]
+      Type: TXT
+
+  LocalhostRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.', [localhost, !Ref DomainName]]
+      ResourceRecords:
+        - 127.0.0.1
+      TTL: 14400
+      Type: A
+
+  MailRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[mail, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - ASPMX.L.GOOGLE.COM
+
+  SESDKIMSGRecord1:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[ptii7uqy2oqfpnhcxydd3siel3nxuqlw._domainkey, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - ptii7uqy2oqfpnhcxydd3siel3nxuqlw.dkim.amazonses.com
+
+  SESDKIMSGRecord2:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[svk5pexhjqd7iahqqnjqtckho4ppwzwr._domainkey, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - svk5pexhjqd7iahqqnjqtckho4ppwzwr.dkim.amazonses.com
+
+  SESDKIMSGRecord3:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[xmo7sgf2lrh7wbsdllez6arhzs677bhm._domainkey, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - xmo7sgf2lrh7wbsdllez6arhzs677bhm.dkim.amazonses.com
+
+  SESDomainVerificationRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId : !Ref HostedZone
+      Name: !Join ['.',[_amazonses, !Ref DomainName]]
+      ResourceRecords:
+        - '"X560zfDAxl4VSsxgEsA++Vr+bUW53Gwwb19XwEI2S9k="'
+      TTL: 14400
+      Type: TXT
+      Comment: SES Domain Verification
+
+  ShopRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[shop, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - shops.myshopify.com
+
+  WebmailRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[webmail, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - mail.google.com
+
+  WildcardSSLValidationRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[_e8f718726886948c3099ec328c764242, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - _b6c28a71cd06d559cfedd0e42240a417.acm-validations.aws.
+
+  ###
+  # DNSSEC
+  ###
+
+  # HostedZoneDNSSECSigningKey:
+  #   Condition: HasDNSSEC
+  #   Type: AWS::Route53::KeySigningKey
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     KeyManagementServiceArn: !Ref DNSSECKey
+  #     Name: key_signing_key
+  #     Status: ACTIVE
+
+  # HostedZoneDNSSEC:
+  #   Condition: HasDNSSEC
+  #   DependsOn: HostedZoneDNSSECSigningKey
+  #   Type: AWS::Route53::DNSSEC
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
