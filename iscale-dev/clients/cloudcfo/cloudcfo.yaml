@@ -80,10 +80,10 @@ Parameters:
     Type: String
     Default: Staging
     AllowedValues:
-      - Production
-      - Staging
-      - Development
-      - Test
+      - Production #Prod
+      - Staging #Pre-production
+      - Development #Regular day to day commit / deplay
+      - Test #WFH Setup with a simple S3 bucket and an access key for it
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
     Type: String
@@ -151,11 +151,12 @@ Conditions:
       
 Resources:
 
-  DBStack: 
+  DBStack:
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Condition: IsNotTest
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
         AllocatedStorage: 20 #Gb
@@ -175,34 +176,36 @@ Resources:
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
-  DeployStack: 
+  DeployStack:
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Condition: IsNotTest
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-  
-  AppServerStack: 
-    DependsOn: 
+
+  AppServerStack:
+    DependsOn:
       - DBStack
       - DeployStack
     Type: AWS::CloudFormation::Stack
+    Condition: IsNotTest
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-node.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint: 
+        DatabaseEndpoint:
           Fn::GetAtt:
             - DBStack
             - Outputs.DBInstanceAddress
-        DatabasePort: 
+        DatabasePort:
           Fn::GetAtt:
             - DBStack
             - Outputs.DBInstancePort
@@ -222,7 +225,8 @@ Resources:
         UseFriendlyNames: TRUE
 
   BackupStack:
-    DependsOn: 
+    Condition: IsNotTest
+    DependsOn:
       - DBStack
       - AppServerStack
     Type: AWS::CloudFormation::Stack
@@ -242,10 +246,10 @@ Resources:
               - Outputs.AppServerEFSArn
 
   SchedulerStack: 
-    DependsOn: 
+    DependsOn:
       - DBStack
       - AppServerStack
-    Condition: IsNotProd
+    Condition: IsDevOrStaging
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -292,11 +296,9 @@ Resources:
         ErrorDocument: index.html
         IndexDocument: index.html
       Tags:
-        -
-          Key: Name
+        - Key: Name
           Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance]]
-        -
-          Key: Organization
+        - Key: Organization
           Value: !Ref OrgName
 
   MaintenanceBucketPolicy:
@@ -310,8 +312,8 @@ Resources:
           - Sid: PublicReadForMaintenance
             Effect: Allow
             Principal: '*'
-            Action: 's3:GetObject'
-            Resource: !Join ["/",[!GetAtt MaintenanceBucket.Arn,"*"]]
+            Action: s3:GetObject
+            Resource: !Join ['/', [!GetAtt MaintenanceBucket.Arn, '*' ]]
 
 ####
 # CloudFront Section
@@ -322,7 +324,7 @@ Resources:
     Condition: IsProd
     Properties:
       CloudFrontOriginAccessIdentityConfig:
-        Comment: "CloudFront Access to the S3 static origin"
+        Comment: CloudFront Access to the S3 static origin
 
   MaintenanceWebsiteCloudFront:
     Type: AWS::CloudFront::Distribution
@@ -333,13 +335,13 @@ Resources:
         - DomainName: !GetAtt [MaintenanceBucket, DomainName]
           Id: S3MaintenanceBucketOrigin
           S3OriginConfig:
-            OriginAccessIdentity: !Join ["", ['origin-access-identity/cloudfront/', !Ref CloudFrontOriginAccessIdentity]]
-        Enabled: 'true'
-        Comment: !Join [" ", [ "Maintenance page for", !Ref ClientDomainName]]
+            OriginAccessIdentity: !Join ['', ['origin-access-identity/cloudfront/', !Ref CloudFrontOriginAccessIdentity]]
+        Enabled: true
+        Comment: !Join [' ', [ 'Maintenance page for', !Ref ClientDomainName]]
         HttpVersion: http2
         DefaultRootObject: index.html
         Aliases:
-        - !Join [".", ["maintenance", !Ref ClientDomainName]]
+        - !Join ['.', ['maintenance', !Ref ClientDomainName]]
         DefaultCacheBehavior:
           AllowedMethods:
             - GET
@@ -364,16 +366,85 @@ Resources:
     Condition: IsProd
     Properties:
       HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
-      Name: !Join [".", ["maintenance", !Ref ClientDomainName]]
+      Name: !Join ['.', ['maintenance', !Ref ClientDomainName]]
       Type: CNAME
       TTL: 300
-      Comment: "Maintenance Site"
+      Comment: Maintenance Site
       ResourceRecords:
         - Fn::GetAtt:
           - MaintenanceWebsiteCloudFront
           - DomainName
 
-# Outputs:
+###
+# Dev S3 bucket and associated account
+###
+
+  TestBucket:
+    Type: AWS::S3::Bucket
+    Condition: IsTest
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], test-bucket]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  TestBucketUser:
+    Condition: IsTest
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, test-bucket-access]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Join ['/', [!GetAtt [TestBucket, Arn], '*']]
+                  - !GetAtt [TestBucket, Arn]
+  
+  TestBucketUserKey:
+    Condition: IsTest
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName:
+        Ref: TestBucketUser
+
+Outputs:
+
+  TestBucket:
+    Condition: IsTest
+    Description: Test Bucket
+    Value: !Ref TestBucket
+  
+  TestBucketUserAccessKeyId:
+    Condition: IsTest
+    Description: Access Key Id for the S3 bucket
+    Value: !Ref TestBucketUserKey
+  
+  StaticWebsiteUserAccessKeySecret:
+    Condition: IsTest
+    Description: Secret Key for the S3 bucket
+    Value: !GetAtt [TestBucketUserKey, SecretAccessKey]
+
 #   DeploymentUserGroup:
 #     Description: Add the BitBucket user into this group
 #     Value: 
