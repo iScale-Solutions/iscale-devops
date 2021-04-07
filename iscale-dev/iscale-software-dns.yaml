@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  This cloudformation template provisions DNS records for iscale-software
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DomainName:
+    Description: The domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+    Default: iscale-software.com
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join [' ',[Hosted Zone for, !Ref DomainName]]
+      Name: !Ref DomainName
+      HostedZoneTags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], iscale-venture]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  SPFRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      ResourceRecords: 
+        - '"v=spf1 include:_spf.google.com ~all"'
+      TTL: 14400
+      Type: TXT
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], spf]]
+
+  AmazonSESRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[_amazonses, !Ref DomainName]]
+      ResourceRecords: 
+        - '"DNogfA2ANoIYSnMzkCpktt3qxBdJWa13Im9iipUmg+M="'
+      TTL: 14400
+      Type: TXT
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], amazon-ses]]
+
+  DKIMRecord1:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[dwfrkdx566uxcewp5a6exlhb2vpb6f5g._domainkey, !Ref DomainName]]
+      ResourceRecords: 
+        - dwfrkdx566uxcewp5a6exlhb2vpb6f5g.dkim.amazonses.com
+      TTL: 14400
+      Type: CNAME
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], dkim1]]
+
+  DKIMRecord2:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[3hmxfh5w2p2dx7fjidw52vdskuaekj7k._domainkey, !Ref DomainName]]
+      ResourceRecords: 
+        - 3hmxfh5w2p2dx7fjidw52vdskuaekj7k.dkim.amazonses.com
+      TTL: 14400
+      Type: CNAME
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], dkim2]]
+
+  DKIMRecord3:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[alq5lof53ucgqt34hgw4ecaca45b7krz._domainkey, !Ref DomainName]]
+      ResourceRecords: 
+        - alq5lof53ucgqt34hgw4ecaca45b7krz.dkim.amazonses.com
+      TTL: 14400
+      Type: CNAME
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], dkim3]]
+
+  LetsEncryptWildcardRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[_acme-challenge, !Ref DomainName]]
+      ResourceRecords: 
+        - '"eUihsvo4q43IGgNWUW_xxQTosUGpe_dxRlEFv1-bzUM"'
+      TTL: 14400
+      Type: TXT
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], letsencrypt-wildcard]]
+
+  WildcardSSLValidationRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[_1937d94f3a0cb4f8f4914aac2eef234b, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - _a9764940c721d9f9c9030747a0d08b63.vhzmpjdqfx.acm-validations.aws.
