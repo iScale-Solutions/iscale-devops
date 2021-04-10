@@ -1,0 +1,634 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DEV and PROD PDDTS AWS VPC - Private and Public subnets'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: PDDTS Network Configuration
+        Parameters:
+          - VpcBlock
+          - PDDTSPublicSubnet01Block
+          - PDDTSPublicSubnet02Block
+          - PDDTSPublicSubnet03Block
+          - VPNPublicSubnet01Block
+          - PDDTSPrivateSubnet01Block
+          - PDDTSPrivateSubnet02Block
+          - PDDTSPrivateSubnet03Block
+          - PDDTSDBPrivateSubnet01Block
+          - PDDTSDBPrivateSubnet02Block
+          - PDDTSDBPrivateSubnet03Block
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: pddts-vpc
+
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+
+  VpcBlock:
+    Type: String
+    Default: 10.5.0.0/16
+    Description: VPC Block PROD PDDTS
+
+  PDDTSPublicSubnet01Block:
+    Type: String
+    Default: 10.5.1.0/24
+    Description: CidrBlock for PROD environment public subnet 01 within the VPC
+
+  PDDTSPublicSubnet02Block:
+    Type: String
+    Default: 10.5.2.0/24
+    Description: CidrBlock for PROD PDDTS public subnet 02 within the VPC
+
+  PDDTSPublicSubnet03Block:
+    Type: String
+    Default: 10.5.3.0/24
+    Description: CidrBlock for PROD PDDTS public subnet 03 within the VPC
+
+  VPNPublicSubnet01Block:
+    Type: String
+    Default: 10.5.4.0/24
+    Description: CidrBlock for VPN connection to BSP network
+
+  PDDTSPrivateSubnet01Block:
+    Type: String
+    Default: 10.5.11.0/24
+    Description: CidrBlock for PROD PDDTS private subnet 01 within the VPC
+
+  PDDTSPrivateSubnet02Block:
+    Type: String
+    Default: 10.5.12.0/24
+    Description: CidrBlock for PROD PDDTS private subnet 02 within the VPC
+
+  PDDTSPrivateSubnet03Block:
+    Type: String
+    Default: 10.5.13.0/24
+    Description: CidrBlock for PROD PDDTS private subnet 03 within the VPC
+
+  PDDTSDBPrivateSubnet01Block:
+    Type: String
+    Default: 10.5.21.0/24
+    Description: CidrBlock for PROD PDDTS db private subnet 01 within the VPC
+
+  PDDTSDBPrivateSubnet02Block:
+    Type: String
+    Default: 10.5.22.0/24
+    Description: CidrBlock for PROD PDDTS db private subnet 02 within the VPC
+
+  PDDTSDBPrivateSubnet03Block:
+    Type: String
+    Default: 10.5.23.0/24
+    Description: CidrBlock for PROD PDDTS db private subnet 03 within the VPC
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: pddts-igw
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: pddts-public-route-table
+      - Key: Network
+        Value: Public
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PrivateRouteTable01:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: pddts-private-route-table-1
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PrivateRouteTable02:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: pddts-private-route-table-2
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PrivateRouteTable03:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: pddts-private-route-table-3
+      - Key: Network
+        Value: Private03
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PublicRoute:
+    DependsOn: VPCGatewayAttachment
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRoute01:
+    DependsOn:
+    - VPCGatewayAttachment
+    - PDDTSNatGateway01
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable01
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref PDDTSNatGateway01
+
+  PrivateRoute02:
+    DependsOn:
+    - VPCGatewayAttachment
+    - PDDTSNatGateway02
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable02
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref PDDTSNatGateway02
+
+  PrivateRoute03:
+    DependsOn:
+    - VPCGatewayAttachment
+    - PDDTSNatGateway03
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable03
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref PDDTSNatGateway03
+
+  PDDTSNatGateway01:
+    DependsOn:
+    - NatGatewayEIP1
+    - PublicSubnet01
+    - VPCGatewayAttachment
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt 'NatGatewayEIP1.AllocationId'
+      SubnetId: !Ref PublicSubnet01
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-nat-gw-1
+
+  PDDTSNatGateway02:
+    DependsOn:
+    - NatGatewayEIP2
+    - PublicSubnet02
+    - VPCGatewayAttachment
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt 'NatGatewayEIP2.AllocationId'
+      SubnetId: !Ref PublicSubnet02
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-nat-gw-2
+
+  PDDTSNatGateway03:
+    DependsOn:
+    - NatGatewayEIP3
+    - PublicSubnet03
+    - VPCGatewayAttachment
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt 'NatGatewayEIP3.AllocationId'
+      SubnetId: !Ref PublicSubnet03
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-nat-gw-3
+
+  NatGatewayEIP1:
+    DependsOn:
+    - VPCGatewayAttachment
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+      - Key: Name
+        Value: pddts-nat-gw-eip-1
+
+  NatGatewayEIP2:
+    DependsOn:
+    - VPCGatewayAttachment
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+      - Key: Name
+        Value: pddts-nat-gw-eip-2
+
+  NatGatewayEIP3:
+    DependsOn:
+    - VPCGatewayAttachment
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+      - Key: Name
+        Value: pddts-nat-gw-eip-3
+
+  PublicSubnet01:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Subnet 01
+    Properties:
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PDDTSPublicSubnet01Block
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-public-subnet-1
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PublicSubnet02:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Subnet 02
+    Properties:
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PDDTSPublicSubnet02Block
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-public-subnet-2
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PublicSubnet03:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Subnet 03
+    Properties:
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:
+        Fn::Select:
+        - 2
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PDDTSPublicSubnet03Block
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-public-subnet-3
+      - Key: Environment
+        Value: !Ref EnvName
+
+  VPNPublicSubnet01:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: VPN Subnet 01
+    Properties:
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: VPNPublicSubnet01Block
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-VPN-public-subnet-1
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PrivateSubnet01:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Private Subnet 01
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PDDTSPrivateSubnet01Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-private-subnet-1
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PrivateSubnet02:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Private Subnet 02
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PDDTSPrivateSubnet02Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-private-subnet-2
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PrivateSubnet03:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Private Subnet 03
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 2
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PDDTSPrivateSubnet03Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-private-subnet-3
+      - Key: Environment
+        Value: !Ref EnvName
+
+  DBPrivateSubnet01:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: DB Private Subnet 01
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PDDTSDBPrivateSubnet01Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-db-private-subnet-1
+      - Key: Environment
+        Value: !Ref EnvName
+
+  DBPrivateSubnet02:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: DB Private Subnet 02
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PDDTSDBPrivateSubnet02Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-db-private-subnet-2
+      - Key: Environment
+        Value: !Ref EnvName
+
+  DBPrivateSubnet03:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: DB Private Subnet 03
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 2
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PDDTSDBPrivateSubnet03Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: pddts-vpc-pchc-db-private-subnet-3
+      - Key: Environment
+        Value: !Ref EnvName
+
+  PublicSubnet01RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet01
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet02RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet02
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet03RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet03
+      RouteTableId: !Ref PublicRouteTable
+
+  VPNPublicSubnet01RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPNPublicSubnet01
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnet01RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet01
+      RouteTableId: !Ref PrivateRouteTable01
+
+  PrivateSubnet02RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet02
+      RouteTableId: !Ref PrivateRouteTable02
+
+  PrivateSubnet03RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet03
+      RouteTableId: !Ref PrivateRouteTable03
+
+  DBPrivateSubnet01RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DBPrivateSubnet01
+      RouteTableId: !Ref PrivateRouteTable01
+
+  DBPrivateSubnet02RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DBPrivateSubnet02
+      RouteTableId: !Ref PrivateRouteTable02
+
+  DBPrivateSubnet03RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DBPrivateSubnet03
+      RouteTableId: !Ref PrivateRouteTable03
+
+Outputs:
+
+  # SubnetIds:
+  #   Description: Subnets IDs in the PDDTS DEV and PROD VPC
+  #   Value: !Join [ ",", [ !Ref PublicSubnet01, !Ref PublicSubnet02, !Ref PublicSubnet03, !Ref VPNPublicSubnet01, !Ref PrivateSubnet01, !Ref PrivateSubnet02, !Ref PrivateSubnet03, !Ref DBPrivateSubnet01, !Ref DBPrivateSubnet02, !Ref DBPrivateSubnet03 ] ]
+
+  # VpcId:
+  #   Description: PDDTS DEV and PROD VPC Id
+  #   Value: !Ref VPC
+  #   Export:
+  #     Name: !Sub "${AWS::StackName}-VpcId"
+
+  VpcCidrBlock: 
+    Description: The Cidr Block of the VPC
+    Value: !Ref VpcBlock
+    Export:
+      Name: !Sub "${AWS::StackName}-VpcCidrBlock"
+
+  PublicSubnetId1: 
+    Description: Public Subnet ID for AZ1
+    Value: !Ref PublicSubnet01
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetId1"
+
+  PublicSubnetId2:
+    Description: Public Subnet ID for AZ2
+    Value: !Ref PublicSubnet02
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetId2"
+
+  PublicSubnetIds:
+    Description: Public Subnet Ids
+    Value: !Join [',', [!Ref PublicSubnet01, !Ref PublicSubnet02]]
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetIds"
+
+  PrivateSubnetId1:
+    Description: Private Subnet ID for AZ1
+    Value: !Ref PrivateSubnet01
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetId1"
+
+  PrivateSubnetId2:
+    Description: Private Subnet ID for AZ2
+    Value: !Ref PrivateSubnet02
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetId2"
+
+  PrivateSubnetIds:
+    Description: Private Subnet Ids
+    Value: !Join [',', [!Ref PrivateSubnet01, !Ref PrivateSubnet02]]
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetIds"
+
+  InternalSubnetId1:
+    Description: Internal Subnet ID for AZ1
+    Value: !Ref PrivateSubnet01
+    Export:
+      Name: !Sub "${AWS::StackName}-InternalSubnetId1"
+
+  InternalSubnetId2:
+    Description: Internal Subnet ID for AZ2
+    Value: !Ref PrivateSubnet02
+    Export:
+      Name: !Sub "${AWS::StackName}-InternalSubnetId2"
+
+  InternalSubnetIds:
+    Description: Internal Subnet Ids
+    Value: !Join [',', [!Ref PrivateSubnet01, !Ref PrivateSubnet02]]
+    Export:
+      Name: !Sub "${AWS::StackName}-InternalSubnetIds"
+
+  # DefaultSecurityGroupId:
+  #   Description: The default VPC security group
+  #   Value: !Ref DefaultVPCSecurityGroup
+  #   Export:
+  #     Name: !Sub "${AWS::StackName}-DefaultSecurityGroupId"
+
+  Region: 
+    Description: The region that an Amazon VPC was created in
+    Value: !Ref 'AWS::Region'
+    Export:
+      Name: !Sub "${AWS::StackName}-Region"
