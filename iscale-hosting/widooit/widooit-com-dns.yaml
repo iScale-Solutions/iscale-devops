@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for widooit.com
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: widooit
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. iscale-solutions.us).
+    Type: String
+    Default: widooit.com
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join [' ',[Hosted Zone for, !Ref ClientDomainName]]
+      Name: !Ref ClientDomainName
+      HostedZoneTags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], iscale-solutions]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  HostedZoneDNSSECSigningKey:
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: arn:aws:kms:us-east-1:178070162686:key/315d6bf8-09eb-4b0d-971c-5ef787b8d57b
+      Name: key_signing_key
+      Status: ACTIVE
+
+  HostedZoneDNSSEC:
+    DependsOn: HostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref HostedZone
+
+  SESTxtRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: Google Verification TXT Record
+      Name: !Join ['.', [_amazonses, !Ref ClientDomainName]]
+      Type: TXT
+      TTL: 14400
+      ResourceRecords:
+        - '"mE1coU5FzfEGFvg3i3oE5aLAb0eho13+zYsbw3Q+J1w="'
+
+  SESSPFRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: SPF Record
+      Name: !Ref ClientDomainName
+      Type: TXT
+      TTL: 14400
+      ResourceRecords:
+        - "\"v=spf1 include:amazonses.com ~all\""
+
+  # SESDMARCRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Comment: DMARC record
+  #     Name: !Join ['.', [_dmarc, !Ref ClientDomainName]]
+  #     Type: TXT
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - !Join ['', ["\"v=DMARC1;p=none;rua=mailto:info@", !Ref ClientDomainName, "\""]]
+
+  SESDKIMRecord1:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.', ['xofq2n7dd2mtmqqzji6forfibfumhjkc._domainkey', !Ref ClientDomainName]]
+      Type: CNAME
+      TTL: 14400
+      Comment: !Join ['', ['DKIM Validation for *.', !Ref ClientDomainName, ' in ' , !Ref 'AWS::Region']]
+      ResourceRecords:
+        - xofq2n7dd2mtmqqzji6forfibfumhjkc.dkim.amazonses.com
+  
+  SESDKIMRecord2:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.', ['w3alk4lnvtrc64jxe6glniisvy74ccwn._domainkey', !Ref ClientDomainName]]
+      Type: CNAME
+      TTL: 14400
+      Comment: !Join ['', ['DKIM Validation for *.', !Ref ClientDomainName, ' in ' , !Ref 'AWS::Region']]
+      ResourceRecords:
+        - w3alk4lnvtrc64jxe6glniisvy74ccwn.dkim.amazonses.com
+
+  SESDKIMRecord3:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.', ['yzkicrdxphrcchxn6jnapmqsv4hvuxwj._domainkey', !Ref ClientDomainName]]
+      Type: CNAME
+      TTL: 14400
+      Comment: !Join ['', ['DKIM Validation for *.', !Ref ClientDomainName, ' in ' , !Ref 'AWS::Region']]
+      ResourceRecords:
+        - yzkicrdxphrcchxn6jnapmqsv4hvuxwj.dkim.amazonses.com
+
+  WildcardCertificateValidationRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.', ['_f2b5eedc5d659823ee6ee7d0cabe9b9d', !Ref ClientDomainName]]
+      Type: CNAME
+      TTL: 14400
+      Comment: !Join ['', ['Validation for *.', !Ref ClientDomainName, ' in ' , !Ref 'AWS::Region']]
+      ResourceRecords:
+        - _e09458483cbcc929b61c650757e0e63b.bbfvkzsszw.acm-validations.aws.
