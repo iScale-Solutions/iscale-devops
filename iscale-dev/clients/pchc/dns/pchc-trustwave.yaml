@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: TrustWave IAM resources for PCHC
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: trustwave
+    MinLength: 3
+    MaxLength: 9
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: ^[a-z]+(-[a-z]+)*$
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  CloudTrailBucketName:
+    Description: The name of the cloudtrail bucket name
+    Type: String
+    Default: pchc-dev-prod-cloudtrail
+    AllowedPattern: ^[a-z]+(-[a-z]+)*$
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  TrustWaveUser:
+    Type: AWS::IAM::User
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonGuardDutyReadOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchEventsReadOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess
+      Policies:
+        - PolicyName: AccessCloudTrailData
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: 
+                  - !Join ['', ['arn:aws:s3:::', !Ref CloudTrailBucketName]]
+              - Effect: Allow
+                Action:
+                  - s3:GetObject*
+                Resource:
+                  - !Join ['', ['arn:aws:s3:::', !Ref CloudTrailBucketName, '/*']]
+              - Effect: Allow
+                Action:
+                  - cloudtrail:GetTrail
+                  - cloudtrail:GetTrailStatus
+                  - cloudtrail:DescribeTrails
+                  - cloudtrail:ListTrails
+                  - cloudtrail:LookupEvents
+                  - cloudtrail:ListTags
+                  - cloudtrail:ListPublicKeys
+                  - cloudtrail:GetEventSelectors
+                  - cloudtrail:GetInsightSelectors
+                  # - s3:ListAllMyBuckets
+                  # kms:ListAliases
+                  # lambda:ListFunctions
+                Resource:
+                  - '*'
+
+      UserName: trustwave
+
+  TrustWaveUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref TrustWaveUser
+
+Outputs:
+
+  TrustWaveUserAccessKeyId:
+    Description: Access Key Id for the trustwave user
+    Value: !Ref TrustWaveUserAccessKey
+
+  TrustWaveUserAccessKeySecret:
+    Description: Secret Key for the trustwave user
+    Value: !GetAtt [TrustWaveUserAccessKey, SecretAccessKey]
