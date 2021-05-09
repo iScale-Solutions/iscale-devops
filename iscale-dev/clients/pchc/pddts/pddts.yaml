@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: PDDTS Resources
+Description: PDDTS Resources pchc-prd-ase1-pddts
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -75,7 +75,7 @@ Parameters:
   EnvName:
     Description: The name of the environment
     Type: String
-    Default: Staging
+    Default: Production
     AllowedValues:
       - Production
       - Staging
@@ -103,7 +103,7 @@ Parameters:
   LoadBalancerCertificateArn:
     Description: SSL Certificate for the ELB
     Type: String
-    Default: arn:aws:acm:ap-southeast-1:050821737631:certificate/00ed4a3d-8f7d-45d5-a09f-354cd485c251
+    Default: arn:aws:acm:ap-southeast-1:470455329885:certificate/9f713d5d-cb7c-4e8e-acc2-46862d610ec8
   NetworkStackName:
     Description: The name of the network stack
     Type: String
@@ -123,19 +123,379 @@ Parameters:
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
 
+# Mappings:
+#   Fn::Transform:
+#     Name: AWS::Include
+#     Parameters:
+#       Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
 Mappings:
-  Fn::Transform:
-    Name: AWS::Include
-    Parameters:
-      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+    #Short names for environment
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
+  
+  EnvLowerCase:
+    Production:
+      Name: production
+    Staging:
+      Name: staging
+    Development:
+      Name: development
+    Test:
+      Name: test
+
+  #Short names for regions
+  RegionShort:
+    us-east-2:
+      Name: ue2
+    us-east-1:
+      Name: ue1
+    us-west-1:
+      Name: uw1
+    us-west-2:
+      Name: uw2
+    ap-east-1:
+      Name: ae1
+    ap-south-1:
+      Name: as1
+    ap-northeast-1:
+      Name: ane1
+    ap-northeast-2:
+      Name: ane2
+    ap-northeast-3:
+      Name: ane3
+    ap-southeast-1:
+      Name: ase1
+    ap-southeast-2:
+      Name: ase2
+    ca-central-1:
+      Name: cc1
+    cn-north-1:
+      Name: cn1
+    cn-northwest-1:
+      Name: cnw1
+    eu-central-1:
+      Name: ec1
+    eu-west-1:
+      Name: ew1
+    eu-west-2:
+      Name: ew2
+    eu-west-3:
+      Name: ew3
+    eu-north-1:
+      Name: en1
+    me-south-1:
+      Name: ms1
+    sa-east-1:
+      Name: se1
+    us-gov-east-1:
+      Name: uge1
+    us-gov-west-1:
+      Name: ugw1 
+
+  # Short Name for ELB
+  ElbTypeShort:
+    application:
+      Name: alb
+    network:
+      Name: nlb
+
+# Conditions:
+#   Fn::Transform:
+#     Name: AWS::Include
+#     Parameters:
+#       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
 
 Conditions:
-  Fn::Transform:
-    Name: AWS::Include
-    Parameters:
-      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsDev:
+    Fn::Equals:
+      - Ref: EnvName
+      - Development
+  IsTest:
+    Fn::Equals:
+      - Ref: EnvName
+      - Test
+  IsStaging:
+    Fn::Equals:
+      - Ref: EnvName
+      - Staging
+  IsProd: 
+    Fn::Equals:
+      - Ref: EnvName
+      - Production
+  IsNotDev: 
+    Fn::Not:
+      - Condition: IsDev
+  IsNotTest: 
+    Fn::Not:
+      - Condition: IsTest
+  IsNotStaging: 
+    Fn::Not:
+      - Condition: IsStaging
+  IsNotProd: 
+    Fn::Not:
+      - Condition: IsProd
+  IsStagingOrProd: 
+    Fn::Or:
+      - Condition: IsStaging
+      - Condition: IsProd
+  IsDevOrStaging:
+    Fn::Or:
+      - Condition: IsDev
+      - Condition: IsStaging
 
 Resources:
+
+  ###
+  # Custom Network resources for BSP
+  ###
+
+  StrongSwanPublicSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+        GroupDescription: StrongSwan Public Security Group
+        VpcId: 
+          Fn::ImportValue:
+            !Sub "${NetworkStackName}-VpcId"
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: 0.0.0.0/0
+          - IpProtocol: icmp
+            FromPort: -1
+            ToPort: -1
+            CidrIp: 0.0.0.0/0
+
+  StrongSwanAZ1ENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: !Join
+        - ' '
+        - - BSP Access ENI
+          - !Select
+            - 0
+            - Fn::GetAZs: !Ref 'AWS::Region'
+      GroupSet:
+        - !Ref StrongSwanPublicSecurityGroup
+      PrivateIpAddress: 10.5.12.145
+      SourceDestCheck: false
+      SubnetId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - Key: Name
+          Value: StrongSwan public ENI
+
+  StrongSwanAZ2ENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: !Join
+        - ' '
+        - - BSP Access ENI
+          - !Select
+            - 1
+            - Fn::GetAZs: !Ref 'AWS::Region'
+      GroupSet:
+        - !Ref StrongSwanPublicSecurityGroup
+      PrivateIpAddress: 10.5.13.100
+      SourceDestCheck: false
+      SubnetId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-PublicSubnetId2"
+      
+      Tags:
+        - Key: Name
+          Value: StrongSwan public ENI
+
+  BSPVPNGatewayEIP1: # - Hardcoded for BSP
+    DeletionPolicy: Retain #Make sure to retain always
+    # Condition: IsProd
+    Type: AWS::EC2::EIP
+
+  BSPVPNGatewayEIP2: # - Hardcoded for BSP
+    DeletionPolicy: Retain #Make sure to retain always
+    # Condition: IsProd
+    Type: AWS::EC2::EIP
+
+  BSPRouteTableAZ1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, bsp, route, table, a]]
+
+  BSPRouteTableAZ2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, bsp, route, table, b]]
+  
+  BSPRouteAssociationInternalSubnetAZ1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: 
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-InternalSubnetId1"
+      RouteTableId: !Ref BSPRouteTableAZ1
+
+  BSPRouteAssociationInternalSubnetAZ2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: 
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-InternalSubnetId2"
+      RouteTableId: !Ref BSPRouteTableAZ2
+
+  BSPRouteAssociationPublicSubnetAZ1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: 
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-PublicSubnetId1"
+      RouteTableId: !Ref BSPRouteTableAZ1
+
+  BSPRouteAssociationPublicSubnetAZ2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: 
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-PublicSubnetId2"
+
+      RouteTableId: !Ref BSPRouteTableAZ2
+
+  BSPRouteAssociationPrivateSubnetAZ1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: 
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-PrivateSubnetId1"
+      RouteTableId: !Ref BSPRouteTableAZ1
+
+  BSPRouteAssociationPrivateSubnetAZ2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: 
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-PrivateSubnetId2"
+      RouteTableId: !Ref BSPRouteTableAZ2
+
+  ##
+  # BSP Target Resources
+  ##
+
+  BSP3rdPartyRouteAZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref BSPRouteTableAZ1
+      DestinationCidrBlock: 192.168.4.100/32
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  BSP3rdPartyRouteAZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref BSPRouteTableAZ2
+      DestinationCidrBlock: 192.168.4.100/32
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  BSPPhilPassPlusRouteAZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref BSPRouteTableAZ1
+      DestinationCidrBlock: 192.168.80.200/32
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  BSPPhilPassPlusRouteAZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref BSPRouteTableAZ2
+      DestinationCidrBlock: 192.168.80.200/32
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  ##
+  # StrongSwan EC2 instances
+  ##
+  
+  StrongSwanEC2SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      RoleName: StrongSwanEC2SSMRole
+
+  StrongSwanInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref StrongSwanEC2SSMRole
+      InstanceProfileName: StrongSwanInstanceProfile
+
+  StrongSwanInstanceAZ1:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref StrongSwanInstanceProfile
+      KeyName: !Ref InstanceKeyName
+      ImageId: ami-02f26adf094f51167
+      InstanceType: t3.micro
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a]]
+  
+  StrongSwanPublicEIPAttachAZ1:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+      AllocationId: !GetAtt BSPVPNGatewayEIP1.AllocationId
+
+  StrongSwanInstanceAZ2:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref StrongSwanInstanceProfile
+      KeyName: !Ref InstanceKeyName
+      ImageId: ami-02f26adf094f51167
+      InstanceType: t3.micro
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b]]
+  
+  StrongSwanPublicEIPAttachAZ2:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+      AllocationId: !GetAtt BSPVPNGatewayEIP2.AllocationId
+
+  ##
+  # PDDTS Application Resources
+  ##
 
   ELBStack:
     Type: AWS::CloudFormation::Stack
@@ -173,156 +533,150 @@ Resources:
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
-  DBSchedulerStack:
-    DependsOn:
-      - DBStack
-    Condition: IsNotProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
-        UseFriendlyNames: FALSE
-        DatabaseInstanceName:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceName
+  # DBSchedulerStack:
+  #   DependsOn:
+  #     - DBStack
+  #   Condition: IsNotProd
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       StartScheduleExpression: !Ref StartScheduleExpression
+  #       StopScheduleExpression: !Ref StopScheduleExpression
+  #       UseFriendlyNames: FALSE
+  #       DatabaseInstanceName:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstanceName
 
 ####
 # PDDTS Application
 ####
 
-  DeployStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
+  # DeployStack:
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SNSStackName: !Ref SNSStackName
 
-  CacheStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        NetworkStackName: !Ref NetworkStackName
-        NodeType: cache.t3.micro
-        NumCacheClusters: 1
-        OrgName: !Ref OrgName
-        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
-        SNSStackName: !Ref SNSStackName
-        UseFriendlyNames: TRUE
+  # CacheStack:
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       NetworkStackName: !Ref NetworkStackName
+  #       AllowSecurityGroup: 
+  #         Fn::GetAtt:
+  #           - ServerStack
+  #           - Outputs.AppServerSecurityGroup
+  #       EncryptInTransit: TRUE
+  #       NodeType: cache.t3.micro
+  #       NumCacheClusters: 1
+  #       OrgName: !Ref OrgName
+  #       SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+  #       SNSStackName: !Ref SNSStackName
+  #       UseFriendlyNames: TRUE
 
-  ServerStack:
-    DependsOn:
-      - DBStack
-      - DeployStack
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
-        ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
-        InstanceAMI: !Ref InstanceAMI
-        InstanceKeyName: !Ref InstanceKeyName
-        InstancePort: 80
-        InstanceType: t3.micro
-        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
-        LoadBalancerPriority: 100
-        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
-        NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
-        SNSStackName: !Ref SNSStackName
-        UseFriendlyNames: FALSE
+  # ServerStack:
+  #   DependsOn:
+  #     - DBStack
+  #     - DeployStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       ClientDomainName: !Ref ClientDomainName
+  #       DatabaseEndpoint:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstanceAddress
+  #       DatabasePort:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstancePort
+  #       DatabaseSecurityGroupId:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.SecurityGroupId
+  #       InstanceAMI: !Ref InstanceAMI
+  #       InstanceKeyName: !Ref InstanceKeyName
+  #       InstancePort: 80
+  #       InstanceSubnet: Private
+  #       InstanceType: t3.micro
+  #       LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+  #       LoadBalancerPriority: 100
+  #       LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SharedSecretId:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBSecretManagerKeyId
+  #       SNSStackName: !Ref SNSStackName
+  #       UseFriendlyNames: FALSE
 
-  SchedulerStack:
-    DependsOn:
-      - DBStack
-      - ServerStack
-    Condition: IsNotProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
-        UseFriendlyNames: FALSE
-        CodeDeployApplicationName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployApplicationName
-        CodeDeployDeploymentGroupName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployDeploymentGroupName
+  # SchedulerStack:
+  #   DependsOn:
+  #     - DBStack
+  #     - ServerStack
+  #   Condition: IsNotProd
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       StartScheduleExpression: !Ref StartScheduleExpression
+  #       StopScheduleExpression: !Ref StopScheduleExpression
+  #       UseFriendlyNames: FALSE
+  #       CodeDeployApplicationName:
+  #         Fn::GetAtt:
+  #           - DeployStack
+  #           - Outputs.CodeDeployApplicationName
+  #       CodeDeployDeploymentGroupName:
+  #         Fn::GetAtt:
+  #           - DeployStack
+  #           - Outputs.CodeDeployDeploymentGroupName
 
-  BackupStack:
-    DependsOn: 
-      - DBStack
-      - ServerStack
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        BackupARNList: !Join
-          - ','
-          - - Fn::GetAtt:
-              - DBStack
-              - Outputs.DBInstanceARN
-            - Fn::GetAtt:
-              - ServerStack
-              - Outputs.AppServerEFSArn
-        BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
+  # BackupStack:
+  #   DependsOn: 
+  #     - DBStack
+  #     - ServerStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       BackupARNList: !Join
+  #         - ','
+  #         - - Fn::GetAtt:
+  #             - DBStack
+  #             - Outputs.DBInstanceARN
+  #           - Fn::GetAtt:
+  #             - ServerStack
+  #             - Outputs.AppServerEFSArn
+  #       BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
 
-Outputs:
+# Outputs:
 
-  DeploymentUserGroup:
-    Description: Add the BitBucket user into this group
-    Value:
-      Fn::GetAtt:
-        - DeployStack
-        - Outputs.DeploymentUserGroup
+#   DeploymentUserGroup:
+#     Description: Add the BitBucket user into this group
+#     Value:
+#       Fn::GetAtt:
+#         - DeployStack
+#         - Outputs.DeploymentUserGroup
