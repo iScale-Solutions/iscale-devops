@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: Regular Odoo setup
 
 Metadata:
-  AWS::CloudFormation::Interface: 
+  AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
           default: Resource Configuration
@@ -198,7 +198,7 @@ Parameters:
       - true
       - false
 
-Mappings: 
+Mappings:
   Fn::Transform:
     Name: AWS::Include
     Parameters:
@@ -216,7 +216,10 @@ Conditions:
   HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
   HasOwnLoadBalancer: !Equals [!Ref UseOwnLoadBalancer, true]
-  
+  HasStartScheduleExpression: !Not [!Equals [!Ref StartScheduleExpression, '']]
+  HasStopScheduleExpression: !Not [!Equals [!Ref StopScheduleExpression, '']]
+  HasScheduleExpression: !Or [!Condition HasStartScheduleExpression, !Condition HasStopScheduleExpression]
+
 Resources:
 
   ELBStack:
@@ -232,11 +235,11 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
-  DBStack: 
+  DBStack:
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
         DatabaseUser: !Ref DatabaseUser
@@ -258,11 +261,11 @@ Resources:
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
-  DeployStack: 
+  DeployStack:
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
@@ -270,23 +273,23 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
   
-  AppServerStack: 
-    DependsOn: 
+  AppServerStack:
+    DependsOn:
       - DBStack
       - DeployStack
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint: 
+        DatabaseEndpoint:
           Fn::GetAtt:
             - DBStack
             - Outputs.ClusterEndpointAddress
-        DatabasePort: 
+        DatabasePort:
           Fn::GetAtt:
             - DBStack
             - Outputs.ClusterPort
@@ -305,13 +308,13 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
 
   BackupStack:
-    DependsOn: 
+    DependsOn:
       - DBStack
       - AppServerStack
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
@@ -324,14 +327,15 @@ Resources:
               - AppServerStack
               - Outputs.AppServerEFSArn
 
-  SchedulerStack: 
-    DependsOn: 
+  SchedulerStack:
+    Condition: HasScheduleExpression
+    DependsOn:
       - DBStack
       - AppServerStack
     Type: AWS::CloudFormation::Stack
-    Properties: 
+    Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters: 
+      Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
@@ -367,7 +371,7 @@ Resources:
             Principal:
               Service:
                 - ssm.amazonaws.com
-            Action: 
+            Action:
               - sts:AssumeRole
       Policies:
         - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ssm-service-role]]
@@ -394,7 +398,7 @@ Resources:
             Principal:
               Service:
                 - lambda.amazonaws.com
-            Action: 
+            Action:
               - sts:AssumeRole
       Policies:
         - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, blur-execution-role]]
@@ -402,22 +406,22 @@ Resources:
             Version: 2012-10-17
             Statement:
               - Effect: Allow
-                Action: 
+                Action:
                   - iam:PassRole
                 Resource: "*"
               - Effect: Allow
-                Action: 
+                Action:
                   - ssm:SendCommand
                 Resource: arn:aws:ssm:*:*:document/*
               - Effect: Allow
-                Action: 
+                Action:
                   - ssm:SendCommand
                 Resource: arn:aws:ec2:*:*:instance/*
                 Condition:
                   StringLike:
                     ssm:resourceTag/Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
               - Effect: Allow
-                Action: 
+                Action:
                   - logs:CreateLogStream
                   - logs:CreateLogGroup
                   - logs:DescribeLogStream
@@ -427,7 +431,7 @@ Resources:
   BlurSSMDocument:
     Condition: HasBlur
     Type: AWS::SSM::Document
-    Properties: 
+    Properties:
       Content: !Sub
         - |
             {
@@ -468,7 +472,7 @@ Resources:
             }
         - workdir: /var/iscale-odoo/scripts/
       DocumentType: Command
-      Tags: 
+      Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         - Key: Environment
@@ -483,9 +487,9 @@ Resources:
       Description: Blur Prod database and upload it in Dev Instance
       FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, blur]]
       Handler: index.lambda_handler
-      Role: !GetAtt BlurExecutionRole.Arn 
+      Role: !GetAtt BlurExecutionRole.Arn
       Runtime: python3.6
-      Tags: 
+      Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, blur]]
         - Key: Environment
@@ -559,14 +563,14 @@ Resources:
             Version: 2012-10-17
             Statement:
               - Effect: Allow
-                Action: 
+                Action:
                   - lambda:InvokeFunction
                 Resource: !GetAtt [BlurLambdaFunction, Arn]
 
 Outputs:
   DeploymentUserGroup:
     Description: Add your BitBucket user into this group
-    Value: 
+    Value:
       Fn::GetAtt:
         - DeployStack
         - Outputs.DeploymentUserGroup
