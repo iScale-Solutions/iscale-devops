@@ -23,7 +23,7 @@ Metadata:
           - Port
           - NodeType
           - NumCacheClusters
-          - AccessFromAnywhere
+          - AllowSecurityGroup
           - SnapshotRetentionLimit
 
     ParameterLabels:
@@ -71,6 +71,13 @@ Parameters:
       - Staging
       - Development
       - Test
+  EncryptInTransit:
+    Description: Set to TRUE to encrypt in transit
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: FALSE
   ExportOutputs:
     Description: Set to TRUE to export stack output
     Type: String
@@ -83,13 +90,10 @@ Parameters:
     Type: String
     Default: iscale-dev-dev-uw2-network
     MinLength: 1
-  AccessFromAnywhere:
-    Description: Set to TRUE to allow access to the cache from anywhere
+  AllowSecurityGroup:
+    Description: Security Group to be allowed to access the cache. Leave blank to allow from anywhere
     Type: String
-    AllowedValues:
-      - TRUE
-      - FALSE
-    Default: FALSE
+    Default: ''
   NodeType:
     Description: The compute and memory capacity of the nodes in the node group (shard).
     Type: String
@@ -134,9 +138,10 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasAllowSecurityGroup: !Not [!Condition HasNotAllowSecurityGroup]
+  HasNotAllowSecurityGroup: !Equals [!Ref AllowSecurityGroup, '']
   HasExportOutputs: !Equals [!Ref ExportOutputs, TRUE]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
-  AllowAccessFromAnywhere: !Equals [!Ref AccessFromAnywhere, TRUE]
 
 Resources:
 
@@ -155,8 +160,18 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
 
-  CacheSecurityGroupAllowFromAnywhere:
-    Condition: AllowAccessFromAnywhere
+  CacheSecurityGroupIngressFromSecurityGroup:
+    Condition: HasAllowSecurityGroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId: !GetAtt ElasticacheSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: !Ref Port
+      ToPort: !Ref Port
+      SourceSecurityGroupId: !Ref AllowSecurityGroup
+
+  CacheSecurityGroupIngressFromAnywhere:
+    Condition: HasNotAllowSecurityGroup
     Type: AWS::EC2::SecurityGroupIngress
     Properties: 
       GroupId: !GetAtt ElasticacheSecurityGroup.GroupId
@@ -202,7 +217,7 @@ Resources:
         Fn::ImportValue:
           !Sub "${SNSStackName}-TopicArn"
       AtRestEncryptionEnabled: true
-      TransitEncryptionEnabled: true
+      TransitEncryptionEnabled: !Ref EncryptInTransit
       Engine: redis
       EngineVersion: 5.0.6
       Tags:
