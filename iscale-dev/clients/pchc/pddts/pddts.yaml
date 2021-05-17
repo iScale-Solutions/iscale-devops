@@ -31,6 +31,11 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
+      - Label:
+          default: StrongSwan Configuration
+        Parameters:
+          - StrongswanPPPPSK
+          - Strongswan3RDPSK
 
     ParameterLabels:
       Name:
@@ -57,6 +62,10 @@ Metadata:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
+      StrongswanPPPPSK:
+        default: StrongSwan PhilPassPlus Shared Key
+      Strongswan3RDPSK:
+        default: StrongSwan 3rd Party Shared Key
 
 Parameters:
   Name:
@@ -126,134 +135,26 @@ Parameters:
     Description: Strongswan Instance AMI ID
     Type: AWS::EC2::Image::Id
     Default: ami-0499b5b9a26be1426
-
-# Mappings:
-#   Fn::Transform:
-#     Name: AWS::Include
-#     Parameters:
-#       Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+  StrongswanPPPPSK:
+    Description: Password for PhilPassPlus PSK
+    Type: String
+    NoEcho: true
+  Strongswan3RDPSK:
+    Description: Password for 3rd Party PSK
+    Type: String
+    NoEcho: true
 
 Mappings:
-    #Short names for environment
-  EnvShort:
-    Production:
-      Name: prd
-    Staging:
-      Name: stg
-    Development:
-      Name: dev
-    Test:
-      Name: test
-  
-  EnvLowerCase:
-    Production:
-      Name: production
-    Staging:
-      Name: staging
-    Development:
-      Name: development
-    Test:
-      Name: test
-
-  #Short names for regions
-  RegionShort:
-    us-east-2:
-      Name: ue2
-    us-east-1:
-      Name: ue1
-    us-west-1:
-      Name: uw1
-    us-west-2:
-      Name: uw2
-    ap-east-1:
-      Name: ae1
-    ap-south-1:
-      Name: as1
-    ap-northeast-1:
-      Name: ane1
-    ap-northeast-2:
-      Name: ane2
-    ap-northeast-3:
-      Name: ane3
-    ap-southeast-1:
-      Name: ase1
-    ap-southeast-2:
-      Name: ase2
-    ca-central-1:
-      Name: cc1
-    cn-north-1:
-      Name: cn1
-    cn-northwest-1:
-      Name: cnw1
-    eu-central-1:
-      Name: ec1
-    eu-west-1:
-      Name: ew1
-    eu-west-2:
-      Name: ew2
-    eu-west-3:
-      Name: ew3
-    eu-north-1:
-      Name: en1
-    me-south-1:
-      Name: ms1
-    sa-east-1:
-      Name: se1
-    us-gov-east-1:
-      Name: uge1
-    us-gov-west-1:
-      Name: ugw1 
-
-  # Short Name for ELB
-  ElbTypeShort:
-    application:
-      Name: alb
-    network:
-      Name: nlb
-
-# Conditions:
-#   Fn::Transform:
-#     Name: AWS::Include
-#     Parameters:
-#       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
 
 Conditions:
-  IsDev:
-    Fn::Equals:
-      - Ref: EnvName
-      - Development
-  IsTest:
-    Fn::Equals:
-      - Ref: EnvName
-      - Test
-  IsStaging:
-    Fn::Equals:
-      - Ref: EnvName
-      - Staging
-  IsProd: 
-    Fn::Equals:
-      - Ref: EnvName
-      - Production
-  IsNotDev: 
-    Fn::Not:
-      - Condition: IsDev
-  IsNotTest: 
-    Fn::Not:
-      - Condition: IsTest
-  IsNotStaging: 
-    Fn::Not:
-      - Condition: IsStaging
-  IsNotProd: 
-    Fn::Not:
-      - Condition: IsProd
-  IsStagingOrProd: 
-    Fn::Or:
-      - Condition: IsStaging
-      - Condition: IsProd
-  IsDevOrStaging:
-    Fn::Or:
-      - Condition: IsDev
-      - Condition: IsStaging
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
 
 Resources:
 
@@ -283,13 +184,13 @@ Resources:
     Properties:
       Description: !Join
         - ' '
-        - - BSP Access ENI
+        - - Gateway Main ENI
           - !Select
             - 0
             - Fn::GetAZs: !Ref 'AWS::Region'
       GroupSet:
         - !Ref StrongSwanPublicSecurityGroup
-      PrivateIpAddress: 10.5.12.145
+      PrivateIpAddress: 10.5.12.182 #Registered with BSP
       SourceDestCheck: false
       SubnetId:
         Fn::ImportValue:
@@ -309,12 +210,11 @@ Resources:
             - Fn::GetAZs: !Ref 'AWS::Region'
       GroupSet:
         - !Ref StrongSwanPublicSecurityGroup
-      PrivateIpAddress: 10.5.13.100
+      PrivateIpAddress: 10.5.13.103 #Registered with BSP
       SourceDestCheck: false
       SubnetId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-PublicSubnetId2"
-      
       Tags:
         - Key: Name
           Value: StrongSwan public ENI
@@ -329,114 +229,9 @@ Resources:
     # Condition: IsProd
     Type: AWS::EC2::EIP
 
-  # RouteTableAZ1:
-  #   Type: AWS::EC2::RouteTable
-  #   Properties:
-  #     VpcId:
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-VpcId"
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, route, table, a]]
-
-  # RouteTableAZ2:
-  #   Type: AWS::EC2::RouteTable
-  #   Properties:
-  #     VpcId:
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-VpcId"
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, route, table, b]]
-  
-  # RouteAssociationInternalSubnetAZ1:
-  #   Type: AWS::EC2::SubnetRouteTableAssociation
-  #   Properties:
-  #     SubnetId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-InternalSubnetId1"
-  #     RouteTableId: !Ref RouteTableAZ1
-
-  # RouteAssociationInternalSubnetAZ2:
-  #   Type: AWS::EC2::SubnetRouteTableAssociation
-  #   Properties:
-  #     SubnetId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-InternalSubnetId2"
-  #     RouteTableId: !Ref RouteTableAZ2
-
-  # RouteAssociationPublicSubnetAZ1:
-  #   Type: AWS::EC2::SubnetRouteTableAssociation
-  #   Properties:
-  #     SubnetId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-PublicSubnetId1"
-  #     RouteTableId: !Ref RouteTableAZ1
-
-  # RouteAssociationPublicSubnetAZ2:
-  #   Type: AWS::EC2::SubnetRouteTableAssociation
-  #   Properties:
-  #     SubnetId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-PublicSubnetId2"
-
-  #     RouteTableId: !Ref RouteTableAZ2
-
-  # RouteAssociationPrivateSubnetAZ1:
-  #   Type: AWS::EC2::SubnetRouteTableAssociation
-  #   Properties:
-  #     SubnetId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-PrivateSubnetId1"
-  #     RouteTableId: !Ref RouteTableAZ1
-
-  # RouteAssociationPrivateSubnetAZ2:
-  #   Type: AWS::EC2::SubnetRouteTableAssociation
-  #   Properties:
-  #     SubnetId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-PrivateSubnetId2"
-  #     RouteTableId: !Ref RouteTableAZ2
-
   ##
-  # Regular routes and BSP target resources
+  # BSP target resources
   ##
-
-  # PublicRouteAZ1:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId: !Ref RouteTableAZ1
-  #     DestinationCidrBlock: 0.0.0.0/0
-  #     GatewayId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-InternetGateway"
-
-  # PublicRouteAZ1:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId: !Ref RouteTableAZ2
-  #     DestinationCidrBlock: 0.0.0.0/0
-  #     GatewayId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-InternetGateway"
-
-  # PrivateRouteAZ1:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId: !Ref RouteTableAZ1
-  #     DestinationCidrBlock: 0.0.0.0/0
-  #     GatewayId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-InternetGateway"
-
-  # BSPRouteAZ1:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId: !Ref RouteTableAZ2
-  #     DestinationCidrBlock: 0.0.0.0/0
-  #     GatewayId: 
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-InternetGateway"
 
   BSP3rdPartyRouteAZ1:
     Type: AWS::EC2::Route
@@ -444,7 +239,7 @@ Resources:
       RouteTableId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-PrivateRouteTable1"
-      DestinationCidrBlock: 192.168.4.100/32
+      DestinationCidrBlock: 192.168.4.127/32
       NetworkInterfaceId: !Ref StrongSwanAZ1ENI
 
   BSP3rdPartyRouteAZ2:
@@ -453,7 +248,7 @@ Resources:
       RouteTableId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-PrivateRouteTable2"
-      DestinationCidrBlock: 192.168.4.100/32
+      DestinationCidrBlock: 192.168.4.127/32
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
   BSPPhilPassPlusRouteAZ1:
@@ -477,8 +272,165 @@ Resources:
   ##
   # StrongSwan EC2 instances
   ##
-  
-  StrongSwanEC2SSMRole:
+  StrongSwanLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          AZ1Config:
+            - NetworkFiles
+            - PSK
+            - AZ1Config
+            - StartStrongSwan
+          AZ2Config:
+            - NetworkFiles
+            - PSK
+            - AZ2Config
+            - StartStrongSwan
+
+        StartStrongSwan:
+          commands:
+            create_nat_tables:
+              command: "/sbin/iptables-restore < /etc/iptables.rules"
+            restart_strongswan:
+              command: "/usr/sbin/strongswan restart"
+              ignoreErrors: true
+
+        NetworkFiles:
+          commands:
+            ip_forward:
+              command: "echo 1 > /proc/sys/net/ipv4/ip_forward"
+            send_redirects:
+              command: "echo 0 > /proc/sys/net/ipv4/conf/eth0/send_redirects"
+          files:
+            /etc/sysctl.d/nat.conf:
+              content: |
+                net.ipv4.ip_forward = 1
+                net.ipv4.conf.eth0.send_redirects = 0
+
+        PSK:
+          files:
+            /etc/strongswan/ipsec.secrets:
+              content: !Sub
+                - |
+                  @pchc 121.127.5.157 : PSK "${PSK_PPP}"
+                  @pchc 121.127.5.50 : PSK "${PSK_3RD}"
+                - PSK_PPP: !Ref StrongswanPPPPSK
+                  PSK_3RD: !Ref Strongswan3RDPSK
+
+        AZ1Config:
+          files:
+            /etc/iptables.rules:
+              content: |
+                *nat
+                :PREROUTING ACCEPT [18:1376]
+                :INPUT ACCEPT [15:1148]
+                :OUTPUT ACCEPT [222:17540]
+                :POSTROUTING ACCEPT [222:17540]
+                -A POSTROUTING -s 10.5.12.64/26 -d 192.168.4.0/24 -o eth0 -j MASQUERADE
+                -A POSTROUTING -s 10.5.12.64/26 -d 192.168.80.0/24 -o eth0 -j MASQUERADE
+                COMMIT
+              permissions: 0700
+              owner: root
+              group: root
+            /etc/strongswan/ipsec.conf:
+              content: |
+                config setup
+                  charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
+
+                conn bspPPPlus
+                    authby=secret
+                    auto=start
+                    keyexchange=ikev1
+                    type=tunnel
+                    leftfirewall=yes
+                    forceencaps=yes
+                    leftid=pchc
+                    left=10.5.12.182
+                    leftsubnet=10.5.12.128/26
+                    right=121.127.5.157
+                    rightsubnet=192.168.80.0/24
+                    ike=aes256-sha256-modp2048
+                    ikelifetime=43200s
+                    esp=aes128-sha256-modp2048
+
+                conn bspPP3rd
+                    authby=secret
+                    auto=start
+                    keyexchange=ikev1
+                    type=tunnel
+                    leftfirewall=yes
+                    forceencaps=yes
+                    leftid=pchc
+                    left=10.5.12.182
+                    leftsubnet=10.5.12.128/26
+                    right=121.127.5.50
+                    rightsubnet=192.168.4.0/24
+                    ike=aes256-sha256-modp2048
+                    ikelifetime=43200s
+                    esp=aes128-sha256-modp2048
+              permissions: 0700
+              owner: root
+              group: root
+
+        AZ2Config:
+          files:
+            /etc/iptables.rules:
+              content: |
+                *nat
+                :PREROUTING ACCEPT [18:1376]
+                :INPUT ACCEPT [15:1148]
+                :OUTPUT ACCEPT [222:17540]
+                :POSTROUTING ACCEPT [222:17540]
+                -A POSTROUTING -s 10.5.13.0/26 -d 192.168.4.0/24 -o eth0 -j MASQUERADE
+                -A POSTROUTING -s 10.5.13.0/26 -d 192.168.80.0/24 -o eth0 -j MASQUERADE
+                COMMIT
+              permissions: 0700
+              owner: root
+              group: root
+            /etc/strongswan/ipsec.conf:
+              content: |
+                config setup
+                  charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
+
+                conn bspPPPlus
+                    authby=secret
+                    auto=start
+                    keyexchange=ikev1
+                    type=tunnel
+                    leftfirewall=yes
+                    leftid=pchc
+                    left=10.5.13.103
+                    leftsubnet=10.5.13.64/26
+                    right=121.127.5.157
+                    rightsubnet=192.168.80.0/24 #For Prod
+                    ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                    ikelifetime=43200s #Time before re authentication of keys
+                    esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+
+                conn bspPP3rd
+                    authby=secret
+                    auto=start
+                    keyexchange=ikev1
+                    type=tunnel
+                    leftfirewall=yes
+                    leftid=pchc
+                    left=10.5.13.103
+                    leftsubnet=10.5.13.64/26
+                    right=121.127.5.50
+                    rightsubnet=192.168.4.0/24
+                    ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                    ikelifetime=43200s #Time before re authentication of keys
+                    esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+              permissions: 0700
+              owner: root
+              group: root
+    Properties:
+      KeyName: !Ref InstanceKeyName
+      ImageId: !Ref StrongswanAMI
+      InstanceType: t3.nano
+
+  StrongSwanEC2Role:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -490,15 +442,25 @@ Resources:
                 - ec2.amazonaws.com
             Action:
               - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: AccessStackDetails
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+                - cloudformation:DescribeStackResource
+              Resource: '*'
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
-      RoleName: StrongSwanEC2SSMRole
+      RoleName: StrongSwanEC2Role
 
   StrongSwanInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
-        - !Ref StrongSwanEC2SSMRole
+        - !Ref StrongSwanEC2Role
       InstanceProfileName: StrongSwanInstanceProfile
 
   StrongSwanInstanceAZ1:
@@ -507,13 +469,23 @@ Resources:
       IamInstanceProfile: !Ref StrongSwanInstanceProfile
       KeyName: !Ref InstanceKeyName
       ImageId: !Ref StrongswanAMI
-      InstanceType: t3.micro
+      InstanceType: t3.nano
       NetworkInterfaces:
         - DeviceIndex: 0
           NetworkInterfaceId: !Ref StrongSwanAZ1ENI
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a]]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c AZ1Config --region ${AWS::Region} --role ${ROLE}
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+             /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+             /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource StrongSwanLaunchConfig  --region ${AWS::Region}
+          - ROLE: !Ref StrongSwanEC2Role
   
   StrongSwanPublicEIPAttachAZ1:
     Type: AWS::EC2::EIPAssociation
@@ -527,14 +499,24 @@ Resources:
       IamInstanceProfile: !Ref StrongSwanInstanceProfile
       KeyName: !Ref InstanceKeyName
       ImageId: !Ref StrongswanAMI
-      InstanceType: t3.micro
+      InstanceType: t3.nano
       NetworkInterfaces:
         - DeviceIndex: 0
           NetworkInterfaceId: !Ref StrongSwanAZ2ENI
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b]]
-  
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c AZ2Config --region ${AWS::Region} --role ${ROLE}
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+             /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+             /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource StrongSwanLaunchConfig  --region ${AWS::Region}
+          - ROLE: !Ref StrongSwanEC2Role
+
   StrongSwanPublicEIPAttachAZ2:
     Type: AWS::EC2::EIPAssociation
     Properties:
@@ -571,7 +553,7 @@ Resources:
         EnablePerformanceInsights: !If [IsProd, true, false]
         EnvName: !Ref EnvName
         Engine: mysql
-        EngineVersion: 8.0.20
+        EngineVersion: 8.0.23
         Family: mysql8.0
         InstanceType: !If [IsProd, db.t3.medium, db.t3.micro]
         MasterUser: root
@@ -581,24 +563,24 @@ Resources:
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
-  # DBSchedulerStack:
-  #   DependsOn:
-  #     - DBStack
-  #   Condition: IsNotProd
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       StartScheduleExpression: !Ref StartScheduleExpression
-  #       StopScheduleExpression: !Ref StopScheduleExpression
-  #       UseFriendlyNames: FALSE
-  #       DatabaseInstanceName:
-  #         Fn::GetAtt:
-  #           - DBStack
-  #           - Outputs.DBInstanceName
+  DBSchedulerStack:
+    DependsOn:
+      - DBStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
 
 ####
 # PDDTS Application
@@ -615,25 +597,25 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
-  # CacheStack:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       NetworkStackName: !Ref NetworkStackName
-  #       AllowSecurityGroup: 
-  #         Fn::GetAtt:
-  #           - ServerStack
-  #           - Outputs.AppServerSecurityGroup
-  #       EncryptInTransit: TRUE
-  #       NodeType: cache.t3.micro
-  #       NumCacheClusters: 1
-  #       OrgName: !Ref OrgName
-  #       SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
-  #       SNSStackName: !Ref SNSStackName
-  #       UseFriendlyNames: TRUE
+  CacheStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        AllowSecurityGroup: 
+          Fn::GetAtt:
+            - ServerStack
+            - Outputs.AppServerSecurityGroup
+        EncryptInTransit: TRUE
+        NodeType: cache.t3.micro
+        NumCacheClusters: 1
+        OrgName: !Ref OrgName
+        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: TRUE
 
   ServerStack:
     DependsOn:
@@ -663,7 +645,7 @@ Resources:
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 80
         InstanceSubnet: Private
-        InstanceType: t3.micro
+        InstanceType: t3.medium
         LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
         LoadBalancerPriority: 100
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
@@ -675,29 +657,29 @@ Resources:
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
 
-  # SchedulerStack:
-  #   DependsOn:
-  #     - DBStack
-  #     - ServerStack
-  #   Condition: IsNotProd
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       StartScheduleExpression: !Ref StartScheduleExpression
-  #       StopScheduleExpression: !Ref StopScheduleExpression
-  #       UseFriendlyNames: FALSE
-  #       CodeDeployApplicationName:
-  #         Fn::GetAtt:
-  #           - DeployStack
-  #           - Outputs.CodeDeployApplicationName
-  #       CodeDeployDeploymentGroupName:
-  #         Fn::GetAtt:
-  #           - DeployStack
-  #           - Outputs.CodeDeployDeploymentGroupName
+  SchedulerStack:
+    DependsOn:
+      - DBStack
+      - ServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployDeploymentGroupName
 
   # BackupStack:
   #   DependsOn: 
@@ -720,11 +702,11 @@ Resources:
   #             - Outputs.AppServerEFSArn
   #       BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
 
-# Outputs:
+Outputs:
 
-#   DeploymentUserGroup:
-#     Description: Add the BitBucket user into this group
-#     Value:
-#       Fn::GetAtt:
-#         - DeployStack
-#         - Outputs.DeploymentUserGroup
+  DeploymentUserGroup:
+    Description: Add the BitBucket user into this group
+    Value:
+      Fn::GetAtt:
+        - DeployStack
+        - Outputs.DeploymentUserGroup
