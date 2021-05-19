@@ -1,0 +1,251 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: A scheduler for Databases, individual EC2 instances, and autoscaling groups
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Schedule
+        Parameters:
+          - DatabaseInstanceName
+          - BeginPeakSchedule
+          - EndPeakSchedule
+          - PeakSize
+          - RegularSize
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      BeginPeakSchedule:
+        default: Peak Schedule CRON Expression
+      EndPeakSchedule:
+        default: Regular Schedule CRON Expression
+      PeakSize:
+        default: Database size during peak times
+      RegularSize:
+        default: Database size during regular times
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 14
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DatabaseInstanceName:
+    Description: The name of a database instance
+    Type: String
+    Default: ''
+  BeginPeakSchedule:
+    Description: Schedule expression when to go to peak size
+    Type: String
+    Default: cron(30 22 ? * SUN-THU *)
+  EndPeakSchedule:
+    Description: Schedule expression when to go back to regular size
+    Type: String
+    Default: cron(30 11 ? * MON-FRI *)
+  PeakSize:
+    Description: Database size at peak
+    Type: String
+    Default: db.t3.medium
+  RegularSize:
+    Description: Database regular size (outside of peak)
+    Type: String
+    Default: db.t3.micro
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# IAM Section
+####
+
+  LambdaResizeDBInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ResizeDBPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:ModifyDBInstance
+                Resource: !Join [":", ["arn:aws:rds", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "db", !Ref DatabaseInstanceName]]
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"  
+
+  ###
+  # Resize DB Instance
+  ###
+
+  PeakFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function resizing a DB instance
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaResizeDBInstanceRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_ID: !Ref DatabaseInstanceName
+          INSTANCE_SIZE: !Ref PeakSize
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            InstanceID=os.environ['INSTANCE_ID']
+            InstanceClass=os.environ['INSTANCE_SIZE']
+
+            try:
+              rds = boto3.client('rds',region_name=region)
+
+              logger.info('Resizing DB Instance : ' + str(InstanceID) + ' to: ' + str(InstanceClass))
+              rds.modify_db_instance(
+                DBInstanceIdentifier=InstanceID,
+                DBInstanceClass=InstanceClass,
+                ApplyImmediately=True
+              )
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  RegularFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function resizing a DB instance
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaResizeDBInstanceRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_ID: !Ref DatabaseInstanceName
+          INSTANCE_SIZE: !Ref RegularSize
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            InstanceID=os.environ['INSTANCE_ID']
+            InstanceClass=os.environ['INSTANCE_SIZE']
+
+            try:
+              rds = boto3.client('rds',region_name=region)
+
+              logger.info('Resizing DB Instance : ' + str(InstanceID) + ' to: ' + str(InstanceClass))
+              rds.modify_db_instance(
+                DBInstanceIdentifier=InstanceID,
+                DBInstanceClass=InstanceClass,
+                ApplyImmediately=True
+              )
+
+            except Exception:
+              logger.exception('Error Encountered')
+  
+####
+# CloudWatch Section
+####
+
+  PeakDBEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Join [' ',[ Peak, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref BeginPeakSchedule]]
+      ScheduleExpression: !Ref BeginPeakSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt PeakFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, rds, db, start]]
+
+  PeakDBInstanceEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PeakFunction
+      Action:  lambda:InvokeFunction
+      Principal:  events.amazonaws.com
+      SourceArn: !GetAtt PeakDBEventRule.Arn
+
+  RegularDBEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Join [' ',[ Regular, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref EndPeakSchedule]]
+      ScheduleExpression: !Ref EndPeakSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt RegularFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, rds, db, stop]]
+
+  RegularDBInstanceEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RegularFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RegularDBEventRule.Arn
