@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for employ.asia
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: dns-asia
+    MinLength: 3
+    MaxLength: 9
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: employ
+    AllowedPattern: ^[a-z]+(-[a-z]+)*$
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+  DomainName:
+    Description: The domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: employ.asia
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join [' ',[Hosted Zone for, !Ref DomainName]]
+      Name: !Ref DomainName
+      HostedZoneTags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], hostedzone]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  HostedZoneDNSSECSigningKey:
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: arn:aws:kms:us-east-1:489336767866:key/52683884-d204-4e05-875b-33625197293f
+      Name: key_signing_key
+      Status: ACTIVE
+
+  HostedZoneDNSSEC:
+    DependsOn: HostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref HostedZone
+
+  HostingSSLValidationRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[_8cd1577b7e6f9ff1d01fe9d7afb887c6, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - _7aaef7349ea7488e3515562e4f76e27b.jddtvkljgg.acm-validations.aws
+
+  ###
+  # WWW records are pointing to the iScale Hosting AWS Account
+  ###
+
+  WWWRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.', [www, !Ref DomainName]]
+      Type: A
+      AliasTarget:
+        DNSName: hosti-publi-jop96qi64s4h-402462131.us-west-2.elb.amazonaws.com
+        HostedZoneId: Z1H1FL5HABSF5 #Hardcoded for the iScale Hosting ELB
+
+  WWWNoRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: hosti-publi-jop96qi64s4h-402462131.us-west-2.elb.amazonaws.com
+        HostedZoneId: Z1H1FL5HABSF5 #Hardcoded for the iScale Hosting ELB

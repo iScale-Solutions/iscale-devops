@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Employ.global Website
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - LoadBalancerStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerHostName
+          - LoadBalancerPriority
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      LoadBalancerHostName:
+        default: Load balancer Hostname
+      LoadBalancerPriority:
+        default: Load Balancer Rule Priority
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
+      ClientDomainName:
+        default: Domain Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: www
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: employ
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: employ.asia
+    MinLength: 1
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: www
+    MaxLength: 12
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 990
+    MinValue: 1
+    MaxValue: 50000
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: HostingProductionELB
+    MinLength: 1
+  SSLCertificateArn:
+    Description: (ELB) SSL Certificate ARN
+    Type: String
+    Default: arn:aws:acm:us-west-2:178070162686:certificate/aba53cf2-ae7b-45c3-8ea2-dcba5a1d7731
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+      
+Resources:
+
+  ####
+  # Certificate Section
+  ####
+
+  DomainListenerCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties: 
+      Certificates: 
+        - CertificateArn: !Ref SSLCertificateArn
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
+
+  DomainRedirectELBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            Host: www.employ.global
+            Path: "/#{path}"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref ClientDomainName
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority: 990
+
+  WWWRedirectELBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            Host: www.employ.global
+            Path: "/#{path}"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority: 991
