@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Global Accelerator
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Backup Configuration
+        Parameters:
+          - BackupARNList
+          - BackupTime
+          - ColdStorageTrigger
+          - DailyExpiration
+          - MonthlyExpiration
+          - TagName
+          - TagValue
+          - WeeklyExpiration
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  LoadBalancerStackName:
+    Description: THe name of the load balancer stack.
+    Type: String
+    MinLength: 1
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  Accelerator:
+    Type: AWS::GlobalAccelerator::Accelerator
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Enabled: true
+
+  HTTPListener:
+    Type: AWS::GlobalAccelerator::Listener
+    Properties:
+      AcceleratorArn: !Ref Accelerator
+      Protocol: TCP
+      PortRanges:
+        - FromPort: 80
+          ToPort: 80
+
+  HTTPEndpointGroup:
+    Type: AWS::GlobalAccelerator::EndpointGroup
+    Properties:
+      ListenerArn: !Ref HTTPListener
+      EndpointGroupRegion: !Ref 'AWS::Region'
+      TrafficDialPercentage: 100
+      EndpointConfigurations:
+        - EndpointId:
+            Fn::ImportValue:
+              'Fn::Sub': '${LoadBalancerStackName}-LoadBalancerArn'
+          ClientIPPreservationEnabled: true
+
+  HTTPSListener:
+    Type: AWS::GlobalAccelerator::Listener
+    Properties:
+      AcceleratorArn: !Ref Accelerator
+      Protocol: TCP
+      PortRanges:
+        - FromPort: 443
+          ToPort: 443
+
+  HTTPSEndpointGroup:
+    Type: AWS::GlobalAccelerator::EndpointGroup
+    Properties:
+      ListenerArn: !Ref HTTPSListener
+      EndpointGroupRegion: !Ref 'AWS::Region'
+      TrafficDialPercentage: 100
+      EndpointConfigurations:
+        - EndpointId:
+            Fn::ImportValue:
+              'Fn::Sub': '${LoadBalancerStackName}-LoadBalancerArn'
+          ClientIPPreservationEnabled: true
+
+Outputs:
+  AcceleratorDnsName:
+    Description: Accelerator DNS Name
+    Value:
+      Fn::GetAtt:
+      - Accelerator
+      - DnsName
+
+  
