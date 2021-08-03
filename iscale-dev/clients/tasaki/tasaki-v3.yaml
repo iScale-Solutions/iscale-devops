@@ -1,0 +1,702 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions resources for Tasaki
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - LoadBalancerStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerPriority
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+      - Label:
+          default: Magento Repository Access
+        Parameters:
+          - MagentoPublicKey
+          - MagentoPrivateKey
+          - AmastyUsername
+          - AmastyPassword
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      AmastyUsername:
+        default: Amasty Repository Username
+      AmastyPassword:
+        default: Amasty Repository Password
+      LoadBalancerPriority:
+        default: Load Balancer Rule Priority
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceAMI:
+        default: Instance AMI
+      MagentoPublicKey:
+        default: Magento Public Key
+      MagentoPrivateKey:
+        default: Magento Private Key
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  AmastyUsername:
+    NoEcho: true
+    Description: Amasty Repository Username
+    Type: String
+  AmastyPassword: 
+    NoEcho: true
+    Description: Amasty Repository Password
+    Type: String
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: iscale-software.com
+    MinLength: 1
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0bc06212a56393ee1 #Centos 7
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 450
+    MinValue: 1
+    MaxValue: 50000
+  MagentoPublicKey:
+    NoEcho: true
+    Description: Magento Repository Public Key
+    Type: String
+    MinLength: 1
+  MagentoPrivateKey:
+    NoEcho: true
+    Description: Magento Repository Private Key
+    Type: String
+    MinLength: 1
+  LoadBalancerStackName:
+    Description: THe name of the load balancer stack.
+    Type: String
+    Default: iscale-dev-stg-uw2-alb
+    MinLength: 1
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-tasaki-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasAmasty: !And [!Not [!Equals [!Ref AmastyUsername, '']], !Not [!Equals [!Ref AmastyPassword, '']]]
+
+Resources:
+
+  RepoSecrets:
+    Condition: HasAmasty
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, repos]]
+      Description: !Join [' ', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], Magento Repositories Secrets]]
+      GenerateSecretString:
+        SecretStringTemplate: !Sub
+          - |
+            {
+              "MAGENTO_USERNAME": "${MAGENTO_USERNAME}",
+              "MAGENTO_PASSWORD": "${MAGENTO_PASSWORD}",
+              "AMASTY_USERNAME": "${AMASTY_USERNAME}",
+              "AMASTY_PASSWORD": "${AMASTY_PASSWORD}"
+            }
+          - AMASTY_USERNAME: !Ref AmastyUsername
+            AMASTY_PASSWORD: !Ref AmastyPassword
+            MAGENTO_USERNAME: !Ref MagentoPublicKey
+            MAGENTO_PASSWORD: !Ref MagentoPrivateKey
+        GenerateStringKey: MagentoRepos
+
+  DBStack:
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+        EnableCPUCreditAlarm: true
+        EnableEnhancedMonitoring: true
+        EnvName: !Ref EnvName
+        Engine: aurora-mysql
+        EngineVersion: 5.7.mysql_aurora.2.09.2
+        Family: aurora-mysql5.7
+        InstanceType: db.t3.small
+        MasterUser: root
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
+  CacheStack:
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateUR  L: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        NodeType: cache.t3.micro
+        NumCacheClusters: 1
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: TRUE
+
+  DeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+  
+  AppServerStack:
+    Condition: IsNotProd
+    DependsOn:
+      - CacheStack
+      - DBStack
+      - DeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-magento.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
+        DatabaseClusterARN:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBClusterARN
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterEndpointAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.ClusterPort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        LoadBalancerPriority: !Ref LoadBalancerPriority
+        LoadBalancerStackName: !Ref LoadBalancerStackName
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstanceOS: CentOS
+        InstanceSpotPrice: 0.5
+        InstanceType: t3.medium
+        SNSStackName: !Ref SNSStackName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        LoadBalancerHostName: !If [IsStaging, 'tasaki-staging', 'tasaki']
+        MagentoPublicKey: !Ref MagentoPublicKey
+        MagentoPrivateKey: !Ref MagentoPrivateKey
+        UseFriendlyNames: false
+        MagentoRepoSecrets: !Ref RepoSecrets
+
+  BackupStack:
+    Condition: IsNotProd
+    DependsOn:
+      - DBStack
+      - AppServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBClusterARN
+            - Fn::GetAtt:
+              - AppServerStack
+              - Outputs.AppServerEFSArn
+
+  SchedulerStack:
+    Condition: IsNotProd
+    DependsOn:
+      - DBStack
+      - AppServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseClusterArn:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBClusterARN
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+  # Additional language Specific DNS Records
+
+  SSLListenerRuleCNFRHKJPKR:
+    Condition: IsNotProd
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn:
+            Fn::GetAtt:
+              - AppServerStack
+              - Outputs.AppServerTargetGroup
+      Conditions:
+        - Field: host-header
+          Values:
+            - Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-cn
+                  - tasaki-staging-cn
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-fr
+                  - tasaki-staging-fr
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-hk
+                  - tasaki-staging-hk
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-jp
+                  - tasaki-staging-jp
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-kr
+                  - tasaki-staging-kr
+                - Ref: ClientDomainName
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority: !If
+        - IsDev
+        - 720
+        - 735
+
+  SSLListenerRuleSGTWUK:
+    Condition: IsNotProd
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn:
+            Fn::GetAtt:
+              - AppServerStack
+              - Outputs.AppServerTargetGroup
+      Conditions:
+        - Field: host-header
+          Values:
+            - Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-sg
+                  - tasaki-staging-sg
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-tw
+                  - tasaki-staging-tw
+                - Ref: ClientDomainName
+            - Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-uk
+                  - tasaki-staging-uk
+                - Ref: ClientDomainName
+      ListenerArn:
+        Fn::ImportValue:
+          Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority: !If
+        - IsDev
+        - 721
+        - 736
+
+#####
+# Route53 Extra records
+#####
+
+  CNDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsNotProd
+    Properties:
+      Comment: CN Record
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-cn
+                  - tasaki-staging-cn
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  FRDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsNotProd
+    Properties:
+      Comment: FR Record
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-fr
+                  - tasaki-staging-fr
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  KRDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsNotProd
+    Properties:
+      Comment: KR Record
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-kr
+                  - tasaki-staging-kr
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  SGDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsNotProd
+    Properties:
+      Comment: SG Record
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-sg
+                  - tasaki-staging-sg
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  HKDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsNotProd
+    Properties:
+      Comment: HK Record
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-hk
+                  - tasaki-staging-hk
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+  
+  JPDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsNotProd
+    Properties:
+      Comment: JP Record
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-jp
+                  - tasaki-staging-jp
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  TWDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsNotProd
+    Properties:
+      Comment: TW Record
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-tw
+                  - tasaki-staging-tw
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  UKDNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: IsNotProd
+    Properties:
+      Comment: UK Record
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Ref: ClientDomainName
+            - '.'
+      RecordSets:
+        - Name:
+            Fn::Join:
+              - '.'
+              - - !If
+                  - IsDev
+                  - tasaki-uk
+                  - tasaki-staging-uk
+                - Ref: ClientDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-CanonicalHostedZoneID"
+            DNSName:
+              Fn::ImportValue:
+                Fn::Sub: "${LoadBalancerStackName}-DNSName"
+
+  AllowFutureSpiritDeployBucket:
+    Type: AWS::S3::BucketPolicy
+    Condition: IsStagingOrProd
+    Properties:
+      Bucket: !GetAtt [DeployStack, Outputs.DeploymentBucketName]
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+            Effect: Allow
+            Resource:
+              - !GetAtt [DeployStack, Outputs.DeploymentBucketArn]
+              - !Join ['', [!GetAtt [DeployStack, Outputs.DeploymentBucketArn], '/*']]
+            Principal:
+              AWS:
+                - 181473428529 #Future Spirit
+
+Outputs:
+  DeploymentUserGroup:
+    Description: Add your BitBucket user into this group
+    Value:
+      Fn::GetAtt:
+        - DeployStack
+        - Outputs.DeploymentUserGroup
