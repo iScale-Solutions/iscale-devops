@@ -20,6 +20,7 @@ Metadata:
       - Label:
           default: Cache Configuration
         Parameters:
+          - EngineVersion
           - Port
           - NodeType
           - NumCacheClusters
@@ -33,6 +34,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      EngineVersion:
+        default: Cache engine version
       ExportOutputs:
         default: Export Stack Outputs
       Port:
@@ -71,6 +74,13 @@ Parameters:
       - Staging
       - Development
       - Test
+  EngineVersion:
+    Description: Cache engine version
+    Type: String
+    Default: 5.0.6
+    AllowedValues:
+      - 5.0.6
+      - 6.x
   EncryptInTransit:
     Description: Set to TRUE to encrypt in transit
     Type: String
@@ -142,6 +152,8 @@ Conditions:
   HasNotAllowSecurityGroup: !Equals [!Ref AllowSecurityGroup, '']
   HasExportOutputs: !Equals [!Ref ExportOutputs, TRUE]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
+  UseV5: !Equals [!Ref EngineVersion, 5.0.6]
+  UseV6: !Equals [!Ref EngineVersion, 6.x]
 
 Resources:
 
@@ -181,10 +193,18 @@ Resources:
       CidrIp: 0.0.0.0/0
 
   Redis50CacheParameterGroup:
+    Condition: UseV5
     Type: AWS::ElastiCache::ParameterGroup
     Properties:
       Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
       CacheParameterGroupFamily: redis5.0
+  
+  Redis60CacheParameterGroup:
+    Condition: UseV6
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, v6, cache]]
+      CacheParameterGroupFamily: redis6.x
 
   ElasticacheSubnetGroup:
     Type: AWS::ElastiCache::SubnetGroup
@@ -208,7 +228,10 @@ Resources:
       NumCacheClusters: !Ref NumCacheClusters
       AutomaticFailoverEnabled: false
       CacheNodeType: !Ref NodeType
-      CacheParameterGroupName: !Ref Redis50CacheParameterGroup
+      CacheParameterGroupName: !If
+        - UseV5
+        - !Ref Redis50CacheParameterGroup
+        - !Ref Redis60CacheParameterGroup
       Port: !Ref Port
       CacheSubnetGroupName: !Ref ElasticacheSubnetGroup
       SecurityGroupIds: [!GetAtt ElasticacheSecurityGroup.GroupId]
@@ -219,7 +242,7 @@ Resources:
       AtRestEncryptionEnabled: true
       TransitEncryptionEnabled: !Ref EncryptInTransit
       Engine: redis
-      EngineVersion: 5.0.6
+      EngineVersion: !Ref EngineVersion
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
