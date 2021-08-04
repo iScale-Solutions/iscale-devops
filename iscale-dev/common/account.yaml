@@ -53,7 +53,11 @@ Conditions:
 
 Resources:
 
-  S3Bucket: 
+###
+# CloudTrail
+###
+
+  S3Bucket:
     DeletionPolicy: Retain
     Type: AWS::S3::Bucket
     Properties:
@@ -67,6 +71,9 @@ Resources:
         - AbortIncompleteMultipartUpload:
             DaysAfterInitiation: 3
           Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3BucketAccessLogsBucket
+        LogFilePrefix: cloudtrail-access-logs
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -77,47 +84,156 @@ Resources:
           Value: !Join [ '-', [!Ref OrgName , cloudtrail]]
         - Key: Organization
           Value: !Ref OrgName
-    
-  S3BucketPolicy: 
+
+  S3BucketAccessLogsBucket:
+    DeletionPolicy: Retain
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketName: !Join ['-', [!Ref OrgName, 'cloudtrail-access-logs']]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  S3BucketPolicy:
+    DeletionPolicy: Retain
     Type: AWS::S3::BucketPolicy
-    Properties: 
-      Bucket: 
+    Properties:
+      Bucket:
         Ref: S3Bucket
       PolicyDocument: 
         Version: 2012-10-17
-        Statement: 
+        Statement:
           - Sid: AWSCloudTrailAclCheck
             Effect: Allow
-            Principal: 
+            Principal:
               Service: cloudtrail.amazonaws.com
             Action: s3:GetBucketAcl
-            Resource: 
+            Resource:
               !Sub |-
                 arn:aws:s3:::${S3Bucket}
           - Sid: AWSCloudTrailWrite
             Effect: Allow
-            Principal: 
+            Principal:
               Service: cloudtrail.amazonaws.com
             Action: s3:PutObject
             Resource:
               !Sub |-
                 arn:aws:s3:::${S3Bucket}/AWSLogs/${AWS::AccountId}/*
-            Condition: 
+            Condition:
               StringEquals:
                 s3:x-amz-acl: bucket-owner-full-control
-   
+
+  CloudTrailKmsKey:
+    DeletionPolicy: Retain
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-policy
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':root']]
+            Action:
+              - kms:*
+            Resource: '*'
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':role/MasterAccountAccessRole']]
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: '*'
+          - Sid: Allow CloudTrail to encrypt and decrypt logs
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+              - kms:ReEncryptFrom
+            Resource: '*'
+            Condition:
+              StringLike:
+                kms:EncryptionContext:aws:cloudtrail:arn: !Join [':',['arn:aws:cloudtrail:*', !Ref 'AWS::AccountId', 'trail/*']]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, cloudtrail]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  CloudTrailKmsAlias:
+    DeletionPolicy: Retain
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Join ['-',[!Join ['/', [alias, !Ref OrgName]], cloudtrail]]
+      TargetKeyId: !Ref CloudTrailKmsKey
+
+  CloudTrailCloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['/', ['/aws/cloudtrail', !Ref OrgName]]
+
+  CloudTrailRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: '/'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cloudtrail.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CloudTrailLogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+
   CloudTrail:
     DeletionPolicy: Retain
     DependsOn:
       - S3BucketPolicy
     Type: AWS::CloudTrail::Trail
     Properties:
+      CloudWatchLogsLogGroupArn: !GetAtt CloudTrailCloudWatchLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt CloudTrailRole.Arn
+      EnableLogFileValidation: true
       S3BucketName:
         Ref: S3Bucket
       IsLogging: true
       IsMultiRegionTrail: true
       IncludeGlobalServiceEvents: true
-      EnableLogFileValidation: true
+      KMSKeyId: !Ref CloudTrailKmsKey
       TrailName: !Join ['-', [!Ref OrgName, trail]]
 
   AdminGroup:
@@ -190,6 +306,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
         - arn:aws:iam::aws:policy/AmazonSSMDirectoryServiceAccess
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
 
   EC2BasicInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -198,6 +315,7 @@ Resources:
         - Ref: EC2BasicSSMIamRole
 
   MasterAccountAccessRole:
+    DeletionPolicy: Retain
     Type: AWS::IAM::Role
     Properties:
       Description: Administrator access from trusted parties
