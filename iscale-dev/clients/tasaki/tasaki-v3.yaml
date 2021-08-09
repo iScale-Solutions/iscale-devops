@@ -204,9 +204,9 @@ Resources:
         EnableCPUCreditAlarm: true
         EnableEnhancedMonitoring: true
         EnvName: !Ref EnvName
-        Engine: aurora-mysql
-        EngineVersion: 5.7.mysql_aurora.2.09.2
-        Family: aurora-mysql5.7
+        Engine: mysql
+        EngineVersion: 8.0.23
+        Family: mysql8.0
         InstanceType: db.t3.small
         MasterUser: root
         NetworkStackName: !Ref NetworkStackName
@@ -218,16 +218,30 @@ Resources:
     Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateUR  L: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
       Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
+        EngineVersion: 6.x
         NetworkStackName: !Ref NetworkStackName
         NodeType: cache.t3.micro
         NumCacheClusters: 1
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: TRUE
+
+  SearchStack:
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticsearch.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ElasticsearchVersion: 7.9
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
   DeployStack:
     Type: AWS::CloudFormation::Stack
@@ -265,18 +279,18 @@ Resources:
           Fn::GetAtt:
             - CacheStack
             - Outputs.SecurityGroupId
-        DatabaseClusterARN:
+        DatabaseInstanceARN:
           Fn::GetAtt:
             - DBStack
-            - Outputs.DBClusterARN
+            - Outputs.DBInstanceARN
         DatabaseEndpoint:
           Fn::GetAtt:
             - DBStack
-            - Outputs.ClusterEndpointAddress
+            - Outputs.DBInstanceAddress
         DatabasePort:
           Fn::GetAtt:
             - DBStack
-            - Outputs.ClusterPort
+            - Outputs.DBInstancePort
         DatabaseSecurityGroupId:
           Fn::GetAtt:
             - DBStack
@@ -291,7 +305,7 @@ Resources:
         SNSStackName: !Ref SNSStackName
         NetworkStackName: !Ref NetworkStackName
         ClientDomainName: !Ref ClientDomainName
-        LoadBalancerHostName: !If [IsStaging, 'tasaki-staging', 'tasaki']
+        LoadBalancerHostName: !If [IsStaging, 'tasakiv3-staging', tasakiv3]
         MagentoPublicKey: !Ref MagentoPublicKey
         MagentoPrivateKey: !Ref MagentoPrivateKey
         UseFriendlyNames: false
@@ -313,7 +327,7 @@ Resources:
           - ','
           - - Fn::GetAtt:
               - DBStack
-              - Outputs.DBClusterARN
+              - Outputs.DBInstanceARN
             - Fn::GetAtt:
               - AppServerStack
               - Outputs.AppServerEFSArn
@@ -333,10 +347,10 @@ Resources:
         StartScheduleExpression: !Ref StartScheduleExpression
         StopScheduleExpression: !Ref StopScheduleExpression
         UseFriendlyNames: FALSE
-        DatabaseClusterArn:
+        DatabaseInstanceName:
           Fn::GetAtt:
             - DBStack
-            - Outputs.DBClusterARN
+            - Outputs.DBInstanceName
         CodeDeployApplicationName:
           Fn::GetAtt:
             - DeployStack
@@ -365,44 +379,44 @@ Resources:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-cn
-                  - tasaki-staging-cn
+                  - tasakiv3-cn
+                  - tasakiv3-staging-cn
                 - Ref: ClientDomainName
             - Fn::Join:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-fr
-                  - tasaki-staging-fr
+                  - tasakiv3-fr
+                  - tasakiv3-staging-fr
                 - Ref: ClientDomainName
             - Fn::Join:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-hk
-                  - tasaki-staging-hk
+                  - tasakiv3-hk
+                  - tasakiv3-staging-hk
                 - Ref: ClientDomainName
             - Fn::Join:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-jp
-                  - tasaki-staging-jp
+                  - tasakiv3-jp
+                  - tasakiv3-staging-jp
                 - Ref: ClientDomainName
             - Fn::Join:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-kr
-                  - tasaki-staging-kr
+                  - tasakiv3-kr
+                  - tasakiv3-staging-kr
                 - Ref: ClientDomainName
       ListenerArn:
         Fn::ImportValue:
           Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
       Priority: !If
         - IsDev
-        - 720
-        - 735
+        - 820
+        - 835
 
   SSLListenerRuleSGTWUK:
     Condition: IsNotProd
@@ -443,12 +457,12 @@ Resources:
           Fn::Sub: "${LoadBalancerStackName}-ApplicationListenerArn"
       Priority: !If
         - IsDev
-        - 721
-        - 736
+        - 821
+        - 836
 
-#####
+####
 # Route53 Extra records
-#####
+####
 
   CNDNSRecord:
     Type: AWS::Route53::RecordSetGroup
@@ -466,8 +480,8 @@ Resources:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-cn
-                  - tasaki-staging-cn
+                  - tasakiv3-cn
+                  - tasakiv3-staging-cn
                 - Ref: ClientDomainName
           Type: A
           AliasTarget:
@@ -494,8 +508,8 @@ Resources:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-fr
-                  - tasaki-staging-fr
+                  - tasakiv3-fr
+                  - tasakiv3-staging-fr
                 - Ref: ClientDomainName
           Type: A
           AliasTarget:
@@ -522,8 +536,8 @@ Resources:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-kr
-                  - tasaki-staging-kr
+                  - tasakiv3-kr
+                  - tasakiv3-staging-kr
                 - Ref: ClientDomainName
           Type: A
           AliasTarget:
@@ -550,8 +564,8 @@ Resources:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-sg
-                  - tasaki-staging-sg
+                  - tasakiv3-sg
+                  - tasakiv3-staging-sg
                 - Ref: ClientDomainName
           Type: A
           AliasTarget:
@@ -578,8 +592,8 @@ Resources:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-hk
-                  - tasaki-staging-hk
+                  - tasakiv3-hk
+                  - tasakiv3-staging-hk
                 - Ref: ClientDomainName
           Type: A
           AliasTarget:
@@ -606,8 +620,8 @@ Resources:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-jp
-                  - tasaki-staging-jp
+                  - tasakiv3-jp
+                  - tasakiv3-staging-jp
                 - Ref: ClientDomainName
           Type: A
           AliasTarget:
@@ -634,8 +648,8 @@ Resources:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-tw
-                  - tasaki-staging-tw
+                  - tasakiv3-tw
+                  - tasakiv3-staging-tw
                 - Ref: ClientDomainName
           Type: A
           AliasTarget:
@@ -662,8 +676,8 @@ Resources:
               - '.'
               - - !If
                   - IsDev
-                  - tasaki-uk
-                  - tasaki-staging-uk
+                  - tasakiv3-uk
+                  - tasakiv3-staging-uk
                 - Ref: ClientDomainName
           Type: A
           AliasTarget:
