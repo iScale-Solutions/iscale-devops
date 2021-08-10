@@ -236,12 +236,23 @@ Resources:
       KMSKeyId: !Ref CloudTrailKmsKey
       TrailName: !Join ['-', [!Ref OrgName, trail]]
 
+###
+# Basic Roles and groups
+###
+
   AdminGroup:
     Type: AWS::IAM::Group
     Properties:
       GroupName: Administrators
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AdministratorAccess
+
+  AWSSupportGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: AWSSupportGroup
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSSupportAccess
 
   BillingGroup:
     Type: AWS::IAM::Group
@@ -376,6 +387,102 @@ Resources:
               Bool:
                 aws:MultiFactorAuthPresent: false
       Path: /
+
+###
+# AWS Config
+###
+
+  ConfigBucket:
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+
+  ConfigBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ConfigBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AWSConfigBucketPermissionsCheck
+            Effect: Allow
+            Principal:
+              Service:
+                - config.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${ConfigBucket}'
+          - Sid: AWSConfigBucketDelivery
+            Effect: Allow
+            Principal:
+              Service:
+                - config.amazonaws.com
+            Action: s3:PutObject
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${ConfigBucket}/AWSLogs/${AWS::AccountId}/*'
+
+  ConfigTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'config-topic-${AWS::AccountId}'
+      DisplayName: AWS Config Notification Topic
+      KmsMasterKeyId: 'alias/aws/sns'
+
+  ConfigTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref ConfigTopic
+      PolicyDocument:
+        Statement:
+          - Sid: AWSConfigSNSPolicy
+            Action:
+              - sns:Publish
+            Effect: Allow
+            Resource: !Ref ConfigTopic
+            Principal:
+              Service:
+                - config.amazonaws.com
+
+  ConfigRecorderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - config.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWS_ConfigRole'
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    DependsOn:
+      - ConfigBucketPolicy
+    Properties:
+      RoleARN: !GetAtt ConfigRecorderRole.Arn
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: true
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    DependsOn:
+      - ConfigBucketPolicy
+    Properties:
+      ConfigSnapshotDeliveryProperties:
+        DeliveryFrequency: TwentyFour_Hours
+      S3BucketName: !Ref ConfigBucket
+      SnsTopicARN: !Ref ConfigTopic
 
 Outputs:
   
