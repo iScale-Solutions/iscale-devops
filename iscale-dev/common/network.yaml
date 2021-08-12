@@ -33,6 +33,8 @@ Metadata:
         Parameters:
           - CreateJumpHost
           - JumpHostAMI
+          - JumpHostHostname
+          - HostedZoneStackName
     ParameterLabels:
       Name:
         default: Resource Name
@@ -50,10 +52,18 @@ Metadata:
         default: Log Retention Period
       MultiAz:
         default: Multiple Availability Zones
+      CreateJumpHost:
+        default: Create Jump Host
       CreatePrivate:
         default: Create Private Subnets
       CreateMultipleNatGateway:
         default: Create Multiple Nat Gateways
+      JumpHostAMI:
+        default: Jump host AMI
+      JumpHostHostname:
+        default: Jump host hostname (e.g. jump)
+      HostedZoneStackName:
+        default: Hosted Zone stack name (to determine domain name of the jump host FQDN)
       PublicSubnet1Index:
         default: Public Subnet 1 CIDR Index
       PublicSubnet2Index:
@@ -143,6 +153,14 @@ Parameters:
     Description: Jump host AMI ID
     Type: AWS::EC2::Image::Id
     Default: ami-0f511ead81ccde020
+  JumpHostHostname:
+    Description: Jump host hostname (optional)
+    Type: String
+    Default: ''
+  HostedZoneStackName:
+    Description: HostedZone stack name (optional)
+    Type: String
+    Default: ''
   PublicSubnet1Index:
     Description: CIDR Index for Public Subnet 1
     Type: Number
@@ -182,6 +200,7 @@ Conditions:
   IsUsEast: !Equals [!Ref 'AWS::Region', us-east-1]
   IsMultiAz: !Equals [!Ref MultiAz, true]
   IsCreateJumpHost: !Equals [!Ref CreateJumpHost, true]
+  IsCreateJumpHostDynDNS: !And [!Not [!Equals [!Ref JumpHostHostname, '']], !Not [!Equals [!Ref HostedZoneStackName, '']]]
   IsCreatePrivate: !Equals [!Ref CreatePrivate, true]
   IsCreateMultipleNatGateway: !Equals [!Ref CreateMultipleNatGateway, true]
   IsEitherMultiAzOrPrivate: !Or [Condition: IsMultiAz, Condition: IsCreatePrivate]
@@ -637,6 +656,23 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump, host]]
+
+  JumpHostDynDNSStack:
+    Condition: IsCreateJumpHostDynDNS
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/auto-dns.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        EC2InstanceId: !Ref JumpHost
+        HostedZoneStackName: !Ref HostedZoneStackName
+        RecordFQDN: !Join
+          - '.'
+          - - !Ref JumpHostHostname
+            - !ImportValue
+                'Fn::Sub': '${HostedZoneStackName}-HostedZoneDomainName'
 
 ####
 # CloudWatch Section
