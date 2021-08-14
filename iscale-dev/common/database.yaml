@@ -202,6 +202,7 @@ Parameters:
       - aurora-mysql
       - aurora-postgresql
       - mysql
+      - oracle-se2
       - sqlserver-web
   EngineVersion:
     Description: The version number of the database engine to use.
@@ -289,6 +290,7 @@ Conditions:
   IsAuroraMySQL: !Equals [!Ref Engine, aurora-mysql]
   IsSQLServer: !Equals [!Ref Engine, sqlserver-web]
   IsAurora: !Or [Condition: IsAuroraPostgreSQL, Condition: IsAuroraMySQL]
+  IsOracle: !Equals [!Ref Engine, oracle-se2]
   HasDBUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
   HasDBRootPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
   HasDBPasswords: !Or [Condition: HasDBUserPassword, Condition: HasDBRootPassword]
@@ -446,16 +448,31 @@ Resources:
         - log_connections: 1
         - !If
           - IsSQLServer
-          - 'default trace enabled': 1
-          - sql_mode: IGNORE_SPACE #else MySQL
-            slow_query_log: 1
-            long_query_time: 2
-            log_bin_trust_function_creators: 1
-            log_output: FILE
+          - default trace enabled: 1
+          - !If
+            - IsOracle
+            - archive_lag_target: 300
+            - sql_mode: IGNORE_SPACE #MySQL
+              slow_query_log: 1
+              long_query_time: 2
+              log_bin_trust_function_creators: 1
+              log_output: FILE
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
   
+  OracleParameterGroup:
+    Condition: IsOracle
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Family: !Ref Family
+      Parameters:
+        archive_lag_target: 300
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
   AuroraMySQLDBParameterGroup:
     Type: AWS::RDS::DBParameterGroup
     Condition: IsAuroraMySQL
@@ -565,6 +582,7 @@ Resources:
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
       Engine: !Ref Engine
       EngineVersion: !If [HasNoCluster, !Ref EngineVersion, !Ref 'AWS::NoValue']
+      LicenseModel: !If [IsOracle, license-included, !Ref 'AWS::NoValue'] 
       MasterUsername: !If [HasNoCluster, !Ref MasterUser, !Ref 'AWS::NoValue']
       MasterUserPassword: !If
         - HasNoSnapshotAndNoCluster
