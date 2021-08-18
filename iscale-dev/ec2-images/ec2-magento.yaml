@@ -89,10 +89,10 @@ Conditions:
 
 Resources:
 
-  Composer_1_10_17:
+  Composer11017:
     Type: AWS::ImageBuilder::Component
     Properties:
-      Name: Composer 1.10.17
+      Name: Composer-1-10-17
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
@@ -100,9 +100,14 @@ Resources:
       Description: Installs Composer 1.10.17
       ChangeDescription: Initial version
       Data: |
-        name: Composer 1.10.17
+        name: Composer
         description: Installation of Composer 1.10.17
         schemaVersion: 1.0
+        parameters:
+          - Version:
+              type: string
+              default: '1.10.17'
+              description: This is an input parameter.
         phases:
           - name: build
             steps:
@@ -114,13 +119,50 @@ Resources:
               - name: InstallComposer
                 action: ExecuteBash
                 inputs:
-                  commands: |
-                    HOME=/tmp
-                    COMPOSER_HOME=/tmp
-                    php ./composer-setup.php --version=1.10.17
-                    mv /tmp/composer.phar /usr/local/bin/composer
-                    ln -s /usr/local/bin/composer /usr/bin/composer
-  
+                  commands:
+                    - "HOME=/tmp"
+                    - "COMPOSER_HOME=/tmp"
+                    - "php ./composer-setup.php --version={{Version}}"
+                    - "mv /tmp/composer.phar /usr/local/bin/composer"
+                    - "ln -s /usr/local/bin/composer /usr/bin/composer"
+
+  Composer215:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Composer-2-1-5
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs Composer 2.1.5
+      ChangeDescription: Initial version
+      Data: |
+        name: Composer
+        description: Installation of Composer 2.1.5
+        schemaVersion: 1.0
+        parameters:
+          - Version:
+              type: string
+              default: '2.1.5'
+              description: Version
+        phases:
+          - name: build
+            steps:
+              - name: DownloadComposer
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+              - name: InstallComposer
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - "HOME=/tmp"
+                    - "COMPOSER_HOME=/tmp"
+                    - "php ./composer-setup.php --version={{Version}}"
+                    - "mv /tmp/composer.phar /usr/local/bin/composer"
+                    - "ln -s /usr/local/bin/composer /usr/bin/composer"
+
 ###
 # AWS Linux Magento Configurations
 ###
@@ -129,15 +171,38 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, !Ref Name, 'amazon-linux']]
-      Version: 1.0.4
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.0.5/1']]
+      Version: 1.0.5
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.0.6/1']]
       WorkingDirectory: /tmp
       Description: !Join [' ', [!Ref OrgName, !Ref Name, 'amazon-linux']]
       Components: #Max 20
-        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'component/mysql-client/1.0.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/mysql-client/1.0.1/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/php-7-3-linux/1.0.0/1']]
-        - !Ref Composer_1_10_17
-        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'component/apache/1.0.0/1']]
+        - ComponentArn: !Ref Composer11017
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/apache/1.0.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0/1']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  MagentoComposer2iAWSLinuxRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, !Ref Name, 'amazon-linux-composer2']]
+      Version: 1.0.0
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.0.6/1']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', [!Ref OrgName, !Ref Name, 'amazon-linux-composer2']]
+      Components: #Max 20
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/mysql-client/1.0.1/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/php-7-3-linux/1.0.0/1']]
+        - ComponentArn: !Ref Composer215
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/apache/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0/1']]
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
@@ -158,5 +223,18 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
         ImageRecipeARN: !Ref MagentoAWSLinuxRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
+  
+  MagentoComposer2AWSLinuxImageBuilder: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters: 
+        Name: magento-composer2-linux
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref MagentoComposer2iAWSLinuxRecipe
         ShareImage: !Ref ShareImage
         SNSStackName: !Ref SNSStackName
