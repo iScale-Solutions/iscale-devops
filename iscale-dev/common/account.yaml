@@ -13,7 +13,10 @@ Metadata:
         Parameters:
           - AdminUsers
           - CreateReadOnlyUsers
+          - EnableConfigRules
+          - ConfigAlertEmail
           - EnableCISRules
+          - CISAlertEmail
           - ReadOnlyUsers
     
     ParameterLabels:
@@ -21,8 +24,14 @@ Metadata:
         default: Administrators
       OrgName:
         default: Organization Name
+      CISAlertEmail:
+        default: Email for CIS Alerts
+      ConfigAlertEmail:
+        default: Email for Config Alerts
       EnableCISRules:
         default: Enable CIS compliance
+      EnableConfigRules:
+        default: Enable AWS Config
       ReadOnlyUsers:
         default: Read-Only Users
 
@@ -39,9 +48,25 @@ Parameters:
     Type: String
     AllowedValues: [true, false]
 
+  CISAlertEmail:
+    Description: Email address to send CIS Alerts
+    Type: String
+    Default: ''
+
+  ConfigAlertEmail:
+    Description: Email address to send Config Alerts
+    Type: String
+    Default: ''
+
   EnableCISRules:
     Description: Set to true to enable CIS compliance
     Default: false
+    Type: String
+    AllowedValues: [true, false]
+
+  EnableConfigRules:
+    Description: Set to true to enable AWS Config
+    Default: true
     Type: String
     AllowedValues: [true, false]
 
@@ -60,7 +85,10 @@ Parameters:
 Conditions:
   ShouldCreateReadOnlyUsers: !Equals [true, !Ref CreateReadOnlyUsers]
   EnableCIS: !Equals [true, !Ref EnableCISRules]
-  
+  EnableConfig: !Equals [true, !Ref EnableConfigRules]
+  SendCISEmail: !And [Condition: EnableCIS, !Not [ !Equals ['', !Ref CISAlertEmail]]]
+  SendConfigEmail: !And [Condition: EnableConfig, !Not [ !Equals ['', !Ref ConfigAlertEmail]]]
+
 Resources:
 
 ###
@@ -97,7 +125,7 @@ Resources:
 
   S3BucketAccessLogsBucket:
     DeletionPolicy: Retain
-    Type: 'AWS::S3::Bucket'
+    Type: AWS::S3::Bucket
     Properties:
       AccessControl: LogDeliveryWrite
       BucketName: !Join ['-', [!Ref OrgName, 'cloudtrail-access-logs']]
@@ -440,10 +468,15 @@ Resources:
     Properties:
       TopicName: !Sub 'config-topic-${AWS::AccountId}'
       DisplayName: AWS Config Notification Topic
-      KmsMasterKeyId: 'alias/aws/sns'
-      # Subscription:
-      #   - Endpoint: "email@example.com"
-      #     Protocol: "email"
+      KmsMasterKeyId: alias/aws/sns
+
+  ConfigEmailSubscription:
+    Condition: SendConfigEmail
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref ConfigAlertEmail
+      Protocol: email
+      TopicArn: !Ref ConfigTopic
 
   ConfigTopicPolicy:
     Type: AWS::SNS::TopicPolicy
@@ -507,7 +540,15 @@ Resources:
     Properties:
       TopicName: !Sub 'cis-topic-${AWS::AccountId}'
       DisplayName: CIS Notification Topic
-      KmsMasterKeyId: 'alias/aws/sns'
+      KmsMasterKeyId: alias/aws/sns
+
+  CISEmailSubscription:
+    Condition: SendCISEmail
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref CISAlertEmail
+      Protocol: email
+      TopicArn: !Ref CISTopic
 
   UnauthorizedAPICallsAlarm:
     Condition: EnableCIS
