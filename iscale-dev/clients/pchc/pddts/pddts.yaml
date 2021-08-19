@@ -78,7 +78,7 @@ Parameters:
     Description: The name of the organization
     Type: String
     Default: pchc
-    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
     MaxLength: 10
   EnvName:
@@ -90,6 +90,13 @@ Parameters:
       - Staging
       - Development
       - Test
+  BSPMode:
+    Description: BSP Resources to connect to
+    Type: String
+    Default: UAT
+    AllowedValues:
+      - Production
+      - UAT
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com)
     Type: String
@@ -149,12 +156,25 @@ Mappings:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+  BSPConfig:
+    Production:
+      PPPlusSubnetCIDR: 192.168.80.0/24
+      PPPlusResource: 192.168.80.131/32
+      PP3rdPartySubnetCIDR: 192.168.4.0/24
+      PP3rdPartyResource: 192.168.4.125/32
+    UAT:
+      PPPlusSubnetCIDR: 192.168.222.0/24
+      PPPlusResource: 192.168.222.100/32
+      PP3rdPartySubnetCIDR: 192.168.4.0/24
+      PP3rdPartyResource: 192.168.4.125/32
 
 Conditions:
   Fn::Transform:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsBSPUAT: !Equals [!Ref BSPMode, UAT]
+  IsBSPProd: !Equals [!Ref BSPMode, Production]
 
 Resources:
 
@@ -168,7 +188,7 @@ Resources:
         GroupDescription: StrongSwan Public Security Group
         VpcId: 
           Fn::ImportValue:
-            !Sub "${NetworkStackName}-VpcId"
+            !Sub '${NetworkStackName}-VpcId'
         SecurityGroupIngress:
           - IpProtocol: tcp
             FromPort: 22
@@ -194,7 +214,7 @@ Resources:
       SourceDestCheck: false
       SubnetId:
         Fn::ImportValue:
-          !Sub "${NetworkStackName}-PublicSubnetId1"
+          !Sub '${NetworkStackName}-PublicSubnetId1'
       Tags:
         - Key: Name
           Value: StrongSwan public ENI
@@ -214,7 +234,7 @@ Resources:
       SourceDestCheck: false
       SubnetId:
         Fn::ImportValue:
-          !Sub "${NetworkStackName}-PublicSubnetId2"
+          !Sub '${NetworkStackName}-PublicSubnetId2'
       Tags:
         - Key: Name
           Value: StrongSwan public ENI
@@ -233,40 +253,22 @@ Resources:
   # BSP target resources
   ##
 
-  # BSP3rdPartyRouteProdAZ1:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-PrivateRouteTable1"
-  #     DestinationCidrBlock: 192.168.4.127/32
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # BSP3rdPartyRouteProdAZ2:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-PrivateRouteTable2"
-  #     DestinationCidrBlock: 192.168.4.127/32
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  BSP3rdPartyRouteUATAZ1:
+  BSP3rdPartyRouteAZ1:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId:
         Fn::ImportValue:
-          !Sub "${NetworkStackName}-PrivateRouteTable1"
-      DestinationCidrBlock: 192.168.4.125/32
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
       NetworkInterfaceId: !Ref StrongSwanAZ1ENI
 
-  BSP3rdPartyRouteUATAZ2:
+  BSP3rdPartyRouteAZ2:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId:
         Fn::ImportValue:
-          !Sub "${NetworkStackName}-PrivateRouteTable2"
-      DestinationCidrBlock: 192.168.4.125/32
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
   BSPPhilPassPlusRouteAZ1:
@@ -274,8 +276,8 @@ Resources:
     Properties:
       RouteTableId:
         Fn::ImportValue:
-          !Sub "${NetworkStackName}-PrivateRouteTable1"
-      DestinationCidrBlock: 192.168.80.200/32
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource]
       NetworkInterfaceId: !Ref StrongSwanAZ1ENI
 
   BSPPhilPassPlusRouteAZ2:
@@ -283,8 +285,8 @@ Resources:
     Properties:
       RouteTableId:
         Fn::ImportValue:
-          !Sub "${NetworkStackName}-PrivateRouteTable2"
-      DestinationCidrBlock: 192.168.80.200/32
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
   ##
@@ -309,17 +311,17 @@ Resources:
         StartStrongSwan:
           commands:
             create_nat_tables:
-              command: "/sbin/iptables-restore < /etc/iptables.rules"
+              command: '/sbin/iptables-restore < /etc/iptables.rules'
             restart_strongswan:
-              command: "/usr/sbin/strongswan restart"
+              command: '/usr/sbin/strongswan restart'
               ignoreErrors: true
 
         NetworkFiles:
           commands:
             ip_forward:
-              command: "echo 1 > /proc/sys/net/ipv4/ip_forward"
+              command: 'echo 1 > /proc/sys/net/ipv4/ip_forward'
             send_redirects:
-              command: "echo 0 > /proc/sys/net/ipv4/conf/eth0/send_redirects"
+              command: 'echo 0 > /proc/sys/net/ipv4/conf/eth0/send_redirects'
           files:
             /etc/sysctl.d/nat.conf:
               content: |
@@ -339,54 +341,60 @@ Resources:
         AZ1Config:
           files:
             /etc/iptables.rules:
-              content: |
-                *nat
-                :PREROUTING ACCEPT [18:1376]
-                :INPUT ACCEPT [15:1148]
-                :OUTPUT ACCEPT [222:17540]
-                :POSTROUTING ACCEPT [222:17540]
-                -A POSTROUTING -s 10.5.12.64/26 -d 192.168.4.0/24 -o eth0 -j MASQUERADE
-                -A POSTROUTING -s 10.5.12.64/26 -d 192.168.80.0/24 -o eth0 -j MASQUERADE
-                COMMIT
+              content: !Sub
+                - |
+                  *nat
+                  :PREROUTING ACCEPT [18:1376]
+                  :INPUT ACCEPT [15:1148]
+                  :OUTPUT ACCEPT [222:17540]
+                  :POSTROUTING ACCEPT [222:17540]
+                  -A POSTROUTING -s 10.5.12.64/26 -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s 10.5.12.64/26 -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
+                  COMMIT
+                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
               permissions: 0700
               owner: root
               group: root
             /etc/strongswan/ipsec.conf:
-              content: |
-                config setup
-                  charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
+              content: !Sub
+                - |
+                  config setup
+                    charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
 
-                conn bspPPPlus
-                    authby=secret
-                    auto=start
-                    keyexchange=ikev1
-                    type=tunnel
-                    leftfirewall=yes
-                    forceencaps=yes
-                    leftid=pchc
-                    left=10.5.12.182
-                    leftsubnet=10.5.12.128/26
-                    right=121.127.5.157
-                    rightsubnet=192.168.80.0/24
-                    ike=aes256-sha256-modp2048
-                    ikelifetime=43200s
-                    esp=aes128-sha256-modp2048
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      forceencaps=yes
+                      leftid=pchc
+                      left=10.5.12.182 #Registered with BSP
+                      leftsubnet=10.5.12.128/26
+                      right=121.127.5.157
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
 
-                conn bspPP3rd
-                    authby=secret
-                    auto=start
-                    keyexchange=ikev1
-                    type=tunnel
-                    leftfirewall=yes
-                    forceencaps=yes
-                    leftid=pchc
-                    left=10.5.12.182
-                    leftsubnet=10.5.12.128/26
-                    right=121.127.5.50
-                    rightsubnet=192.168.4.0/24
-                    ike=aes256-sha256-modp2048
-                    ikelifetime=43200s
-                    esp=aes128-sha256-modp2048
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      forceencaps=yes
+                      leftid=pchc
+                      left=10.5.12.182 #Registered with BSP
+                      leftsubnet=10.5.12.128/26
+                      right=121.127.5.50
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
               permissions: 0700
               owner: root
               group: root
@@ -394,52 +402,58 @@ Resources:
         AZ2Config:
           files:
             /etc/iptables.rules:
-              content: |
-                *nat
-                :PREROUTING ACCEPT [18:1376]
-                :INPUT ACCEPT [15:1148]
-                :OUTPUT ACCEPT [222:17540]
-                :POSTROUTING ACCEPT [222:17540]
-                -A POSTROUTING -s 10.5.13.0/26 -d 192.168.4.0/24 -o eth0 -j MASQUERADE
-                -A POSTROUTING -s 10.5.13.0/26 -d 192.168.80.0/24 -o eth0 -j MASQUERADE
-                COMMIT
+              content: !Sub
+                - |
+                  *nat
+                  :PREROUTING ACCEPT [18:1376]
+                  :INPUT ACCEPT [15:1148]
+                  :OUTPUT ACCEPT [222:17540]
+                  :POSTROUTING ACCEPT [222:17540]
+                  -A POSTROUTING -s 10.5.13.0/26 -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s 10.5.13.0/26 -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
+                  COMMIT
+                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
               permissions: 0700
               owner: root
               group: root
             /etc/strongswan/ipsec.conf:
-              content: |
-                config setup
-                  charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
+              content: !Sub
+                - |
+                  config setup
+                    charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
 
-                conn bspPPPlus
-                    authby=secret
-                    auto=start
-                    keyexchange=ikev1
-                    type=tunnel
-                    leftfirewall=yes
-                    leftid=pchc
-                    left=10.5.13.103
-                    leftsubnet=10.5.13.64/26
-                    right=121.127.5.157
-                    rightsubnet=192.168.80.0/24 #For Prod
-                    ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
-                    ikelifetime=43200s #Time before re authentication of keys
-                    esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      leftid=pchc
+                      left=10.5.13.103 #Registered with BSP
+                      leftsubnet=10.5.13.64/26
+                      right=121.127.5.157
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                      ikelifetime=43200s #Time before re authentication of keys
+                      esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
 
-                conn bspPP3rd
-                    authby=secret
-                    auto=start
-                    keyexchange=ikev1
-                    type=tunnel
-                    leftfirewall=yes
-                    leftid=pchc
-                    left=10.5.13.103
-                    leftsubnet=10.5.13.64/26
-                    right=121.127.5.50
-                    rightsubnet=192.168.4.0/24
-                    ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
-                    ikelifetime=43200s #Time before re authentication of keys
-                    esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      leftid=pchc
+                      left=10.5.13.103 #Registered with BSP
+                      leftsubnet=10.5.13.64/26
+                      right=121.127.5.50
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                      ikelifetime=43200s #Time before re authentication of keys
+                      esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
               permissions: 0700
               owner: root
               group: root
