@@ -32,10 +32,11 @@ Metadata:
           - StartScheduleExpression
           - StopScheduleExpression
       - Label:
-          default: StrongSwan Configuration
+          default: BSS Interface Configuration
         Parameters:
           - StrongswanPPPPSK
           - Strongswan3RDPSK
+          - BSPInterfaceHostname
 
     ParameterLabels:
       Name:
@@ -44,6 +45,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      BSPInterfaceHostname:
+        default: BSP interface hostname
       InstanceAMI:
         default: Instance AMI ID
       InstanceKeyName:
@@ -97,6 +100,11 @@ Parameters:
     AllowedValues:
       - Production
       - UAT
+  BSPInterfaceHostname:
+    Description: Hostname for the BSP interface instance
+    Type: String
+    Default: philpasuat
+    MinLength: 1
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com)
     Type: String
@@ -748,6 +756,146 @@ Resources:
       SourceSecurityGroupId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+###
+# BSP Interface
+###
+
+  BSPInterfaceEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  BSPInterfaceIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,BSP,Interface]]
+      Roles:
+        - !Ref BSPInterfaceEC2Role
+
+  BSPInterfaceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BSP Interface Security Group
+      VpcId: 
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+
+  AllowHTTPOnBSPInterfaceFromELB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: TCP
+      GroupId: !Ref BSPInterfaceSecurityGroup
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: 
+        Fn::GetAtt:
+          - ELBStack
+          - Outputs.SecurityGroupId
+
+  AllowSSHOnBSPInterfaceFromJumpHost:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: TCP
+      GroupId: !Ref BSPInterfaceSecurityGroup
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: 
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+  
+  BSPInterfaceInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-092b1c245f9e12bb5
+      InstanceType: t3.medium
+      IamInstanceProfile: !Ref BSPInterfaceIamInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref BSPInterfaceSecurityGroup
+          SubnetId:
+            Fn::ImportValue:
+              Fn::Sub: '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,BSP,Interface]]
+
+  BSPInterfaceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Matcher: 
+        HttpCode: 200,301,302
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      Targets:
+        - Id: !Ref BSPInterfaceInstance
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP,interface,target,group]]
+
+  BSPInterfaceListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref BSPInterfaceTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
+      ListenerArn:
+        Fn::GetAtt:
+          - ELBStack
+          - Outputs.ApplicationListenerArn
+      Priority: 105
+
+  BSPInterfaceInstancePublicDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+      Name: !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
+      Type: CNAME
+      AliasTarget:
+        DNSName:
+          Fn::GetAtt:
+            - ELBStack
+            - Outputs.DNSName
+        EvaluateTargetHealth: true
+        HostedZoneId:
+          Fn::GetAtt:
+            - ELBStack
+            - Outputs.CanonicalHostedZoneID
+
+  BSPInterfaceInstancePrivateDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: 
+        Fn::ImportValue:
+            !Sub '${NetworkStackName}-LocalHostedZoneId'
+      Name: !Join ['.',[!Ref BSPInterfaceHostname, !Ref Name, 'local']]
+      Type: A
+      ResourceRecords:
+        - !GetAtt BSPInterfaceInstance.PrivateIp
+      TTL: 3600
+      
+
 
   # BackupStack:
   #   DependsOn: 

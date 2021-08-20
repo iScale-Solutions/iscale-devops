@@ -17,6 +17,7 @@ Metadata:
           - MaskSize
           - LogRetentionPeriod
           - MultiAz
+          - CreateLocalDNS
           - CreatePrivate
           - CreateMultipleNatGateway
       - Label:
@@ -54,6 +55,8 @@ Metadata:
         default: Multiple Availability Zones
       CreateJumpHost:
         default: Create Jump Host
+      CreateLocalDNS:
+        default: Create Local Hosted Zone
       CreatePrivate:
         default: Create Private Subnets
       CreateMultipleNatGateway:
@@ -133,6 +136,13 @@ Parameters:
     AllowedValues:
       - true
       - false
+  CreateLocalDNS:
+    Description: Set to true to create a local hosted zone tied to the VPC
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
   CreatePrivate:
     Description: Set to true if creation of private subnet is enabled, this creates a Nat Gateway. Otherwise, disabled.
     Type: String
@@ -201,6 +211,7 @@ Conditions:
   IsMultiAz: !Equals [!Ref MultiAz, true]
   IsCreateJumpHost: !Equals [!Ref CreateJumpHost, true]
   IsCreateJumpHostDynDNS: !And [Condition: IsCreateJumpHost, !Not [!Equals [!Ref JumpHostHostname, '']], !Not [!Equals [!Ref HostedZoneStackName, '']]]
+  IsCreateLocalDNS: !Equals [!Ref CreateLocalDNS, true]
   IsCreatePrivate: !Equals [!Ref CreatePrivate, true]
   IsCreateMultipleNatGateway: !Equals [!Ref CreateMultipleNatGateway, true]
   IsEitherMultiAzOrPrivate: !Or [Condition: IsMultiAz, Condition: IsCreatePrivate]
@@ -786,6 +797,20 @@ Resources:
       VpcEndpointType: Interface
       VpcId: !Ref VPC
 
+  LocalHostedZone: 
+    Type: AWS::Route53::HostedZone
+    Condition: IsCreateLocalDNS
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join [' ',[Local Hosted Zone for, !Ref Name, VPC, '-' , !Ref VPC]]
+      Name: !Join ['.', [!Ref Name, 'local']]
+      VPCs:
+        - VPCId: !Ref VPC
+          VPCRegion: !Ref 'AWS::Region'
+      HostedZoneTags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,local,dns]]
+
 Outputs:
   VpcId: 
     Description: The ID of the VPC
@@ -865,6 +890,13 @@ Outputs:
     Value: !Ref InternetGateway
     Export:
       Name: !Sub '${AWS::StackName}-InternetGateway'
+
+  LocalHostedZoneId:
+    Condition: IsCreateLocalDNS
+    Description: Local Hosted Zone ID
+    Value: !Ref LocalHostedZone
+    Export:
+      Name: !Sub '${AWS::StackName}-LocalHostedZoneId'
 
   NatGateway1:
     Condition: IsCreatePrivate
