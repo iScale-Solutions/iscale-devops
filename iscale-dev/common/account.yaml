@@ -95,6 +95,7 @@ Conditions:
   ShouldCreateReadOnlyUsers: !Equals [true, !Ref CreateReadOnlyUsers]
   EnableCIS: !Equals [true, !Ref EnableCISRules]
   EnableConfig: !Equals [true, !Ref EnableConfigRules]
+  CreateSNSKmsKey: !Or [Condition: EnableCIS, Condition: EnableConfig]
   SendCISEmail: !And [Condition: EnableCIS, !Not [ !Equals ['', !Ref CISAlertEmail]]]
   SendConfigEmail: !And [Condition: EnableConfig, !Not [ !Equals ['', !Ref ConfigAlertEmail]]]
 
@@ -482,7 +483,7 @@ Resources:
     Properties:
       TopicName: !Sub 'config-topic-${AWS::AccountId}'
       DisplayName: AWS Config Notification Topic
-      KmsMasterKeyId: alias/aws/sns
+      KmsMasterKeyId: !Ref SNSKmsKey
 
   ConfigEmailSubscription:
     Condition: SendConfigEmail
@@ -551,6 +552,66 @@ Resources:
 ###
 # CIS Alarms
 ###
+  
+  SNSKmsKey:
+    DeletionPolicy: Retain
+    Condition: CreateSNSKmsKey
+    DependsOn:
+      - MasterAccountAccessRole
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-policy
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':root']]
+            Action:
+              - kms:*
+            Resource: '*'
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Join ['',['arn:aws:iam::', !Ref 'AWS::AccountId', ':role/MasterAccountAccessRole']]
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: '*'
+          - Sid: Allow cloudwatch to decrypt SNS topics
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+              - kms:ReEncryptFrom
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, sns]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  SNSKmsAlias:
+    DeletionPolicy: Retain
+    Condition: CreateSNSKmsKey
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Join ['-',[!Join ['/', [alias, !Ref OrgName]], sns]]
+      TargetKeyId: !Ref SNSKmsKey
 
   CISTopic:
     Condition: EnableCIS
@@ -558,7 +619,7 @@ Resources:
     Properties:
       TopicName: !Sub 'cis-topic-${AWS::AccountId}'
       DisplayName: CIS Notification Topic
-      KmsMasterKeyId: alias/aws/sns
+      KmsMasterKeyId: !Ref SNSKmsKey
 
   CISEmailSubscription:
     Condition: SendCISEmail
@@ -1154,7 +1215,7 @@ Resources:
     Condition: EnableConfig
     Type: AWS::IAM::Role
     Properties:
-      RoleName: IAMRoleForec2_iam_instance_rolesSWg
+      RoleName: IAMRoleForEC2_IAM_instance_roles
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
