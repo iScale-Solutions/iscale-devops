@@ -46,6 +46,7 @@ Metadata:
         Parameters:
           - NetworkStackName
           - SNSStackName
+          - ExportStackValues
 
     ParameterLabels:
       Name:
@@ -80,6 +81,8 @@ Metadata:
         default: Engine
       EngineVersion:
         default: Engine Version
+      ExportStackValues:
+        default: Export output values from the stack
       AllocatedStorage:
         default: Allocated Storage
       BackupRetentionPeriod:
@@ -132,6 +135,13 @@ Parameters:
       - Test
   DeletionProtection:
     Description: Set to true to protect from deletion
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  ExportStackValues:
+    Description: Set to true to export
     Type: String
     Default: false
     AllowedValues:
@@ -289,13 +299,19 @@ Conditions:
   IsAuroraPostgreSQL: !Equals [!Ref Engine, aurora-postgresql]
   IsAuroraMySQL: !Equals [!Ref Engine, aurora-mysql]
   IsSQLServer: !Equals [!Ref Engine, sqlserver-web]
+  HasExports: !Equals [!Ref ExportStackValues, true]
+  HasNoExports: !Not [Condition: HasExports]
   IsAurora: !Or [Condition: IsAuroraPostgreSQL, Condition: IsAuroraMySQL]
   IsOracle: !Equals [!Ref Engine, oracle-se2]
   HasDBUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
   HasDBRootPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
   HasDBPasswords: !Or [Condition: HasDBUserPassword, Condition: HasDBRootPassword]
   HasNoCluster: !Not [Condition: IsAurora]
+  HasNoClusterHasExports: !And [Condition: HasNoCluster, Condition: HasExports]
+  HasNoClusterHasNoExports: !And [Condition: HasNoCluster, Condition: HasNoExports]
   HasCluster: !Not [Condition: HasNoCluster]
+  HasClusterHasExports: !And [Condition: HasCluster, Condition: HasExports]
+  HasClusterHasNoExports: !And [Condition: HasCluster, Condition: HasNoExports]
   HasSnapshot: !Not [!Equals [!Ref SnapshotIdentifier, '']]
   HasNoSnapshot: !Not [Condition: HasSnapshot]
   HasClusterSnapshot: !And [Condition: HasCluster, Condition: HasSnapshot]
@@ -871,54 +887,134 @@ Resources:
 
 Outputs:
 
+  DBSecretManagerExport:
+    Condition: HasExports
+    Description: Secrets Manager containing the DB credentials
+    Value: !Ref RDSSecretManager
+    Export:
+      Name: !Sub ${AWS::StackName}-DBInstanceARN
+
   DBSecretManager:
+    Condition: HasNoExports
     Description: Secrets Manager containing the DB credentials
     Value: !Ref RDSSecretManager
 
+  DBSecretManagerKeyIdExport:
+    Condition: HasExports
+    Description: Value of the key containing the passwords in the Secret Manager
+    Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+    Export:
+      Name: !Sub ${AWS::StackName}-DBSecretManagerKeyId
+
   DBSecretManagerKeyId:
+    Condition: HasNoExports
     Description: Value of the key containing the passwords in the Secret Manager
     Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
+  DBClusterARNExport:
+    Condition: HasClusterHasExports
+    Description: ARN of the created RDS cluster
+    Value: !Join [':', ['arn:aws:rds', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'cluster', !Ref RDSCluster]]
+    Export:
+      Name: !Sub ${AWS::StackName}-DBClusterARN
+
   DBClusterARN:
-    Condition: HasCluster
+    Condition: HasClusterHasNoExports
     Description: ARN of the created RDS cluster
     Value: !Join [':', ['arn:aws:rds', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'cluster', !Ref RDSCluster]]
 
-  DBInstanceARN:
-    Condition: HasNoCluster
+  DBInstanceARNExport:
+    Condition: HasNoClusterHasExports
     Description: ARN of the created RDS instance
     Value: !Join [':', ['arn:aws:rds', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'db', !Ref DBInstance]]
-  
+    Export:
+      Name: !Sub ${AWS::StackName}-DBInstanceARN
+
+  DBInstanceARN:
+    Condition: HasNoClusterHasNoExports
+    Description: ARN of the created RDS instance
+    Value: !Join [':', ['arn:aws:rds', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'db', !Ref DBInstance]]
+
+  DBInstanceNameExport:
+    Condition: HasNoClusterHasExports
+    Description: Name of the created RDS instance
+    Value: !Ref DBInstance
+    Export:
+      Name: !Sub ${AWS::StackName}-DBInstanceName
+
   DBInstanceName:
-    Condition: HasNoCluster
+    Condition: HasNoClusterHasNoExports
     Description: Name of the created RDS instance
     Value: !Ref DBInstance
 
+  SecurityGroupIdExport:
+    Condition: HasExports
+    Description: The security group id of the RDS instance
+    Value: !GetAtt RDSSecurityGroup.GroupId
+    Export:
+      Name: !Sub ${AWS::StackName}-SecurityGroupId
+
   SecurityGroupId:
+    Condition: HasNoExports
     Description: The security group id of the RDS instance
     Value: !GetAtt RDSSecurityGroup.GroupId
 
+  DBInstanceAddressExport:
+    Condition: HasNoClusterHasExports
+    Description: The endpoint address of the RDS instance
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DBInstanceAddress
+
   DBInstanceAddress:
-    Condition: HasNoCluster
+    Condition: HasNoClusterHasNoExports
     Description: The endpoint address of the RDS instance
     Value: !GetAtt DBInstance.Endpoint.Address
 
-  DBInstancePort:
-    Condition: HasNoCluster
+  DBInstancePortExport:
+    Condition: HasNoClusterHasExports
     Description: The port number of the RDS instance
     Value: !Ref Port
-  
+    Export:
+      Name: !Sub ${AWS::StackName}-DBInstancePort
+
+  DBInstancePort:
+    Condition: HasNoClusterHasNoExports
+    Description: The port number of the RDS instance
+    Value: !Ref Port
+
+  ClusterPortExport:
+    Condition: HasClusterHasExports
+    Description: The port number of the RDS cluster
+    Value: !Ref Port
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterPort
+
   ClusterPort:
-    Condition: HasCluster
+    Condition: HasClusterHasNoExports
     Description: The port number of the RDS cluster
     Value: !Ref Port
 
+  ClusterEndpointAddressExport:
+    Condition: HasClusterHasExports
+    Description: The endpoint address of the RDS cluster
+    Value: !GetAtt RDSCluster.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterEndpointAddress
+
   ClusterEndpointAddress:
-    Condition: HasCluster
+    Condition: HasClusterHasNoExports
     Description: The endpoint address of the RDS cluster
     Value: !GetAtt RDSCluster.Endpoint.Address
 
+  ClusterReadEndpointAddressExport:
+    Condition: HasClusterHasExports
+    Description: The read endpoint address of the rds cluster
+    Value: !GetAtt RDSCluster.ReadEndpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterReadEndpointAddress
+
   ClusterReadEndpointAddress:
-    Condition: HasCluster
+    Condition: HasClusterHasNoExports
     Description: The read endpoint address of the rds cluster
     Value: !GetAtt RDSCluster.ReadEndpoint.Address
