@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: This cloudformation template provisions a load balancer
 
 Metadata:
-  AWS::CloudFormation::Interface: 
+  AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
           default: Resource Configuration
@@ -20,6 +20,7 @@ Metadata:
           - ElbHTTPSPort
           - ElbProtocol
           - InstancePort
+          - UseFriendlyNames
       - Label:
           default: Network Configuration
         Parameters:
@@ -51,18 +52,20 @@ Metadata:
         default: Certificate ID
       SslPolicy:
         default: SSL Policy
+      UseFriendlyNames:
+        default: Use friendly names
 
-Parameters: 
+Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
     MinLength: 3
-    MaxLength: 8
+    MaxLength: 16
   OrgName:
     Description: The name of the organization.
     Type: String
     Default: iscale-dev
-    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
   EnvName:
     Description: The name of the environment
@@ -146,6 +149,7 @@ Parameters:
   CertificateArn:
     Description: The default certificate Arn to be attached to the Load Balancer.
     Type: String
+    Default: ''
   EnableWebAcl:
     Description: Set to true to enable Web ACL. Otherwise, set to false.
     Type: String
@@ -168,8 +172,15 @@ Parameters:
     Description: The name of the cloudformation SNS stack
     Type: String
     Default: iscale-dev-dev-uw2-sns
+  UseFriendlyNames:
+    Description: Set to true to enable friendly names
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
 
-Mappings: 
+Mappings:
   Fn::Transform:
     Name: AWS::Include
     Parameters:
@@ -180,11 +191,16 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasSSLCert: !Not [!Equals [!Ref CertificateArn, '']]
   IsApplication: !Equals [!Ref ElbType, application]
   IsNetwork: !Equals [!Ref ElbType, network]
   IsInstanceSsl: !Equals [!Ref InstancePort, 443]
+  IsInternalFacing: !Equals [!Ref Scheme, internal]
+  IsInternetFacing: !Not [Condition: IsInternalFacing]
+  IsEnableSSL: !And [Condition: IsApplication, Condition: HasSSLCert, Condition: IsInternetFacing]
   IsEnableWebAcl: !Equals [!Ref EnableWebAcl, true]
   IsEnableAlarm: !Equals [!Ref EnableAlarm, true]
+  UseFriendlyNames: !Equals [!Ref UseFriendlyNames, true]
 
 Resources: 
 
@@ -195,24 +211,28 @@ Resources:
   ELBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Join [ '-', [ !Ref Name, !FindInMap [ ElbTypeShort, !Ref ElbType, Name ]] ]
-      GroupDescription: !Join [ '-', [ !Ref Name, !FindInMap [ ElbTypeShort, !Ref ElbType, Name ]] ]
-      VpcId: 
+      GroupName: !If
+        - UseFriendlyNames
+        - !Join [ '-', [ !Ref Name, !FindInMap [ ElbTypeShort, !Ref ElbType, Name ]]]
+        - !Ref 'AWS::NoValue'
+      GroupDescription: !Join [ '-', [ !Ref Name, !FindInMap [ ElbTypeShort, !Ref ElbType, Name ]]]
+      VpcId:
         Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcId"
+          !Sub '${NetworkStackName}-VpcId'
       Tags:
-          - Key: Name
-            Value: !Join [ ' ', [ !Ref OrgName, !Ref Name, !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], 'Security Group']]
+        - Key: Name
+          Value: !Join [ ' ', [ !Ref OrgName, !Ref Name, !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], 'Security Group']]
 
   ELBSecurityGroupHTTPSIngress:
     Type: AWS::EC2::SecurityGroupIngress
+    Condition: IsEnableSSL
     Properties:
       GroupId: !GetAtt ELBSecurityGroup.GroupId
       IpProtocol: tcp
       FromPort: !Ref ElbHTTPSPort
       ToPort: !Ref ElbHTTPSPort
       CidrIp: !Ref ElbSource
-  
+
   ELBSecurityGroupHTTPIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -229,58 +249,77 @@ Resources:
       IpProtocol: -1
       FromPort: -1
       ToPort: -1
-      CidrIp: 
-         Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcCidrBlock"
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcCidrBlock'
 
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties: 
+    Properties:
       IpAddressType: ipv4
-      LoadBalancerAttributes: 
-        - 
-          Key: idle_timeout.timeout_seconds
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
           Value: 300
-      Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name] ]
+      Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name]]
+      # Name: !If
+      #   - UseFriendlyNames
+      #   - !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name]]
+      #   - !Ref 'AWS::NoValue'
       Scheme: !Ref Scheme
       SecurityGroups: [!If [ IsApplication, !GetAtt ELBSecurityGroup.GroupId, !Ref 'AWS::NoValue']]
-      Subnets: 
-        - Fn::ImportValue:
-            !Sub "${NetworkStackName}-PublicSubnetId1"
-        - Fn::ImportValue:
-            !Sub "${NetworkStackName}-PublicSubnetId2"
+      Subnets:
+        Fn::If:
+          - IsInternetFacing
+          - - Fn::ImportValue:
+                !Sub '${NetworkStackName}-PublicSubnetId1'
+            - Fn::ImportValue:
+                !Sub '${NetworkStackName}-PublicSubnetId2'
+          - - Fn::ImportValue:
+                !Sub '${NetworkStackName}-PrivateSubnetId1'
+            - Fn::ImportValue:
+                !Sub '${NetworkStackName}-PrivateSubnetId2'
       Type: !Ref ElbType
       Tags:
-          - 
-            Key: Name
-            Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !FindInMap [ ElbTypeShort, !Ref ElbType, Name ]]]
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !FindInMap [ ElbTypeShort, !Ref ElbType, Name ]]]
 
   # This listener redirects HTTP request to https
   LoadBalancerHTTPListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsApplication
+    Condition: IsInternetFacing
     Properties:
-      DefaultActions: 
+      DefaultActions:
         - Type: redirect
           RedirectConfig:
             Protocol: HTTPS
             Port: !Ref ElbHTTPSPort
-            Host: "#{host}"
-            Path: "/#{path}"
-            Query: "#{query}"
-            StatusCode: "HTTP_301"
+            Host: '#{host}'
+            Path: '/#{path}'
+            Query: '#{query}'
+            StatusCode: HTTP_301
       LoadBalancerArn: !Ref LoadBalancer
       Port: !Ref ElbHTTPPort
       Protocol: HTTP
 
+  LoadBalancerHTTPListenerInternal:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: IsInternalFacing
+    Properties:
+      Port: !Ref ElbHTTPPort
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ApplicationTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+
   # Listener for application load balancer
   LoadBalancerHTTPSListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsApplication
-    Properties: 
+    Condition: IsEnableSSL
+    Properties:
       Certificates:
         - CertificateArn: !Ref CertificateArn
-      DefaultActions: 
+      DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref ApplicationTargetGroup
       LoadBalancerArn: !Ref LoadBalancer
@@ -292,8 +331,8 @@ Resources:
   LoadBalancerNetworkListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Condition: IsNetwork
-    Properties: 
-      DefaultActions: 
+    Properties:
+      DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref NetworkTargetGroup
       LoadBalancerArn: !Ref LoadBalancer
@@ -311,17 +350,16 @@ Resources:
       HealthCheckTimeoutSeconds: !Ref HealthCheckTimeoutSeconds
       HealthyThresholdCount: !Ref HealthyThresholdCount
       UnhealthyThresholdCount: !Ref UnhealthyThresholdCount
-      Matcher: 
+      Matcher:
         HttpCode: !Ref HttpCodes
-      #Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name]]
       Port: !Ref InstancePort
       Protocol: !If [IsInstanceSsl, HTTPS, HTTP]
       VpcId:
         Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcId"
+          !Sub '${NetworkStackName}-VpcId'
       Tags:
         - Key: Name
-          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name] ]
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name]]
 
   # Network Target Group
   NetworkTargetGroup:
@@ -330,92 +368,95 @@ Resources:
     Properties:
       Port: !Ref InstancePort
       Protocol: !Ref InstancePort
-      VpcId: 
+      VpcId:
         Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcId"
+          !Sub '${NetworkStackName}-VpcId'
       Tags:
         - Key: Name
-          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name] ]
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name]]
 
 ####
 # WAF Section
 ####
 
-  DefaultWebAcl:
+  WebAcl:
     Type: AWS::WAFRegional::WebACL
     Condition: IsEnableWebAcl
-    Properties: 
-      Name: !Ref Name
+    Properties:
+      Name: !Join ['-', [!Ref Name,webacl]]
       MetricName: !Join
-      - ''
-      - - !Select [0, !Split ['-', !Sub '${AWS::StackName}']]
-        - !Select [1, !Split ['-', !Sub '${AWS::StackName}']]
-        - !Select [2, !Split ['-', !Sub '${AWS::StackName}']]
+        - ''
+        - - !Select [0, !Split ['-', !Sub '${AWS::StackName}']]
+          - !Select [1, !Split ['-', !Sub '${AWS::StackName}']]
+          - !Select [2, !Split ['-', !Sub '${AWS::StackName}']]
       DefaultAction: 
         Type: ALLOW
 
-  DefaultWebAclAssociation:
+  WebAclAssociation:
     Type: AWS::WAFRegional::WebACLAssociation
     Condition: IsEnableWebAcl
-    Properties: 
+    Properties:
       ResourceArn: !Ref LoadBalancer
-      WebACLId: !Ref DefaultWebAcl
+      WebACLId: !Ref WebAcl
 
 Outputs:
 
-  LoadBalancerArn: 
+  LoadBalancerArn:
     Description: The Arn of the Load Balancer
     Value: !Ref LoadBalancer
     Export:
-      Name: !Sub "${AWS::StackName}-LoadBalancerArn"
+      Name: !Sub '${AWS::StackName}-LoadBalancerArn'
 
-  CanonicalHostedZoneID: 
+  CanonicalHostedZoneID:
     Description: The ID of the Amazon Route 53 hosted zone associated with the load balancer
     Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
     Export:
-      Name: !Sub "${AWS::StackName}-CanonicalHostedZoneID"
+      Name: !Sub '${AWS::StackName}-CanonicalHostedZoneID'
 
-  DNSName: 
+  DNSName:
     Description: The DNS name for the load balancer
     Value: !GetAtt LoadBalancer.DNSName
     Export:
-      Name: !Sub "${AWS::StackName}-DNSName"
+      Name: !Sub '${AWS::StackName}-DNSName'
 
-  LoadBalancerFullName: 
+  LoadBalancerFullName:
     Description: The full name of the load balancer
     Value: !GetAtt LoadBalancer.LoadBalancerFullName
     Export:
-      Name: !Sub "${AWS::StackName}-LoadBalancerFullName"
+      Name: !Sub '${AWS::StackName}-LoadBalancerFullName'
 
-  LoadBalancerName: 
+  LoadBalancerName:
     Description: The name of the load balancer
     Value: !GetAtt LoadBalancer.LoadBalancerName
     Export:
-      Name: !Sub "${AWS::StackName}-LoadBalancerName"
+      Name: !Sub '${AWS::StackName}-LoadBalancerName'
 
-  SecurityGroupId: 
+  SecurityGroupId:
     Description: The security group ID of the load balancer
     Value: !GetAtt ELBSecurityGroup.GroupId
     Export:
-      Name: !Sub "${AWS::StackName}-SecurityGroupId"
+      Name: !Sub '${AWS::StackName}-SecurityGroupId'
 
-  HttpListenerArn: 
+  HttpListenerArn:
     Condition: IsApplication
     Description: The HTTP listener ARN of the application load balancer 
-    Value: !Ref LoadBalancerHTTPListener
+    Value: !If
+      - IsInternetFacing
+      - !Ref LoadBalancerHTTPListener
+      - !Ref LoadBalancerHTTPListenerInternal
     Export:
-      Name: !Sub "${AWS::StackName}-HttpListenerArn"
-  
+      Name: !Sub '${AWS::StackName}-HttpListenerArn'
+
   ApplicationListenerArn:
-    Condition: IsApplication
+    Condition: IsEnableSSL
     Description: The HTTPS listener ARN of the application load balancer 
     Value: !Ref LoadBalancerHTTPSListener
     Export:
-      Name: !Sub "${AWS::StackName}-ApplicationListenerArn"
+      Name: !Sub '${AWS::StackName}-ApplicationListenerArn'
 
   NetworkListenerArn:
     Condition: IsNetwork
     Description: The listener ARN of the network load balancer 
     Value: !Ref LoadBalancerNetworkListener
     Export:
-      Name: !Sub "${AWS::StackName}-NetworkListenerArn"
+      Name: !Sub '${AWS::StackName}-NetworkListenerArn'
