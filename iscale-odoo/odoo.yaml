@@ -15,6 +15,8 @@ Metadata:
         Parameters:
           - NetworkStackName
           - SNSStackName
+          - DatabaseStackName
+          - UseOwnDatabase
           - LoadBalancerStackName
           - UseOwnLoadBalancer
       - Label:
@@ -59,6 +61,8 @@ Metadata:
         default: Allow database blur
       CreateCodePipeline:
         default: Create Code Pipeline
+      DatabaseStackName:
+        default: Database Stack Name
       LoadBalancerCertificateArn:
         default: Load Balancer Certificate ARN
       LoadBalancerPriority:
@@ -81,6 +85,8 @@ Metadata:
         default: Stop Schedule CRON Expression
       UseOwnLoadBalancer:
         default: Use own ELB for this setup?
+      UseOwnDatabase:
+        default: Use own database for this setup?
 
 Parameters:
   Name:
@@ -123,6 +129,10 @@ Parameters:
     AllowedValues:
       - FALSE
       - TRUE
+  DatabaseStackName:
+    Description: The name of the database stack (only when NOT using own database)
+    Type: String
+    Default: ''
   DatabaseUser:
     Description: The name of the database user
     Type: String
@@ -197,6 +207,13 @@ Parameters:
     AllowedValues:
       - true
       - false
+  UseOwnDatabase:
+    Description: Do you want to create a dedicated database for this Odoo Setup? If no, you will reuse an existing database stack
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
 
 Mappings:
   Fn::Transform:
@@ -215,6 +232,7 @@ Conditions:
   HasDatabaseUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
   HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
+  HasOwnDatabase: !Equals [!Ref UseOwnDatabase, true]
   HasOwnLoadBalancer: !Equals [!Ref UseOwnLoadBalancer, true]
   HasStartScheduleExpression: !Not [!Equals [!Ref StartScheduleExpression, '']]
   HasStopScheduleExpression: !Not [!Equals [!Ref StopScheduleExpression, '']]
@@ -236,6 +254,7 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   DBStack:
+    Condition: HasOwnDatabase
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -275,7 +294,6 @@ Resources:
   
   AppServerStack:
     DependsOn:
-      - DBStack
       - DeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -285,18 +303,27 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
+        DatabaseEndpoint: !If
+          - HasOwnDatabase
+          - Fn::GetAtt:
             - DBStack
             - Outputs.ClusterEndpointAddress
-        DatabasePort:
-          Fn::GetAtt:
+          - Fn::ImportValue:
+              !Sub '${DatabaseStackName}-ClusterEndpointAddress'
+        DatabasePort: !If 
+          - HasOwnDatabase
+          - Fn::GetAtt:
             - DBStack
             - Outputs.ClusterPort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
+          - Fn::ImportValue:
+              !Sub '${DatabaseStackName}-ClusterPort'
+        DatabaseSecurityGroupId: !If 
+          - HasOwnDatabase
+          - Fn::GetAtt:
             - DBStack
             - Outputs.SecurityGroupId
+          - Fn::ImportValue:
+              !Sub '${DatabaseStackName}-SecurityGroupId'
         LoadBalancerPriority: !Ref LoadBalancerPriority
         LoadBalancerStackName: !If [HasOwnLoadBalancer, !Select [ 1, !Split [ '/', !Ref ELBStack]], !Ref LoadBalancerStackName]
         InstanceAMI: !Ref InstanceAMI
@@ -306,10 +333,13 @@ Resources:
         LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
         SNSStackName: !Ref SNSStackName
         NetworkStackName: !Ref NetworkStackName
-
+        SharedSecretId: !If 
+          - HasOwnDatabase
+          - !Ref 'AWS::NoValue'
+          - Fn::ImportValue:
+              !Sub '${DatabaseStackName}-DBSecretManagerKeyId'
   BackupStack:
     DependsOn:
-      - DBStack
       - AppServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -318,19 +348,23 @@ Resources:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        BackupARNList: !Join
-          - ','
-          - - Fn::GetAtt:
-              - DBStack
-              - Outputs.DBClusterARN
-            - Fn::GetAtt:
+        BackupARNList: !If
+          - HasOwnDatabase
+          - !Join
+            - ','
+            - - Fn::GetAtt:
+                - DBStack
+                - Outputs.DBClusterARN
+              - Fn::GetAtt:
+                - AppServerStack
+                - Outputs.AppServerEFSArn
+          - Fn::GetAtt:
               - AppServerStack
               - Outputs.AppServerEFSArn
 
   SchedulerStack:
     Condition: HasScheduleExpression
     DependsOn:
-      - DBStack
       - AppServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -342,10 +376,12 @@ Resources:
         StartScheduleExpression: !Ref StartScheduleExpression
         StopScheduleExpression: !Ref StopScheduleExpression
         UseFriendlyNames: FALSE
-        DatabaseClusterArn:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBClusterARN
+        DatabaseClusterArn: !If
+          - HasOwnDatabase
+          - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBClusterARN
+          - !Ref 'AWS::NoValue'
         CodeDeployApplicationName:
           Fn::GetAtt:
             - DeployStack
