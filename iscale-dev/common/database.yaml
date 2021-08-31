@@ -44,9 +44,14 @@ Metadata:
       - Label:
           default: Cloudformation Stack Configuration
         Parameters:
-          - NetworkStackName
           - SNSStackName
           - ExportStackValues
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - NetworkStackName
+          - NetworkType
+          - PubliclyAccessible
 
     ParameterLabels:
       Name:
@@ -109,6 +114,10 @@ Metadata:
         default: Enable CPU Credit Alarm
       NetworkStackName:
         default: Network Stack
+      NetworkType:
+        default: Network Type
+      PubliclyAccessible:
+        default: Publicly Accessible
       SNSStackName:
         default: SNS Stack
 
@@ -280,6 +289,21 @@ Parameters:
     Description: The name of the cloudformation Network stack
     Type: String
     Default: iscale-dev-dev-uw2-network
+  NetworkType:
+    Description: Type of network to use
+    Type: String
+    Default: Internal
+    AllowedValues:
+      - Public
+      - Internal
+      - Private
+  PubliclyAccessible:
+    Description: Make the instance publicly accessible (only works when in Public Network)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
   SNSStackName:
     Description: The name of the cloudformation SNS stack
     Type: String
@@ -326,6 +350,7 @@ Conditions:
   IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
   IsEncrypted: !Equals [!Ref StorageEncrypted, true]
   IsEnableEnhancedMonitoring: !Equals [!Ref EnableEnhancedMonitoring, true]
+  IsPublicNetwork: !Equals [!Ref NetworkType, Public]
 
 Resources:
 
@@ -444,11 +469,16 @@ Resources:
     Properties:
       DBSubnetGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
       DBSubnetGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-      SubnetIds:
-        - Fn::ImportValue:
-            !Sub '${NetworkStackName}-InternalSubnetId1'
-        - Fn::ImportValue:
-            !Sub '${NetworkStackName}-InternalSubnetId2'
+      SubnetIds: !If
+        - IsPublicNetwork
+        - - Fn::ImportValue:
+              !Sub '${NetworkStackName}-PublicSubnetId1'
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-PublicSubnetId2'
+        - - Fn::ImportValue:
+              !Sub '${NetworkStackName}-InternalSubnetId1'
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-InternalSubnetId2'
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -613,7 +643,7 @@ Resources:
       MonitoringInterval: !If [IsEnableEnhancedMonitoring, !Ref MonitoringInterval, !Ref 'AWS::NoValue']
       MultiAZ: !If [IsSQLServer, !Ref 'AWS::NoValue', !Ref MultiAz]
       Port: !If [HasNoCluster, !Ref Port, !Ref 'AWS::NoValue']
-      PubliclyAccessible: false
+      PubliclyAccessible: !If [IsPublicNetwork, !Ref PubliclyAccessible, false]
       SourceDBInstanceIdentifier: !If [ HasSourceDbInstanceIdentifier, !Ref SourceDbInstanceIdentifier, !Ref 'AWS::NoValue']
       VPCSecurityGroups: 
         Fn::If:
