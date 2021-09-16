@@ -1,0 +1,840 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: PhilPass BSP Gateway Resources
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - DeletionProtection
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerCertificateArn
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+          - InstanceType
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+      - Label:
+          default: BSS Interface Configuration
+        Parameters:
+          - StrongswanPPPPSK
+          - Strongswan3RDPSK
+          - BSPInterfaceHostname
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      BSPInterfaceHostname:
+        default: BSP interface hostname
+      DeletionProtection:
+        default: Protect core items against deletion
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceType:
+        default: Instance Type
+      LoadBalancerCertificateArn:
+        default: Load Balancer SSL Certificate ARN
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+      StrongswanPPPPSK:
+        default: StrongSwan PhilPassPlus Shared Key
+      Strongswan3RDPSK:
+        default: StrongSwan 3rd Party Shared Key
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: philpass
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  BSPMode:
+    Description: BSP Resources to connect to
+    Type: String
+    Default: UAT
+    AllowedValues:
+      - Production
+      - UAT
+  BSPInterfaceHostname:
+    Description: Hostname for the BSP interface instance
+    Type: String
+    Default: philpassv2
+    MinLength: 1
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com)
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: pchc.com.ph
+    MinLength: 1
+  DeletionProtection:
+    Description: Set to true to enable (valid only in Production mode)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-00b8d9cb8a7161e41 #Default Amazon Linux 2 for Singapore
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  InstanceType:
+    Description: Type of instance for app server
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+  LoadBalancerCertificateArn:
+    Description: SSL Certificate for the ELB
+    Type: String
+    Default: arn:aws:acm:ap-southeast-1:470455329885:certificate/9f713d5d-cb7c-4e8e-acc2-46862d610ec8
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: pchc-dev-ase1-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: pchc-dev-ase1-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+  StrongswanAMI:
+    Description: Strongswan Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0499b5b9a26be1426
+  StrongswanPPPPSK:
+    Description: Password for PhilPassPlus PSK
+    Type: String
+    NoEcho: true
+  Strongswan3RDPSK:
+    Description: Password for 3rd Party PSK
+    Type: String
+    NoEcho: true
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+  BSPConfig:
+    Production:
+      PPPlusSubnetCIDR: 192.168.80.0/24
+      PPPlusResource: 192.168.80.131/32
+      PP3rdPartySubnetCIDR: 192.168.4.0/24
+      PP3rdPartyResource: 192.168.4.125/32
+    UAT:
+      PPPlusSubnetCIDR: 192.168.222.0/24
+      PPPlusResource: 192.168.222.100/32
+      PP3rdPartySubnetCIDR: 192.168.4.0/24
+      PP3rdPartyResource: 192.168.4.125/32
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
+  IsBSPUAT: !Equals [!Ref BSPMode, UAT]
+  IsBSPProd: !Equals [!Ref BSPMode, Production]
+
+Resources:
+
+  ###
+  # Custom Network resources for BSP
+  ###
+  
+  StrongSwanSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+        GroupDescription: StrongSwan Public Security Group
+        VpcId: 
+          Fn::ImportValue:
+            !Sub '${NetworkStackName}-VpcId'
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: 0.0.0.0/0
+          - IpProtocol: icmp
+            FromPort: -1
+            ToPort: -1
+            CidrIp: 0.0.0.0/0
+
+  AllowHTTPSFromBSPInterfaceIntoStrongSwan:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: TCP
+      GroupId: !Ref StrongSwanSecurityGroup
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
+
+  StrongSwanAZ1ENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: !Join
+        - ' '
+        - - Gateway Main ENI
+          - !Select
+            - 0
+            - Fn::GetAZs: !Ref 'AWS::Region'
+      GroupSet:
+        - !Ref StrongSwanSecurityGroup
+      PrivateIpAddress: 10.0.0.53 #Registered with BSP
+      SourceDestCheck: false
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PublicSubnetId1'
+      Tags:
+        - Key: Name
+          Value: StrongSwan public ENI
+
+  StrongSwanAZ2ENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: !Join
+        - ' '
+        - - BSP Access ENI
+          - !Select
+            - 1
+            - Fn::GetAZs: !Ref 'AWS::Region'
+      GroupSet:
+        - !Ref StrongSwanSecurityGroup
+      PrivateIpAddress: 10.0.0.176 #Registered with BSP
+      SourceDestCheck: false
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PublicSubnetId2'
+      Tags:
+        - Key: Name
+          Value: StrongSwan public ENI
+
+  BSPVPNGatewayEIP1: # - Hardcoded for BSP
+    DeletionPolicy: Retain #Make sure to retain always
+    # Condition: IsProd
+    Type: AWS::EC2::EIP
+
+  BSPVPNGatewayEIP2: # - Hardcoded for BSP
+    DeletionPolicy: Retain #Make sure to retain always
+    # Condition: IsProd
+    Type: AWS::EC2::EIP
+
+  ##
+  # BSP target resources
+  ##
+
+  BSP3rdPartyRouteAZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  BSP3rdPartyRouteAZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  BSPPhilPassPlusRouteAZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  BSPPhilPassPlusRouteAZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  ##
+  # StrongSwan EC2 instances
+  ##
+  StrongSwanLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          AZ1Config:
+            - NetworkFiles
+            - PSK
+            - AZ1Config
+            - StartStrongSwan
+          AZ2Config:
+            - NetworkFiles
+            - PSK
+            - AZ2Config
+            - StartStrongSwan
+
+        StartStrongSwan:
+          commands:
+            01_restart_strongswan:
+              command: '/usr/sbin/strongswan restart'
+              ignoreErrors: true
+            02_create_nat_tables:
+              command: '/sbin/iptables-restore < /etc/iptables.rules'
+
+        NetworkFiles:
+          commands:
+            ip_forward:
+              command: 'echo 1 > /proc/sys/net/ipv4/ip_forward'
+            send_redirects:
+              command: 'echo 0 > /proc/sys/net/ipv4/conf/eth0/send_redirects'
+          files:
+            /etc/sysctl.d/nat.conf:
+              content: |
+                net.ipv4.ip_forward = 1
+                net.ipv4.conf.eth0.send_redirects = 0
+
+        PSK:
+          files:
+            /etc/strongswan/ipsec.secrets:
+              content: !Sub
+                - |
+                  @pchc 121.127.5.157 : PSK "${PSK_PPP}"
+                  @pchc 121.127.5.50 : PSK "${PSK_3RD}"
+                - PSK_PPP: !Ref StrongswanPPPPSK
+                  PSK_3RD: !Ref Strongswan3RDPSK
+
+        AZ1Config:
+          files:
+            /etc/iptables.rules:
+              content: !Sub
+                - |
+                  *nat
+                  :PREROUTING ACCEPT [18:1376]
+                  :INPUT ACCEPT [15:1148]
+                  :OUTPUT ACCEPT [222:17540]
+                  :POSTROUTING ACCEPT [222:17540]
+                  -A POSTROUTING -s 10.0.0.0/27 -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s 10.0.0.0/27 -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
+                  COMMIT
+                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
+              permissions: 0700
+              owner: root
+              group: root
+            /etc/strongswan/ipsec.conf:
+              content: !Sub
+                - |
+                  config setup
+                    charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
+
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      forceencaps=yes
+                      leftid=pchc
+                      left=10.0.0.53 #Registered with BSP
+                      leftsubnet=10.0.0.32/27
+                      right=121.127.5.157
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      forceencaps=yes
+                      leftid=pchc
+                      left=10.0.0.53 #Registered with BSP
+                      leftsubnet=10.0.0.32/27
+                      right=121.127.5.50
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
+              permissions: 0700
+              owner: root
+              group: root
+
+        AZ2Config:
+          files:
+            /etc/iptables.rules:
+              content: !Sub
+                - |
+                  *nat
+                  :PREROUTING ACCEPT [18:1376]
+                  :INPUT ACCEPT [15:1148]
+                  :OUTPUT ACCEPT [222:17540]
+                  :POSTROUTING ACCEPT [222:17540]
+                  -A POSTROUTING -s 10.0.0.128/27 -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s 10.0.0.128/27 -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
+                  COMMIT
+                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
+              permissions: 0700
+              owner: root
+              group: root
+            /etc/strongswan/ipsec.conf:
+              content: !Sub
+                - |
+                  config setup
+                    charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
+
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      leftid=pchc
+                      left=10.0.0.176 #Registered with BSP
+                      leftsubnet=10.0.0.160/27
+                      right=121.127.5.157
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                      ikelifetime=43200s #Time before re authentication of keys
+                      esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      leftid=pchc
+                      left=10.0.0.176 #Registered with BSP
+                      leftsubnet=10.0.0.160/27
+                      right=121.127.5.50
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                      ikelifetime=43200s #Time before re authentication of keys
+                      esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
+              permissions: 0700
+              owner: root
+              group: root
+    Properties:
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      ImageId: !Ref StrongswanAMI
+      InstanceType: t3.nano
+
+  StrongSwanEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: AccessStackDetails
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+                - cloudformation:DescribeStackResource
+              Resource: '*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  StrongSwanInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref StrongSwanEC2Role
+
+  StrongSwanInstanceAZ1:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref StrongSwanInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      ImageId: !Ref StrongswanAMI
+      InstanceType: t3.nano
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a]]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c AZ1Config --region ${AWS::Region} --role ${ROLE}
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+             /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+             /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource StrongSwanLaunchConfig  --region ${AWS::Region}
+          - ROLE: !Ref StrongSwanEC2Role
+  
+  StrongSwanPublicEIPAttachAZ1:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+      AllocationId: !GetAtt BSPVPNGatewayEIP1.AllocationId
+
+  # DiskSpaceStrongSwanAZ1Alarm:
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, disk]]
+  #     MetricName: DiskSpaceUtilization
+  #     Namespace: System/Linux
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Maximum
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: InstanceId
+  #         Value: !Ref StrongSwanInstanceAZ1
+  #       - Name: Filesystem
+  #         Value: /dev/nvme0n1p1
+  #       - Name: MountPath
+  #         Value: /
+
+  StrongSwanInstanceAZ2:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref StrongSwanInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      ImageId: !Ref StrongswanAMI
+      InstanceType: t3.nano
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b]]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c AZ2Config --region ${AWS::Region} --role ${ROLE}
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+             /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+             /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource StrongSwanLaunchConfig  --region ${AWS::Region}
+          - ROLE: !Ref StrongSwanEC2Role
+
+  StrongSwanPublicEIPAttachAZ2:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+      AllocationId: !GetAtt BSPVPNGatewayEIP2.AllocationId
+
+  ##
+  # PhilPass Application Resources
+  ##
+
+  ELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: 20
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
+        EnableCPUCreditAlarm: !If [IsProd, true, false]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: false
+        EnvName: !Ref EnvName
+        Engine: mysql
+        EngineVersion: 8.0.23
+        Family: mysql8.0
+        InstanceType: db.t3.micro
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
+  DBSchedulerStack:
+    DependsOn:
+      - DBStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
+
+###
+# BSP Interface
+###
+
+  BSPInterfaceEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  BSPInterfaceIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      #InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,BSP,Interface]]
+      Roles:
+        - !Ref BSPInterfaceEC2Role
+
+  BSPInterfaceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BSP Interface Security Group
+      VpcId: 
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+
+  AllowHTTPOnBSPInterfaceFromELB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: TCP
+      GroupId: !Ref BSPInterfaceSecurityGroup
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: 
+        Fn::GetAtt:
+          - ELBStack
+          - Outputs.SecurityGroupId
+
+#   AllowSSHOnBSPInterfaceFromJumpHost:
+#     Type: AWS::EC2::SecurityGroupIngress
+#     Properties: 
+#       IpProtocol: TCP
+#       GroupId: !Ref BSPInterfaceSecurityGroup
+#       FromPort: 22
+#       ToPort: 22
+#       SourceSecurityGroupId: 
+#         Fn::ImportValue:
+#           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+  
+  BSPInterfaceInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-015773f049325e337 #This should be a parameter
+      InstanceType: t3.medium
+      IamInstanceProfile: !Ref BSPInterfaceIamInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref BSPInterfaceSecurityGroup
+          SubnetId:
+            Fn::ImportValue:
+              Fn::Sub: '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,BSP,Interface]]
+
+  AllowBSPinterfaceIntoDB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from BSP Interface
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.SecurityGroupId
+      FromPort:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.DBInstancePort
+      ToPort:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.DBInstancePort
+      SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
+
+  BSPInterfaceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Matcher: 
+        HttpCode: 200,301,302
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      Targets:
+        - Id: !Ref BSPInterfaceInstance
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP,interface,target,group]]
+
+  BSPInterfaceListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref BSPInterfaceTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
+      ListenerArn:
+        Fn::GetAtt:
+          - ELBStack
+          - Outputs.ApplicationListenerArn
+      Priority: 105
+
+  BSPInterfaceInstancePublicDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+      Name: !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::GetAtt:
+            - ELBStack
+            - Outputs.DNSName
+        EvaluateTargetHealth: true
+        HostedZoneId:
+          Fn::GetAtt:
+            - ELBStack
+            - Outputs.CanonicalHostedZoneID
+
+  BackupStack:
+    Condition: IsProd
+    DependsOn:
+      - DBStack
+      # - ServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstanceARN
+            # - Fn::GetAtt:
+            #   - ServerStack
+            #   - Outputs.AppServerEFSArn
+        BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
+        DailyExpiration: 10 #5 days requirement only
+        WeeklyExpiration: 180 #6 months but requirement is 4 weeks
+        MonthlyExpiration: 3650 # 10 years
