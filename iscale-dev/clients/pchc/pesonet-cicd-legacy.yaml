@@ -1,0 +1,446 @@
+Parameters:
+  EksClusterName:
+    Type: String
+    Description: The name of the EKS cluster created
+    Default: test-eks-cluster-pesonet
+    MinLength: 1
+    MaxLength: 100
+    ConstraintDescription: You must enter the EKS cluster name
+  PesonetSourceRepo:
+    Type: String
+    Description: PESONet source repository - must contain a Dockerfile and buildspec.yml in the base
+    Default: pesonet
+    MinLength: 1
+    MaxLength: 100
+    ConstraintDescription: You must enter a repository name
+  PesonetSourceBranch:
+    Type: String
+    Default: master
+    Description: PESONet repository branch - change triggers a new build
+    MinLength: 1
+    MaxLength: 100
+    ConstraintDescription: You must enter a repository branch name  
+  IacSourceRepo:
+    Type: String
+    Description: PESONet IAC source repository - must contain a Dockerfile and buildspec.yml in the base
+    Default: pesonet-k8s
+    MinLength: 1
+    MaxLength: 100
+    ConstraintDescription: You must enter a repository name
+  IacSourceBranch:
+    Type: String
+    Default: dev-master
+    Description: PESONet IAC source repository branch - change triggers a new build
+    MinLength: 1
+    MaxLength: 100
+    ConstraintDescription: You must enter a repository branch name
+  UIAutomationTestSourceRepo:
+    Type: String
+    Description: PESONet UI automation test source code
+    Default: pesonet-ui-test-autonation
+    MinLength: 1
+    MaxLength: 100
+    ConstraintDescription: You must enter a repository name
+  UIAutomationTestSourceBranch:
+    Type: String
+    Default: device-farm-master
+    Description:  PESONet UI automation test source branch - change triggers a new build
+    MinLength: 1
+    MaxLength: 100
+    ConstraintDescription: You must enter a branch name
+  PesonetDockerImage:
+    Type: String
+    Default: pesonet
+    Description: PESONet image in ECR to deploy
+    MinLength: 3
+    MaxLength: 100
+    ConstraintDescription: You must enter a Docker image
+  KubectlRoleName:
+    Type: String
+    Default: arn:aws:iam::470455329885:role/pesonet-dev-codebuild-to-eks-role
+    Description: IAM role used by kubectl to interact with EKS cluster
+    MinLength: 3
+    MaxLength: 100
+    ConstraintDescription: You must enter a kubectl IAM role
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: PESONet Code Repository
+        Parameters:
+          - PesonetSourceRepo
+          - PesonetSourceBranch
+      - Label:
+          default: IAC (Infra-As-Code) Code Repository
+        Parameters:
+          - IacSourceRepo
+          - IacSourceBranch
+      - Label:
+          default: PESONet UI Test Repository
+        Parameters:
+          - UIAutomationTestSourceRepo
+          - UIAutomationTestSourceBranch         
+      - Label:
+          default: CodeBuild
+        Parameters:
+          - PesonetDockerImage
+      - Label:
+          default: IAM
+        Parameters:
+          - KubectlRoleName
+      - Label:
+          default: EKS
+        Parameters:
+          - EksClusterName
+    ParameterLabels:
+      PesonetSourceRepo:
+        default: PESONet Source Code Repository
+      PesonetSourceBranch:
+        default: PESONet Source Code Repository Branch
+      IacSourceRepo:
+        default: IAC (Infra-As-Code) Repository
+      IacSourceBranch:
+        default: IAC (Infra-As-Code) Repository Branch
+      UIAutomationTestSourceRepo:
+        default: PESONet UI Test Source Code Repository
+      UIAutomationTestSourceBranch:
+        default: PESONet UI Test Source Code Repository Branch
+      PesonetDockerImage:
+        default: PESONet Docker Image Name
+      KubectlRoleName:
+        default: kubectl IAM role
+      EksClusterName:
+        default: EKS cluster name
+Resources:
+  PesonetDeploymentPipelineExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: pesonet-deployment-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref PesonetDeploymentPipeline ] ] 
+  PesonetPushImageEcrEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        detail:
+          action-type: [PUSH]
+          image-tag: [latest]
+          repository-name: [!Ref PesonetDockerImage]
+          result: [SUCCESS]
+        detail-type: [ECR Image Action]
+        source: [aws.ecr]
+      Targets:
+        - Arn: !Join 
+            - ''
+            - - 'arn:aws:codepipeline:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref PesonetDeploymentPipeline
+          RoleArn: !GetAtt 
+            - PesonetDeploymentPipelineExecutionRole
+            - Arn
+          Id: codepipeline-PesonetDeploymentPipeline  
+  PesonetCodePipelineArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+  PesonetCodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codepipeline-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+                  - iam:PassRole
+                  - ecr:DescribeImages
+              - Resource: !Sub arn:aws:s3:::${PesonetCodePipelineArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+    DependsOn: PesonetCodePipelineArtifactBucket
+  PesonetCodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${KubectlRoleName}
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - eks:Describe*
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - devicefarm:*
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeDhcpOptions
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                  - ec2:CreateNetworkInterfacePermission
+              - Resource: !Sub arn:aws:s3:::${PesonetCodePipelineArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${PesonetDockerImage}
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+  CodeBuildPesonetImageBuilder:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Description: Creates a PESONet docker image from source code
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:2.0
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref "AWS::AccountId"
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref "AWS::Region"
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref PesonetDockerImage
+          - Name: IMAGE_TAG
+            Value: latest    
+      ServiceRole: !GetAtt PesonetCodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+  CodeBuildPesonetDeployer:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Description: Updates deployments
+      Environment:
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:2.0
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_CLUSTER_NAME
+            Value: !Ref EksClusterName
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref "AWS::Region"
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref PesonetDockerImage
+          - Name: IMAGE_TAG
+            Value: latest    
+      ServiceRole: !GetAtt PesonetCodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+  CodeBuildPesonetUITestRunner:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Description: Runs UI tests on Pesonet Dev
+      Environment:
+        Image: aws/codebuild/standard:3.0
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+      ServiceRole: !GetAtt PesonetCodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+  PesonetBuildImagePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt PesonetCodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PesonetCodePipelineArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: ApplicationCodeChange
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              Configuration:
+                RepositoryName: !Ref PesonetSourceRepo
+                BranchName: !Ref PesonetSourceBranch
+              OutputArtifacts:
+                - Name: SourceArtifact
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildPesonetImageBuilder
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 1
+    DependsOn: CodeBuildPesonetImageBuilder
+  PesonetDeploymentPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt PesonetCodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PesonetCodePipelineArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: DockerImage
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: ECR
+              Configuration:
+                RepositoryName: !Ref PesonetDockerImage
+                ImageTag: latest
+              OutputArtifacts:
+                - Name: NewDockerImageArtifact
+              RunOrder: 1
+            - Name: InfraAsCode
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              Configuration:
+                RepositoryName: !Ref IacSourceRepo
+                BranchName: !Ref IacSourceBranch
+              OutputArtifacts:
+                - Name: IacCodeChangeArtifact
+              RunOrder: 1
+            - Name: UIAutomationTest
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              Configuration:
+                RepositoryName: !Ref UIAutomationTestSourceRepo
+                BranchName: !Ref UIAutomationTestSourceBranch
+              OutputArtifacts:
+                - Name: UIAutomationTestCodes
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildPesonetDeployer
+                PrimarySource: IacCodeChangeArtifact
+              InputArtifacts:
+                - Name: NewDockerImageArtifact
+                - Name: IacCodeChangeArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 2
+        - Name: RunUITests
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildPesonetUITestRunner
+                PrimarySource: UIAutomationTestCodes
+              InputArtifacts:
+                - Name: UIAutomationTestCodes
+              OutputArtifacts:
+                - Name: UIAutomationTestResults
+              RunOrder: 2      
+    DependsOn: 
+      - CodeBuildPesonetDeployer
+      - CodeBuildPesonetUITestRunner
