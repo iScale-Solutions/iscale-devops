@@ -98,7 +98,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.1
+      Version: 1.0.3
       Description: Installs the CodeDeploy Agent
       ChangeDescription: Initial version
       Data: |
@@ -165,29 +165,6 @@ Resources:
                     target: /opt/aws/bin/cfn-signal
                     force: true
 
-  ApacheComponent:
-    Type: AWS::ImageBuilder::Component
-    Properties:
-      Name: Apache
-      Platform: Linux
-      SupportedOsVersions:
-        - Amazon Linux 2
-      Version: 1.0.0
-      Description: Installs Apache
-      ChangeDescription: Initial version
-      Data: |
-        name: Apache - InlineData
-        description: Installation of Apache
-        schemaVersion: 1.0
-        phases:
-          - name: build
-            steps:
-              - name: YumInstallHTTPD
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo yum install -y httpd
-                    
   AWSLinuxUtilitiesComponent:
     Type: AWS::ImageBuilder::Component
     Properties:
@@ -195,7 +172,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.1
+      Version: 1.0.2
       Description: Installs EPEL repository, Git, JQuery, EFS, CFN, Telnet, wget
       ChangeDescription: Initial version
       Data: |
@@ -246,15 +223,15 @@ Resources:
                   commands:
                     - sudo yum install -y wget
   
-  CloudWatchLogComponent:
+  CloudWatchAgentComponent:
     Type: AWS::ImageBuilder::Component
     Properties:
-      Name: CloudWatch-Log
+      Name: CloudWatchAgent
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.1
-      Description: Installs CloudWatch Logs Agent
+      Version: 1.0.3
+      Description: Installs CloudWatch Agent with basic OS config
       ChangeDescription: Initial version
       Data: |
         name: CloudWatch - InlineData
@@ -263,35 +240,127 @@ Resources:
         phases:
           - name: build
             steps:
-              - name: InstallCloudWatchLogsAgent
+              - name: configure
+                action: CreateFile
+                inputs:
+                  - path: /tmp/cloudwatch.json
+                    content: |
+                      {
+                        "agent": {
+                          "metrics_collection_interval": 30,
+                          "run_as_user": "root"
+                        },
+                        "metrics": {
+                          "append_dimensions": {
+                            "AutoScalingGroupName": "${aws:AutoScalingGroupName}",
+                            "ImageId": "${aws:ImageId}",
+                            "InstanceId": "${aws:InstanceId}",
+                            "InstanceType": "${aws:InstanceType}"
+                          },
+                          "metrics_collected": {
+                            "cpu": {
+                              "measurement": [
+                                "cpu_usage_idle",
+                                "cpu_usage_iowait",
+                                "cpu_usage_user",
+                                "cpu_usage_system"
+                              ],
+                              "metrics_collection_interval": 30,
+                              "resources": [
+                                "*"
+                              ],
+                              "totalcpu": true
+                            },
+                            "disk": {
+                              "measurement": [
+                                "used_percent",
+                                "inodes_free"
+                              ],
+                              "metrics_collection_interval": 30,
+                              "resources": [
+                                "*"
+                              ]
+                            },
+                            "diskio": {
+                              "measurement": [
+                                "io_time"
+                              ],
+                              "metrics_collection_interval": 30,
+                              "resources": [
+                                "*"
+                              ]
+                            },
+                            "mem": {
+                              "measurement": [
+                                "mem_used_percent"
+                              ],
+                              "metrics_collection_interval": 30
+                            },
+                            "swap": {
+                              "measurement": [
+                                "swap_used_percent"
+                              ],
+                              "metrics_collection_interval": 30
+                            }
+                          }
+                        },
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log",
+                                  "log_group_name": "amazon-cloudwatch-agent.log"
+                                },
+                                {
+                                  "file_path": "/var/log/messages",
+                                  "log_group_name": "/var/log/messages"
+                                },
+                                {
+                                  "file_path": "/var/log/secure",
+                                  "log_group_name": "/var/log/secure"
+                                },
+                                {
+                                  "file_path": "/var/log/amazon/ssm/amazon-ssm-agent.log",
+                                  "log_group_name": "amazon-ssm-agent.log"
+                                },
+                                {
+                                  "file_path": "/var/log/amazon/ssm/errors.log",
+                                  "log_group_name": "amazon-ssm-errors.log"
+                                },
+                                {
+                                  "file_path": "/var/log/cloud-init.log",
+                                  "log_group_name": "/var/log/cloud-init.log"
+                                },
+                                {
+                                  "file_path": "/var/log/cloud-init-output.log",
+                                  "log_group_name": "/var/log/cloud-init-output.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: InstallAgent
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - sudo yum install -y awslogs
-              - name: ConfigureCloudWatchLogsAgent
+                    - sudo yum install -y amazon-cloudwatch-agent
+              - name: StartAgent
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - |
-                      echo "[plugins]" > /etc/awslogs/awscli.conf
-                      echo "cwlogs = cwlogs" >> /etc/awslogs/awscli.conf
-                      echo "[default]" >> /etc/awslogs/awscli.conf
-                      REGION=`curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/\(.*\)[a-z]/\1/'`
-                      echo "region = $REGION" >> /etc/awslogs/awscli.conf
-              - name: EnableCloudWatchLogsAgent
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo systemctl enable awslogsd.service
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/tmp/cloudwatch.json
 
-  MySQLClientComponent:
+  MySQLComponent:
     Type: AWS::ImageBuilder::Component
     Properties:
       Name: MySQL-Client
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.1
+      Version: 1.0.2
       Description: Installs MySQL Client
       ChangeDescription: Initial version
       Data: |
@@ -307,14 +376,14 @@ Resources:
                   commands:
                     - sudo yum install -y mysql
 
-  NginxComponent:
+  NginXComponent:
     Type: AWS::ImageBuilder::Component
     Properties:
       Name: NginX
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.1
+      Version: 1.0.2
       Description: Installs NginX
       ChangeDescription: Initial version
       Data: |
@@ -329,34 +398,6 @@ Resources:
                 inputs:
                   commands:
                     - sudo amazon-linux-extras install -y nginx1
-  
-  PostgreSQL11ClientComponent:
-    Type: AWS::ImageBuilder::Component
-    Properties:
-      Name: PostgreSQL-11-Client
-      Platform: Linux
-      SupportedOsVersions:
-        - Amazon Linux 2
-      Version: 1.0.1
-      Description: Installs PostgreSQL 11 Client
-      ChangeDescription: Initial version
-      Data: |
-        name: InstallPostgreSQL11 - InlineData
-        description: This is the PostgreSQL 11 installation
-        schemaVersion: 1.0
-        phases:
-          - name: build
-            steps:
-              - name: InstallPostgreSQL11
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo amazon-linux-extras install -y postgresql11
-              - name: YumUpdate
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo yum -y update
 
   PostgreSQL12ClientComponent:
     Type: AWS::ImageBuilder::Component
@@ -396,15 +437,54 @@ Resources:
                 inputs:
                   commands:
                     - sudo yum -y install postgresql12
-  
-  Python3DevelComponent:
+
+  PGSQL12ClientComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PostgreSQL-12-Client
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.2
+      Description: Installs PostgreSQL 12 Client
+      ChangeDescription: Initial version
+      Data: |
+        name: InstallPostgreSQL11 - InlineData
+        description: This is the PostgreSQL 12 installation
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: AddRepository
+                action: CreateFile
+                inputs:
+                  - path: /etc/yum.repos.d/pgsql12.repo
+                    content: |
+                      [pgsql12]
+                      name=PostgreSQL 12 for RHEL/CentOS 7 - x86_64
+                      baseurl=https://download.postgresql.org/pub/repos/yum/12/redhat/rhel-7-x86_64
+                      enabled=1
+                      gpgcheck=0
+                    overwrite: true
+              - name: MakeCache
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum makecache
+              - name: Install
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum -y install postgresql12
+
+  Python3DevComponent:
     Type: AWS::ImageBuilder::Component
     Properties:
       Name: Python-3-Devel
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.1
+      Version: 1.0.2
       Description: Installs Python 3 Development packages
       ChangeDescription: Initial version
       Data: |
@@ -419,7 +499,6 @@ Resources:
                 inputs:
                   commands:
                     - sudo yum install -y gcc python3-devel.x86_64
-
 ###
 # Amazon Linux Base Image
 ###
@@ -428,19 +507,19 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'amazon-linux']]
-      Version: 1.0.6
-      ParentImage: !Join [':', [arn:aws:imagebuilder, !Ref 'AWS::Region', aws:image/amazon-linux-2-x86/2021.3.26]]
+      Version: 1.1.12
+      ParentImage: !Join [':', [arn:aws:imagebuilder, !Ref 'AWS::Region', aws:image/amazon-linux-2-x86/2021.8.25]]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'amazon-linux']]
       Components: #Max 20
-        - ComponentArn: !Ref CloudWatchLogComponent
-        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-linux/1.0.0/1']]
-        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux-kernel-mainline/1.0.0/1']]
-        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux/1.0.0/1']]
+        - ComponentArn: !Ref CloudWatchAgentComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-linux/1.0.2/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux-kernel-mainline/1.0.1/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux/1.0.1/1']]
         - ComponentArn: !Ref AWSLinuxUtilitiesComponent
         - ComponentArn: !Ref CodeDeployComponent
-        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/stig-build-linux-high/2.8.0/1']]
-    #    - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/reboot-linux/1.0.1/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/stig-build-linux-high/3.4.2/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/reboot-linux/1.0.1/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/chrony-time-configuration-test/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/validate-ssh-host-key-generation-linux/1.0.1/1']]
