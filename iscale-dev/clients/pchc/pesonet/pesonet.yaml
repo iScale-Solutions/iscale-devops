@@ -209,16 +209,16 @@ Resources:
 # Application
 ####
 
-  DeployStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
+  # AppServerDeployStack:
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SNSStackName: !Ref SNSStackName
 
   CacheStack:
     Type: AWS::CloudFormation::Stack
@@ -239,7 +239,7 @@ Resources:
   ServerStack:
     DependsOn:
       - DBStack
-      - DeployStack
+      # - AppServerDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
@@ -290,29 +290,111 @@ Resources:
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
 
-  SchedulerStack:
-    DependsOn:
-      - DBStack
-      - ServerStack
-    Condition: IsNotProd
+###
+# Sidekiq
+###
+
+  SidekiqServerDeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,sidekiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  InternalELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,int]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        Scheme: internal
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  SidekiqServerStack:
+    DependsOn:
+      - DBStack
+      - SidekiqServerDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
       Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        ExternalEFSID:
+          Fn::GetAtt:
+            - ServerStack
+            - Outputs.AppServerEFS
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 80
+        InstanceSubnet: Private
+        InstanceType: t3.medium
+        LoadBalancerPriority: 100
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref InternalELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
-        CodeDeployApplicationName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployApplicationName
-        CodeDeployDeploymentGroupName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployDeploymentGroupName
+
+  # SchedulerStack:
+  #   DependsOn:
+  #     - DBStack
+  #     - ServerStack
+  #   Condition: IsNotProd
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       StartScheduleExpression: !Ref StartScheduleExpression
+  #       StopScheduleExpression: !Ref StopScheduleExpression
+  #       UseFriendlyNames: FALSE
+  #       CodeDeployApplicationName:
+  #         Fn::GetAtt:
+  #           - AppServerDeployStack
+  #           - Outputs.CodeDeployApplicationName
+  #       CodeDeployDeploymentGroupName:
+  #         Fn::GetAtt:
+  #           - AppServerDeployStack
+  #           - Outputs.CodeDeployDeploymentGroupName
 
   AllowJumpHostIntoServer:
     Type: AWS::EC2::SecurityGroupIngress
@@ -350,11 +432,11 @@ Resources:
               - Outputs.AppServerEFSArn
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
 
-Outputs:
+# Outputs:
 
-  DeploymentUserGroup:
-    Description: Add the BitBucket user into this group
-    Value:
-      Fn::GetAtt:
-        - DeployStack
-        - Outputs.DeploymentUserGroup
+#   DeploymentUserGroup:
+#     Description: Add the BitBucket user into this group
+#     Value:
+#       Fn::GetAtt:
+#         - AppServerDeployStack
+#         - Outputs.DeploymentUserGroup

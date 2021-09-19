@@ -98,7 +98,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.3
+      Version: 1.0.9
       Description: Installs the CodeDeploy Agent
       ChangeDescription: Initial version
       Data: |
@@ -108,57 +108,69 @@ Resources:
         phases:
           - name: build
             steps:
-              - name: YumInstallWgetRuby
+              - name: 01_YumInstallWgetRuby
                 action: ExecuteBash
                 inputs:
                   commands:
                     - sudo yum install -y wget
                     - sudo yum install -y ruby
-              - name: CreateCodeDeployconfig
+              - name: 02_CreateLogsConfig
                 action: CreateFile
                 inputs:
-                  - path: /var/awslogs/etc/config/codedeploy.conf
+                  - path: /opt/aws/amazon-cloudwatch-agent-config/codedeploy-logs.json
                     content: |
-                      [/var/log/aws/codedeploy-agent/codedeploy-agent.log]
-                      datetime_format = %b %d %H:%M:%S
-                      file = /var/log/aws/codedeploy-agent/codedeploy-agent.log
-                      buffer_duration = 5000
-                      log_stream_name = {instance_id}
-                      initial_position = start_of_file
-                      log_group_name = /var/log/aws/codedeploy-agent/codedeploy-agent.log
-              - name: WGetInstall
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/log/aws/codedeploy-agent/codedeploy-agent.log",
+                                  "log_group_name": "/var/log/aws/codedeploy-agent/codedeploy-agent.log"
+                                },
+                                {
+                                  "file_path": "/opt/codedeploy-agent/deployment-root/deployment-logs/codedeploy-agent-deployments.log",
+                                  "log_group_name": "/var/log/codedeploy-agent-deployments.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: 03_WGetInstall
                 action: ExecuteBash
                 inputs:
                   commands:
                     - wget -P /tmp https://aws-codedeploy-us-west-2.s3.us-west-2.amazonaws.com/latest/install
-              - name: SetInstallPermissions
+              - name: 04_SetInstallPermissions
                 action: SetFilePermissions
                 inputs:
                   - path: /tmp/install
                     permissions: 700
-              - name: ExecuteInstall
+              - name: 05_ExecuteInstall
                 action: ExecuteBash
                 inputs:
                   commands:
                     - /tmp/install auto
-              - name: CleanupInstall
+              - name: 06_CleanupInstall
                 action: ExecuteBash
                 inputs:
                   commands:
                     - rm -fr /tmp/install
-              - name: LinkCFNInit
+              - name: 07_LinkCFNInit
                 action: CreateSymlink
                 inputs:
                   - path: /usr/local/bin/cfn-init
                     target: /opt/aws/bin/cfn-init
                     force: true
-              - name: LinkCFNHup
+              - name: 08_LinkCFNHup
                 action: CreateSymlink
                 inputs:
                   - path: /usr/local/bin/cfn-hup
                     target: /opt/aws/bin/cfn-hup
                     force: true
-              - name: LinkCFNSignal
+              - name: 09_LinkCFNSignal
                 action: CreateSymlink
                 inputs:
                   - path: /usr/local/bin/cfn-signal
@@ -223,6 +235,56 @@ Resources:
                   commands:
                     - sudo yum install -y wget
   
+  CloudFormationLogsComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: CloudFormation Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.4
+      Description: Setup CloudFormation logging with CloudWatch
+      ChangeDescription: Initial version
+      Data: |
+        name: Application Logs - InlineData
+        description: Installation of PCHC Apps CloudWatch Logs
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: 01_CreateCFNLogsConfig
+                action: CreateFile
+                inputs:
+                  - path: /opt/aws/amazon-cloudwatch-agent-config/cloudformation-logs.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/log/cfn-hup.log",
+                                  "log_group_name": "/var/log/cfn-hup.log"
+                                },
+                                {
+                                  "file_path": "/var/log/cfn-init-cmd.log",
+                                  "log_group_name": "/var/log/cfn-init-cmd.log"
+                                },
+                                {
+                                  "file_path": "/var/log/cfn-init.log",
+                                  "log_group_name": "/var/log/cfn-init.log"
+                                },
+                                {
+                                  "file_path": "/var/log/cfn-wire.log",
+                                  "log_group_name": "/var/log/cfn-wire.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+  
   CloudWatchAgentComponent:
     Type: AWS::ImageBuilder::Component
     Properties:
@@ -230,7 +292,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.3
+      Version: 1.0.9
       Description: Installs CloudWatch Agent with basic OS config
       ChangeDescription: Initial version
       Data: |
@@ -240,10 +302,37 @@ Resources:
         phases:
           - name: build
             steps:
-              - name: configure
+              - name: 01_InstallAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y amazon-cloudwatch-agent
+              - name: 02_CreateAsyncAgentRestart
                 action: CreateFile
                 inputs:
-                  - path: /tmp/cloudwatch.json
+                  - path: /tmp/restartCWAgent.sh
+                    content: |
+                      echo "Preparing to update CloudWatch Agent Config..." >> /var/log/messages
+                      sleep 90
+                      cp -v /opt/aws/amazon-cloudwatch-agent-config/* /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/
+                      service amazon-cloudwatch-agent restart
+                      echo "Updated CloudWatch Agent Config." >> /var/log/messages
+                    permissions: 755
+              - name: 03_CreateExecutionScript
+                action: AppendFile
+                inputs:
+                  - path: /etc/rc.d/rc.local
+                    content: |
+                      /tmp/restartCWAgent.sh &
+              - name: 04_MakeScriptExecutable
+                action: SetFilePermissions
+                inputs:
+                  - path: /etc/rc.d/rc.local
+                    permissions: 755
+              - name: 05_ConfigureCWAgent
+                action: CreateFile
+                inputs:
+                  - path: /opt/aws/amazon-cloudwatch-agent-config/default
                     content: |
                       {
                         "agent": {
@@ -342,16 +431,11 @@ Resources:
                         }
                       }
                     overwrite: true
-              - name: InstallAgent
+              - name: 06_SetAutoStart
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - sudo yum install -y amazon-cloudwatch-agent
-              - name: StartAgent
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/tmp/cloudwatch.json
+                    - chkconfig amazon-cloudwatch-agent on
 
   MySQLComponent:
     Type: AWS::ImageBuilder::Component
@@ -507,7 +591,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'amazon-linux']]
-      Version: 1.1.12
+      Version: 1.1.20
       ParentImage: !Join [':', [arn:aws:imagebuilder, !Ref 'AWS::Region', aws:image/amazon-linux-2-x86/2021.8.25]]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'amazon-linux']]

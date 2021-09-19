@@ -123,7 +123,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.1
+      Version: 1.0.4
       Description: Installs NginX
       ChangeDescription: Initial version
       Data: |
@@ -138,6 +138,30 @@ Resources:
                 inputs:
                   commands:
                     - amazon-linux-extras install nginx1.12
+              - name: CreateNginxCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/nginx-log.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/log/nginx/access.log",
+                                  "log_group_name": "/var/log/nginx/access.log"
+                                },
+                                {
+                                  "file_path": "/var/log/nginx/error.log",
+                                  "log_group_name": "/var/log/nginx/error.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
 
   NodeJSComponent:
     Type: AWS::ImageBuilder::Component
@@ -202,8 +226,8 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'paygate']]
-      Version: 1.0.8
-      ParentImage: !Join [':', ['arn:aws:imagebuilder', !Ref AWS::Region, !Ref AWS::AccountId, 'image/pchc-amazon-linux/1.0.5/1']]
+      Version: 1.0.12
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'paygate']]
       Components: #Max 20
@@ -211,6 +235,7 @@ Resources:
         - ComponentArn: !Ref NginxComponent
         - ComponentArn: !Ref NodeJSComponent
         - ComponentArn: !Ref RoRComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
@@ -224,8 +249,8 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pddts']]
-      Version: 1.0.4
-      ParentImage: !Join [':', ['arn:aws:imagebuilder', !Ref AWS::Region, !Ref AWS::AccountId, 'image/pchc-amazon-linux/1.0.5/1']]
+      Version: 1.0.8
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pddts']]
       Components: #Max 20
@@ -233,6 +258,30 @@ Resources:
         - ComponentArn: !Ref NginxComponent
         - ComponentArn: !Ref NodeJSComponent
         - ComponentArn: !Ref RoRComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  PesonetImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'pesonet']]
+      Version: 1.0.8
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'pesonet']]
+      Components: #Max 20
+        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
@@ -261,6 +310,19 @@ Resources:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
       Parameters:
         Name: pddts
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref PDDTSImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
+
+  PesonetBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: pesonet
         EnvName: !Ref EnvName
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
