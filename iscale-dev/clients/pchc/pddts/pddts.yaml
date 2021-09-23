@@ -41,6 +41,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      BlueGreenTimeStamp:
+        default: Blue Green Timestamp
       DeletionProtection:
         default: Protect core items against deletion
       InstanceAMI:
@@ -87,6 +89,10 @@ Parameters:
       - Staging
       - Development
       - Test
+  BlueGreenTimeStamp:
+    Description: Blue Green Timestamp (don't update this by hand)
+    Type: String
+    Default: ''
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com)
     Type: String
@@ -254,6 +260,8 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+        RootStackID: !Ref 'AWS::StackId'
+        BlueGreenTimeStamp: !Ref BlueGreenTimeStamp
 
   CacheStack:
     Type: AWS::CloudFormation::Stack
@@ -474,10 +482,10 @@ Resources:
                       [ { "expression": "100-((m4/(16*1024*1000000))*100)", "label": "RDS (memory)", "id": "e1", "region": "${REGION}" } ],
                       [ "AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m4", "visible": false } ],
                       [ "AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis (memory)" } ],
-                      [ "CWAgent", "mem_used_percent", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "t3.xlarge" , { "label": "App Servers (memory)" }],
+                      [ "CWAgent", "mem_used_percent", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "${APP_SERVER_TYPE}" , { "label": "App Servers (memory)" }],
                       [ { "expression": "100-(m1/(20*1024*1000000)*100)", "label": "RDS (disk)", "id": "e2", "region": "${REGION}" } ],
                       [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m1", "visible": false } ],
-                      [ "CWAgent", "disk_used_percent", "path", "/", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "t3.xlarge", "device", "nvme0n1p1", "fstype", "xfs" , { "label": "App Servers (disk)" } ]
+                      [ "CWAgent", "disk_used_percent", "path", "/", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "${APP_SERVER_TYPE}", "device", "nvme0n1p1", "fstype", "xfs" , { "label": "App Servers (disk)" } ]
                     ],
                     "view": "timeSeries",
                     "stacked": false,
@@ -611,9 +619,10 @@ Resources:
             CACHE_INSTANCE_ID: !Join ['-', [!GetAtt [CacheStack, Outputs.ElasticacheReplicationGroup], '001']]
             REGION: !Ref 'AWS::Region'
             ELB_FULL_NAME: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
-            ASG_GROUP_NAME: !GetAtt [ServerStack, Outputs.AutoScalingGroupName]
-            APP_SERVER_AMI: !Ref InstanceAMI #Hardcoded for now
+            ASG_GROUP_NAME: !GetAtt [DeployStack, Outputs.BlueGreenAutoScalingGroupName] #First time, it will be emptu, that's OK
+            APP_SERVER_AMI: !Ref InstanceAMI
             APP_SERVER_ID: i-0d6e53ff58d0902e6 #Hardcoded for now
+            APP_SERVER_TYPE: !Ref InstanceType
             EFS_ID: !GetAtt [ServerStack, Outputs.AppServerEFS]
 
 Outputs:
