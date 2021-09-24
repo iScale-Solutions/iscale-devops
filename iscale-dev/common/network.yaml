@@ -17,6 +17,7 @@ Metadata:
           - MaskSize
           - LogRetentionPeriod
           - MultiAz
+          - MultiAzCount
           - CreateLocalDNS
           - CreatePrivate
           - CreateMultipleNatGateway
@@ -25,10 +26,13 @@ Metadata:
         Parameters:
           - PublicSubnet1Index
           - PublicSubnet2Index
+          - PublicSubnet3Index
           - PrivateSubnet1Index
           - PrivateSubnet2Index
+          - PrivateSubnet3Index
           - InternalSubnet1Index
           - InternalSubnet2Index
+          - InternalSubnet3Index
       - Label:
           default: Jump Host
         Parameters:
@@ -71,14 +75,20 @@ Metadata:
         default: Public Subnet 1 CIDR Index
       PublicSubnet2Index:
         default: Public Subnet 2 CIDR Index
+      PublicSubnet3Index:
+        default: Public Subnet 3 CIDR Index
       PrivateSubnet1Index:
         default: Private Subnet 1 CIDR Index
       PrivateSubnet2Index:
         default: Private Subnet 2 CIDR Index
+      PrivateSubnet3Index:
+        default: Private Subnet 3 CIDR Index
       InternalSubnet1Index:
         default: Internal Subnet 1 CIDR Index
       InternalSubnet2Index:
         default: Internal Subnet 2 CIDR Index
+      InternalSubnet3Index:
+        default: Internal Subnet 3 CIDR Index
 
 Parameters: 
   Name:
@@ -114,7 +124,7 @@ Parameters:
     MinValue: 1
     MaxValue: 256
   MaskSize:
-    Description: The number of subnet bits for the CIDR (e.g. specifying a value "8" for this parameter will create a CIDR with a mask of "/24")
+    Description: The number of subnet bits for the CIDR (e.g. /32-XXX, specifying a value "8" creates a CIDR with a mask of "/24", 32-8)
     Type: Number
     Default: 6
   LogRetentionPeriod:
@@ -129,6 +139,13 @@ Parameters:
     AllowedValues:
       - true
       - false
+  MultiAzCount:
+    Description: How many AZ to use (2 or 3)
+    Type: Number
+    Default: 2
+    AllowedValues:
+      - 2
+      - 3
   CreateJumpHost:
     Description: Creates resources for a jump host into the private network
     Type: String
@@ -174,29 +191,41 @@ Parameters:
   PublicSubnet1Index:
     Description: CIDR Index for Public Subnet 1
     Type: Number
-    Default: 0
+    Default: 1
   PublicSubnet2Index:
     Description: CIDR Index for Public Subnet 2
     Type: Number
-    Default: 1
+    Default: 5
+  PublicSubnet3Index:
+    Description: CIDR Index for Public Subnet 3
+    Type: Number
+    Default: 9
   PrivateSubnet1Index:
     Description: CIDR Index for Private Subnet 1
     Type: Number
-    Default: 2
+    Default: 0
   PrivateSubnet2Index:
     Description: CIDR Index for Private Subnet 2
     Type: Number
-    Default: 3
+    Default: 4
+  PrivateSubnet3Index:
+    Description: CIDR Index for Private Subnet 3
+    Type: Number
+    Default: 8
   InternalSubnet1Index:
     Description: CIDR Index for Internal Subnet 1
     Type: Number
-    Default: 4
+    Default: 2
   InternalSubnet2Index:
     Description: CIDR Index for Internal Subnet 2
     Type: Number
-    Default: 5
+    Default: 6
+  InternalSubnet3Index:
+    Description: CIDR Index for Internal Subnet 3
+    Type: Number
+    Default: 10
 
-Mappings: 
+Mappings:
   Fn::Transform:
     Name: AWS::Include
     Parameters:
@@ -209,6 +238,8 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsUsEast: !Equals [!Ref 'AWS::Region', us-east-1]
   IsMultiAz: !Equals [!Ref MultiAz, true]
+  Is2Az: !And [Condition: IsMultiAz, !Equals [!Ref MultiAzCount, 2]]
+  Is3Az: !And [Condition: IsMultiAz, !Equals [!Ref MultiAzCount, 3]]
   IsCreateJumpHost: !Equals [!Ref CreateJumpHost, true]
   IsCreateJumpHostDynDNS: !And [Condition: IsCreateJumpHost, !Not [!Equals [!Ref JumpHostHostname, '']], !Not [!Equals [!Ref HostedZoneStackName, '']]]
   IsCreateLocalDNS: !Equals [!Ref CreateLocalDNS, true]
@@ -216,7 +247,10 @@ Conditions:
   IsCreateMultipleNatGateway: !Equals [!Ref CreateMultipleNatGateway, true]
   IsEitherMultiAzOrPrivate: !Or [Condition: IsMultiAz, Condition: IsCreatePrivate]
   IsMultiAzAndPrivate: !And [Condition: IsMultiAz, Condition: IsCreatePrivate]
+  Is2AzAndPrivate: !And [Condition: Is2Az, Condition: IsCreatePrivate]
+  Is3AzAndPrivate: !And [Condition: Is3Az, Condition: IsCreatePrivate]
   IsMultiAzPrivateAndCreateMultipleNatGateway: !And [Condition: IsMultiAzAndPrivate, Condition: IsCreateMultipleNatGateway]
+  Is3AzPrivateAndCreateMultipleNatGateway: !And [Condition: Is3AzAndPrivate, Condition: IsCreateMultipleNatGateway]
 
 Resources:
 
@@ -320,6 +354,13 @@ Resources:
     Properties: 
       NetworkAclId: !Ref DefaultNetworkAcl
       SubnetId: !Ref PublicSubnet2
+  
+  PublicSubnetNetworkAclAssociation3:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Condition: Is3Az
+    Properties: 
+      NetworkAclId: !Ref DefaultNetworkAcl
+      SubnetId: !Ref PublicSubnet3
 
   PrivateSubnetNetworkAclAssociation1:
     Type: AWS::EC2::SubnetNetworkAclAssociation
@@ -335,6 +376,13 @@ Resources:
       NetworkAclId: !Ref DefaultNetworkAcl
       SubnetId: !Ref PrivateSubnet2 
 
+  PrivateSubnetNetworkAclAssociation3:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Condition: Is3AzAndPrivate
+    Properties:
+      NetworkAclId: !Ref DefaultNetworkAcl
+      SubnetId: !Ref PrivateSubnet3
+
   InternalSubnetNetworkAclAssociation1:
     Type: AWS::EC2::SubnetNetworkAclAssociation
     Properties: 
@@ -347,6 +395,13 @@ Resources:
     Properties: 
       NetworkAclId: !Ref DefaultNetworkAcl
       SubnetId: !Ref InternalSubnet2
+  
+  InternalSubnetNetworkAclAssociation3:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Condition: Is3Az
+    Properties: 
+      NetworkAclId: !Ref DefaultNetworkAcl
+      SubnetId: !Ref InternalSubnet3
 
 # DHCP Options
   DhcpOptions:
@@ -398,6 +453,21 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, public, subnet, b]]
 
+# Public Subnet (AZ3)
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Condition: Is3Az
+    Properties:
+      AvailabilityZone: !Select
+        - 2
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ !Ref PublicSubnet3Index, !Cidr [!Ref VpcCidrBlock, !Ref CidrCount, !Ref MaskSize]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, public, subnet, c]]
+
 # Private Subnet (AZ1)
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
@@ -426,6 +496,20 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, private, subnet, b]]
 
+# Private Subnet (AZ3)
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Condition: Is3AzAndPrivate
+    Properties:
+      AvailabilityZone: !Select
+        - 2
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ !Ref PrivateSubnet3Index, !Cidr [!Ref VpcCidrBlock, !Ref CidrCount, !Ref MaskSize]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, private, subnet, c]]
+
 # Internal Subnet (AZ1)
   InternalSubnet1:
     Type: AWS::EC2::Subnet
@@ -452,6 +536,20 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, internal, subnet, b]]
+
+# Internal Subnet (AZ3)
+  InternalSubnet3:
+    Type: AWS::EC2::Subnet
+    Condition: Is3Az
+    Properties:
+      AvailabilityZone: !Select
+        - 2
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ !Ref InternalSubnet3Index, !Cidr [!Ref VpcCidrBlock, !Ref CidrCount, !Ref MaskSize]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, internal, subnet, c]]
 
 # Internet Gateway
   InternetGateway:
@@ -496,6 +594,13 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
+  PublicRouteTableAssociationPublicSubnet3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: Is3Az
+    Properties:
+      SubnetId: !Ref PublicSubnet3
+      RouteTableId: !Ref PublicRouteTable
+
 # Nat Gateway
   NatGatewayElasticIp1:
     Type: AWS::EC2::EIP
@@ -530,6 +635,23 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, nat, b]]
+
+  NatGatewayElasticIp3:
+    Type: AWS::EC2::EIP
+    Condition: Is3AzPrivateAndCreateMultipleNatGateway
+    DependsOn: InternetGateway
+    Properties:
+      Domain: vpc
+
+  NatGateway3:
+    Type: AWS::EC2::NatGateway
+    Condition: Is3AzPrivateAndCreateMultipleNatGateway
+    Properties: 
+      AllocationId: !GetAtt NatGatewayElasticIp3.AllocationId
+      SubnetId: !Ref PublicSubnet3
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, nat, c]]
 
 # Private Route Table
 
@@ -583,6 +705,31 @@ Resources:
       SubnetId: !Ref PrivateSubnet2
       RouteTableId: !Ref PrivateRouteTable2
 
+# Private Route Table (AZ3)
+  PrivateRouteTable3:
+    Type: AWS::EC2::RouteTable
+    Condition: Is3AzAndPrivate
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, private, route, table, c]]
+
+  PrivateRoute3:
+    Type: AWS::EC2::Route
+    Condition: Is3AzAndPrivate
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [ IsCreateMultipleNatGateway , !Ref NatGateway3, !Ref NatGateway1]
+
+  PrivateRouteTableAssociationPrivateSubnet3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: Is3AzAndPrivate
+    Properties:
+      SubnetId: !Ref PrivateSubnet3
+      RouteTableId: !Ref PrivateRouteTable3
+
 # Internal Route Table
 
   InternalSubnet1RouteTableAssociation:
@@ -596,6 +743,13 @@ Resources:
     Condition: IsMultiAz
     Properties:
       SubnetId: !Ref InternalSubnet2
+      RouteTableId: !Ref DefaultRouteTable
+
+  InternalSubnet23RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: Is3Az
+    Properties:
+      SubnetId: !Ref InternalSubnet3
       RouteTableId: !Ref DefaultRouteTable
 
 # Flow Log
@@ -729,7 +883,21 @@ Resources:
 ####
 
   SSMVPCEndpoint:
-    Condition: IsCreatePrivate
+    Condition: Is2AzAndPrivate
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+
+  SSMVPCEndpoint3AZ:
+    Condition: Is3AzAndPrivate
     Type: AWS::EC2::VPCEndpoint
     Properties:
       PrivateDnsEnabled: true
@@ -739,11 +907,12 @@ Resources:
       SubnetIds:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
       VpcEndpointType: Interface
       VpcId: !Ref VPC
 
   SSMMessagesVPCEndpoint:
-    Condition: IsCreatePrivate
+    Condition: Is2AzAndPrivate
     Type: AWS::EC2::VPCEndpoint
     Properties:
       PrivateDnsEnabled: true
@@ -756,8 +925,23 @@ Resources:
       VpcEndpointType: Interface
       VpcId: !Ref VPC
 
+  SSMMessagesVPCEndpoint3AZ:
+    Condition: Is3AzAndPrivate
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+
   LogVPCEndpoint:
-    Condition: IsCreatePrivate
+    Condition: Is2AzAndPrivate
     Type: AWS::EC2::VPCEndpoint
     Properties:
       PrivateDnsEnabled: true
@@ -770,8 +954,23 @@ Resources:
       VpcEndpointType: Interface
       VpcId: !Ref VPC
 
+  LogVPCEndpoint3AZ:
+    Condition: Is3AzAndPrivate
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+
   EC2MessagesVPCEndpoint:
-    Condition: IsCreatePrivate
+    Condition: Is2AzAndPrivate
     Type: AWS::EC2::VPCEndpoint
     Properties:
       PrivateDnsEnabled: true
@@ -783,9 +982,24 @@ Resources:
         - !Ref PrivateSubnet2
       VpcEndpointType: Interface
       VpcId: !Ref VPC
-  
+
+  EC2MessagesVPCEndpoint3AZ:
+    Condition: Is3AzAndPrivate
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+
   S3VPCEndpoint:
-    Condition: IsCreatePrivate
+    Condition: Is2AzAndPrivate
     Type: AWS::EC2::VPCEndpoint
     Properties:
       SecurityGroupIds:
@@ -794,6 +1008,20 @@ Resources:
       SubnetIds:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+
+  S3VPCEndpoint3AZ:
+    Condition: Is3AzAndPrivate
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
       VpcEndpointType: Interface
       VpcId: !Ref VPC
 
@@ -824,64 +1052,94 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-VpcCidrBlock'
 
-  PublicSubnetId1: 
+  PublicSubnetId1:
     Description: Public Subnet ID for AZ1
     Value: !Ref PublicSubnet1
     Export:
       Name: !Sub '${AWS::StackName}-PublicSubnetId1'
 
-  PublicSubnetId2: 
+  PublicSubnetId2:
     Condition: IsMultiAz
     Description: Public Subnet ID for AZ2
     Value: !Ref PublicSubnet2
     Export:
       Name: !Sub '${AWS::StackName}-PublicSubnetId2'
 
+  PublicSubnetId3:
+    Condition: Is3Az
+    Description: Public Subnet ID for AZ3
+    Value: !Ref PublicSubnet3
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnetId3'
+
   PublicSubnetIds:
     Condition: IsMultiAz
     Description: Public Subnet Ids
-    Value: !Join [',', [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+    Value: !If
+      - Is3Az
+      - !Join [',', [!Ref PublicSubnet1, !Ref PublicSubnet2, !Ref PublicSubnet3]]
+      - !Join [',', [!Ref PublicSubnet1, !Ref PublicSubnet2]]
     Export:
       Name: !Sub '${AWS::StackName}-PublicSubnetIds'
 
-  PrivateSubnetId1: 
+  PrivateSubnetId1:
     Condition: IsCreatePrivate
     Description: Private Subnet ID for AZ1
     Value: !Ref PrivateSubnet1
     Export:
       Name: !Sub '${AWS::StackName}-PrivateSubnetId1'
 
-  PrivateSubnetId2: 
+  PrivateSubnetId2:
     Condition: IsMultiAzAndPrivate
     Description: Private Subnet ID for AZ2
     Value: !Ref PrivateSubnet2
     Export:
       Name: !Sub '${AWS::StackName}-PrivateSubnetId2'
 
+  PrivateSubnetId3:
+    Condition: Is3AzAndPrivate
+    Description: Private Subnet ID for AZ3
+    Value: !Ref PrivateSubnet3
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnetId3'
+  
   PrivateSubnetIds:
     Condition: IsMultiAzAndPrivate
     Description: Private Subnet Ids
-    Value: !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+    Value: !If
+      - Is3Az
+      - !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2, !Ref PrivateSubnet3]]
+      - !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
     Export:
       Name: !Sub '${AWS::StackName}-PrivateSubnetIds'
 
-  InternalSubnetId1: 
+  InternalSubnetId1:
     Description: Internal Subnet ID for AZ1
     Value: !Ref InternalSubnet1
     Export:
       Name: !Sub '${AWS::StackName}-InternalSubnetId1'
 
-  InternalSubnetId2: 
+  InternalSubnetId2:
     Condition: IsMultiAz
     Description: Internal Subnet ID for AZ2
     Value: !Ref InternalSubnet2
     Export:
       Name: !Sub '${AWS::StackName}-InternalSubnetId2'
 
+  InternalSubnetId3:
+    Condition: Is3Az
+    Description: Internal Subnet ID for AZ3
+    Value: !Ref InternalSubnet3
+    Export:
+      Name: !Sub '${AWS::StackName}-InternalSubnetId3'
+
   InternalSubnetIds:
     Condition: IsMultiAz
     Description: Internal Subnet Ids
-    Value: !Join [',', [!Ref InternalSubnet1, !Ref InternalSubnet2]]
+    Value: !If
+      - Is3Az
+      - !Join [',', [!Ref InternalSubnet1, !Ref InternalSubnet2, !Ref InternalSubnet3]]
+      - !Join [',', [!Ref InternalSubnet1, !Ref InternalSubnet2]]
     Export:
       Name: !Sub '${AWS::StackName}-InternalSubnetIds'
 
@@ -912,6 +1170,13 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-NatGateway2'
 
+  NatGateway3:
+    Condition: Is3AzPrivateAndCreateMultipleNatGateway
+    Description: NAT Gateway for AZ3
+    Value: !Ref NatGateway3
+    Export:
+      Name: !Sub '${AWS::StackName}-NatGateway3'
+
   PublicRouteTable:
     Description: Public Route Table
     Value: !Ref PublicRouteTable
@@ -931,6 +1196,13 @@ Outputs:
     Value: !Ref PrivateRouteTable2
     Export:
       Name: !Sub '${AWS::StackName}-PrivateRouteTable2'
+
+  PrivateRouteTable3:
+    Condition: Is3AzAndPrivate
+    Description: Private Route Table for AZ3
+    Value: !Ref PrivateRouteTable3
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateRouteTable3'
 
   DefaultSecurityGroupId:
     Description: Default VPC Security Group
