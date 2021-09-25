@@ -1,0 +1,871 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CICS Resources
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - DeletionProtection
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerCertificateArn
+          - LoadBalancerHostName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+          - InstanceType
+          - RDPPort
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DeletionProtection:
+        default: Protect core items against deletion
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceType:
+        default: Instance Type
+      LoadBalancerCertificateArn:
+        default: Load Balancer SSL Certificate ARN
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
+      NetworkStackName:
+        default: Network Stack Name
+      RDPPort:
+        default: RDP Port Number
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: cics
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com)
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: pchcdev.com
+    MinLength: 1
+  DeletionProtection:
+    Description: Set to true to enable (valid only in Production mode)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0d694fc7ea154072a #Default Windows 2019 base server
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  InstanceType:
+    Description: Type of instance for app server
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: ''
+    MaxLength: 12
+  LoadBalancerCertificateArn:
+    Description: SSL Certificate for the ELB
+    Type: String
+    Default: arn:aws:acm:ap-southeast-1:470455329885:certificate/9f713d5d-cb7c-4e8e-acc2-46862d610ec8
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: pchc-dev-ase1-network
+    MinLength: 1
+  RDPPort:
+    Description: RDP port number
+    Type: Number
+    Default: 3389
+    MinValue: 1
+    MaxValue: 65535
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: pchc-dev-ase1-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
+
+Resources:
+
+  ##
+  # CICS Application Resources
+  ##
+
+  ELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+###
+# CICSAPPSVR1
+###
+
+  CICSAPPSVR1EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  CICSAPPSVR1InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref CICSAPPSVR1EC2Role
+
+  CICSAPPSVR1SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR1, Security, Group]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR1, Security, Group]]
+
+  AllowJumpHostIntoCICSAPPSVR1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref CICSAPPSVR1SecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  CICSAPPSVR1Instance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: c5.4xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref CICSAPPSVR1InstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 100
+            VolumeType: gp3
+        - DeviceName: xvdf
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            Iops: 16000
+            VolumeSize: 1000
+            VolumeType: gp3
+      SecurityGroupIds: 
+        - !Ref CICSAPPSVR1SecurityGroup
+      SubnetId:        
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PrivateSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR1]]
+
+###
+# CICSAPPSVR2
+###
+
+  CICSAPPSVR2EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  CICSAPPSVR2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref CICSAPPSVR2EC2Role
+
+  CICSAPPSVR2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR2, Security, Group]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR2, Security, Group]]
+
+  AllowJumpHostIntoCICSAPPSVR2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref CICSAPPSVR2SecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  CICSAPPSVR2Instance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: c5.4xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref CICSAPPSVR2InstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 100
+            VolumeType: gp3
+        - DeviceName: xvdf
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            Iops: 16000
+            VolumeSize: 1000
+            VolumeType: gp3
+      SecurityGroupIds: 
+        - !Ref CICSAPPSVR2SecurityGroup
+      SubnetId:        
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PrivateSubnetId3"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR2]]
+
+###
+# GLBLSCPSVR1
+###
+
+  GLBLSCPSVR1EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  GLBLSCPSVR1InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref GLBLSCPSVR1EC2Role
+
+  GLBLSCPSVR1SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR1, Security, Group]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR1, Security, Group]]
+
+  AllowJumpHostIntoGLBLSCPSVR1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref GLBLSCPSVR1SecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  GLBLSCPSVR1Instance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: c5.2xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref GLBLSCPSVR1InstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds: 
+        - !Ref GLBLSCPSVR1SecurityGroup
+      SubnetId:        
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PrivateSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR1]]
+
+###
+# GLBLSCPSVR2
+###
+
+  GLBLSCPSVR2EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  GLBLSCPSVR2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref GLBLSCPSVR2EC2Role
+
+  GLBLSCPSVR2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR2, Security, Group]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR2, Security, Group]]
+
+  AllowJumpHostIntoGLBLSCPSVR2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref GLBLSCPSVR2SecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  GLBLSCPSVR2Instance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: c5.2xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref GLBLSCPSVR2InstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds: 
+        - !Ref GLBLSCPSVR2SecurityGroup
+      SubnetId:        
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PrivateSubnetId3"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR2]]
+
+###
+# IWEBAPPSVR1
+###
+
+  IWEBAPPSVR1EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  IWEBAPPSVR1InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref IWEBAPPSVR1EC2Role
+
+  IWEBAPPSVR1SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR1, Security, Group]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR1, Security, Group]]
+
+  AllowJumpHostIntoIWEBAPPSVR1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref IWEBAPPSVR1SecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  IWEBAPPSVR1Instance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: c5.2xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref IWEBAPPSVR1InstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds: 
+        - !Ref IWEBAPPSVR1SecurityGroup
+      SubnetId:        
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PrivateSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR1]]
+
+###
+# IWEBAPPSVR2
+###
+
+  IWEBAPPSVR2EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  IWEBAPPSVR2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref IWEBAPPSVR2EC2Role
+
+  IWEBAPPSVR2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR2, Security, Group]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR2, Security, Group]]
+
+  AllowJumpHostIntoIWEBAPPSVR2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref IWEBAPPSVR2SecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  IWEBAPPSVR2Instance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: c5.2xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref IWEBAPPSVR2InstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds: 
+        - !Ref IWEBAPPSVR2SecurityGroup
+      SubnetId:        
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PrivateSubnetId3"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR2]]
+
+###
+# CICSWITSVR
+###
+
+  CICSWITSVREC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  CICSWITSVRInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref CICSWITSVREC2Role
+
+  CICSWITSVRSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSWITSVR, Security, Group]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSWITSVR, Security, Group]]
+
+  AllowJumpHostIntoCICSWITSVR:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref CICSWITSVRSecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  CICSWITSVRInstance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: t3.micro
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref CICSWITSVRInstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds: 
+        - !Ref CICSWITSVRSecurityGroup
+      SubnetId:        
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PrivateSubnetId2"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSWITSVR]]
+
+###
+# PCHCADSVR
+###
+
+  PCHCADSVREC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  PCHCADSVRInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref PCHCADSVREC2Role
+
+  PCHCADSVRSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHCADSVR, Security, Group]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHCADSVR, Security, Group]]
+
+  AllowJumpHostIntoPCHCADSVR:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref PCHCADSVRSecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  PCHCADSVRInstance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: t3.micro
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref PCHCADSVRInstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds: 
+        - !Ref PCHCADSVRSecurityGroup
+      SubnetId:        
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PrivateSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHCADSVR]]
+
+###
+# PCHJUMPSVR
+###
+
+  PCHJUMPSVREC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  PCHJUMPSVRInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref PCHJUMPSVREC2Role
+
+  PCHJUMPSVRSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHJUMPSVR, Security, Group]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHJUMPSVR, Security, Group]]
+
+  AllowJumpHostIntoPCHJUMPSVR:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref PCHJUMPSVRSecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  PCHJUMPSVRInstance: 
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: t3.large
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref PCHJUMPSVRInstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds: 
+        - !Ref PCHJUMPSVRSecurityGroup
+      SubnetId:        
+        Fn::ImportValue:
+          Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHJUMPSVR]]
+
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: 20
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
+        EnableCPUCreditAlarm: !If [IsProd, true, false]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: sqlserver-se
+        EngineVersion: 15.00.4073.23.v1
+        Family: sqlserver-se-15.0
+        InstanceType: db.m5.xlarge
+        MasterUser: root
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
