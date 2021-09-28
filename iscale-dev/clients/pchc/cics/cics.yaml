@@ -811,6 +811,53 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
+  SlowTargetResponseTimeCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      MetricName: TargetResponseTime
+      Namespace: AWS/ApplicationELB
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 5 #if greater than 5 seconds
+      AlarmActions:
+        - Fn::ImportValue:
+            Fn::Sub: '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            Fn::Sub: '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
+        - Name: TargetGroup
+          Value: !Ref CICSTargetGroup
+      TreatMissingData: notBreaching
+
+  TargetGroupHealthyHostCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      MetricName: HealthyHostCount
+      Namespace: AWS/ApplicationELB
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 1
+      AlarmActions:
+        - Fn::ImportValue:
+            Fn::Sub: '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            Fn::Sub: '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
+        - Name: TargetGroup
+          Value: !Ref CICSTargetGroup
+      TreatMissingData: notBreaching
 ###
 # S3 Buckets
 ###
@@ -860,6 +907,11 @@ Resources:
               StorageClass: GLACIER
               TransitionInDays: 365
             Status: Enabled
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            # Filter: / #one folder per bank ?
+            Queue: !GetAtt 002001Queue.Arn
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -868,3 +920,259 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, archive]]
+
+###
+# SQS Queues
+###
+
+  002001Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      # QueueName: BANK002PBM001QUEUE
+      MessageRetentionPeriod: 1209600 #14 days
+
+  002001QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref 002001Queue
+      PolicyDocument:
+        Statement:
+          - Action:
+              - SQS:SendMessage
+            Effect: Allow
+            Resource:
+              - !GetAtt 002001Queue.Arn
+            Principal:
+              AWS: '*'
+
+  002001QueueDepthAlarm: 
+    Type: AWS::CloudWatch::Alarm
+    Properties: 
+      AlarmDescription: Alarm if queue depth increases to more than 10 messages
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: 
+        - Name: QueueName
+          Value: !GetAtt [002001Queue, QueueName]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: 
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      InsufficientDataActions: 
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+
+  003001Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      # QueueName: BANK003PBM001QUEUE
+      MessageRetentionPeriod: 1209600 #14 days
+
+  003001QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref 003001Queue
+      PolicyDocument:
+        Statement:
+          - Action:
+              - SQS:SendMessage
+            Effect: Allow
+            Resource:
+              - !GetAtt 003001Queue.Arn
+            Principal:
+              AWS: '*'
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {
+                "height": 12,
+                "width": 6,
+                "y": 0,
+                "x": 0,
+                "type": "alarm",
+                "properties": {
+                  "title": "Alarms",
+                  "alarms": [
+                    "${002001_QUEUE_DEPTH_ALARM}",
+                    "${DB_HIGH_CPU}",
+                    "${DB_LOW_STORAGE}",
+                    "${DB_LOW_CPU_CREDIT}",
+                    "${DB_ERRORS}",
+                    "${DB_ERROR_DENIED}",
+                    "${TG_UNHEALTHY}",
+                    "${TG_SLOW}"
+                  ]
+                }
+              },
+              {
+                "height": 6,
+                "width": 6,
+                "y": 0,
+                "x": 6,
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS" } ]
+                  ],
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "region": "${REGION}",
+                  "period": 300,
+                  "title": "CPU",
+                  "stat": "Average",
+                  "yAxis": {
+                    "left": {
+                      "label": "Utilization"
+                    }
+                  }
+                }
+              },
+              {
+                "height": 6,
+                "width": 6,
+                "y": 6,
+                "x": 6,
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    [ { "expression": "100-((m4/(16*1024*1000000))*100)", "label": "RDS (memory)", "id": "e1", "region": "${REGION}" } ],
+                    [ "AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m4", "visible": false } ],
+                    [ { "expression": "100-(m1/(20*1024*1000000)*100)", "label": "RDS (disk)", "id": "e2", "region": "${REGION}" } ],
+                    [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m1", "visible": false } ]
+                  ],
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "region": "${REGION}",
+                  "period": 300,
+                  "title": "Memory / Storage",
+                  "stat": "Average",
+                  "yAxis": {
+                    "left": {
+                      "label": "Utilization"
+                    }
+                  }
+                }
+              },
+              {
+                "height": 6,
+                "width": 6,
+                "y": 0,
+                "x": 12,
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
+                    [ "AWS/RDS", "ReadLatency", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" } ],
+                    [ ".", "WriteLatency", ".", ".", { "label": "RDS Write" } ]
+                  ],
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "region": "${REGION}",
+                  "period": 300,
+                  "title": "Performance",
+                  "stat": "Average",
+                  "yAxis": {
+                    "left": {
+                      "showUnits": true,
+                      "label": "Time"
+                    }
+                  }
+                }
+              },
+              {
+                "height": 6,
+                "width": 6,
+                "y": 0,
+                "x": 18,
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    [ "AWS/ApplicationELB", "ProcessedBytes", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
+                    [ "AWS/RDS", "NetworkReceiveThroughput", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS (In)" }],
+                    [ ".", "NetworkTransmitThroughput", ".", ".", { "label": "RDS (Out)" }]
+                  ],
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "title": "Network",
+                  "region": "${REGION}",
+                  "period": 300,
+                  "stat": "Average",
+                  "legend": {
+                    "position": "bottom"
+                  },
+                  "yAxis": {
+                    "left": {
+                      "label": "Volume"
+                    }
+                  }
+                }
+              },
+              {
+                "height": 6,
+                "width": 6,
+                "y": 6,
+                "x": 12,
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    [ "AWS/RDS", "ReadThroughput", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" }],
+                    [ ".", "WriteThroughput", ".", ".", { "label": "RDS Write" }]
+                  ],
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "region": "${REGION}",
+                  "period": 300,
+                  "title": "I/O",
+                  "stat": "Average",
+                  "yAxis": {
+                    "left": {
+                      "label": "Count",
+                      "showUnits": false
+                    }
+                  }
+                }
+              },
+              {
+                "height": 6,
+                "width": 6,
+                "y": 6,
+                "x": 18,
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB HTTP 5XX_Count" } ],
+                    [ ".", "HTTPCode_ELB_4XX_Count", ".", ".", { "label": "ELB HTTP 4XX_Count" } ]
+                  ],
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "region": "${REGION}",
+                  "title": "Error Count",
+                  "period": 300,
+                  "stat": "Average"
+                }
+              }
+            ]
+          }
+        - 002001_QUEUE_DEPTH_ALARM: !GetAtt [002001QueueDepthAlarm, Arn]
+          DB_HIGH_CPU: !GetAtt [DBStack, Outputs.DBHighCPUAlarm]
+          DB_LOW_STORAGE: !GetAtt [DBStack, Outputs.DBLowStorageAlarm]
+          DB_LOW_CPU_CREDIT: !GetAtt [DBStack, Outputs.CPUCreditBalanceAlarm]
+          DB_ERRORS: !GetAtt [DBStack, Outputs.DBErrorsAlarm]
+          DB_ERROR_DENIED: !GetAtt [DBStack, Outputs.DBErrorDeniedAlarm]
+          TG_SLOW: !GetAtt [SlowTargetResponseTimeCloudWatchAlarm, Arn]
+          TG_UNHEALTHY: !GetAtt [TargetGroupHealthyHostCountAlarm, Arn]
+          DB_INSTANCE_ID: !GetAtt [DBStack, Outputs.DBInstanceName]
+          REGION: !Ref 'AWS::Region'
+          ELB_FULL_NAME: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
