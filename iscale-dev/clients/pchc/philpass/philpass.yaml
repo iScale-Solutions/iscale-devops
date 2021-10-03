@@ -35,8 +35,10 @@ Metadata:
       - Label:
           default: BSS Interface Configuration
         Parameters:
+          - BSPMode
           - StrongswanPPPPSK
           - Strongswan3RDPSK
+          - StrongswanAMI
           - BSPInterfaceHostname
 
     ParameterLabels:
@@ -51,7 +53,7 @@ Metadata:
       DeletionProtection:
         default: Protect core items against deletion
       InstanceAMI:
-        default: Instance AMI ID
+        default: Philpass Instance AMI ID
       InstanceKeyName:
         default: Instance Key Name
       InstanceType:
@@ -68,6 +70,8 @@ Metadata:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
+      StrongswanAMI:
+        default: Strongswan AMI ID
       StrongswanPPPPSK:
         default: StrongSwan PhilPassPlus Shared Key
       Strongswan3RDPSK:
@@ -183,11 +187,23 @@ Mappings:
       PPPlusResource: 192.168.80.131/32
       PP3rdPartySubnetCIDR: 192.168.4.0/24
       PP3rdPartyResource: 192.168.4.125/32
+      StrongSwanENIPrivIPAZ1: 10.0.0.53
+      StrongSwanPublicSubnetAZ1: 10.0.0.32/27
+      StrongSwanPrivateSubnetAZ1: 10.0.0.0/27
+      StrongSwanENIPrivIPAZ2: 10.0.0.176
+      StrongSwanPublicSubnetAZ2: 10.0.0.160/27
+      StrongSwanPrivateSubnetAZ2: 10.0.0.128/27
     UAT:
       PPPlusSubnetCIDR: 192.168.222.0/24
       PPPlusResource: 192.168.222.100/32
-      PP3rdPartySubnetCIDR: 192.168.4.0/24
-      PP3rdPartyResource: 192.168.4.125/32
+      PP3rdPartySubnetCIDR: 192.168.222.0/24
+      PP3rdPartyResource: 192.168.222.101/32
+      StrongSwanENIPrivIPAZ1: 10.2.0.53
+      StrongSwanPublicSubnetAZ1: 10.2.0.32/27
+      StrongSwanPrivateSubnetAZ1: 10.2.0.32/27
+      StrongSwanENIPrivIPAZ2: 10.2.0.176
+      StrongSwanPublicSubnetAZ2: 10.2.0.160/27
+      StrongSwanPrivateSubnetAZ2: 10.2.0.128/27
 
 Conditions:
   Fn::Transform:
@@ -241,7 +257,7 @@ Resources:
             - Fn::GetAZs: !Ref 'AWS::Region'
       GroupSet:
         - !Ref StrongSwanSecurityGroup
-      PrivateIpAddress: 10.0.0.53 #Registered with BSP
+      PrivateIpAddress: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ1] #Registered with BSP
       SourceDestCheck: false
       SubnetId:
         Fn::ImportValue:
@@ -261,7 +277,7 @@ Resources:
             - Fn::GetAZs: !Ref 'AWS::Region'
       GroupSet:
         - !Ref StrongSwanSecurityGroup
-      PrivateIpAddress: 10.0.0.176 #Registered with BSP
+      PrivateIpAddress: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ2] #Registered with BSP
       SourceDestCheck: false
       SubnetId:
         Fn::ImportValue:
@@ -274,11 +290,20 @@ Resources:
     DeletionPolicy: Retain #Make sure to retain always
     # Condition: IsProd
     Type: AWS::EC2::EIP
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [' ', [!Ref Name, !Ref EnvName, BSP registered IP - AZ1]]
+
 
   BSPVPNGatewayEIP2: # - Hardcoded for BSP
     DeletionPolicy: Retain #Make sure to retain always
     # Condition: IsProd
     Type: AWS::EC2::EIP
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [' ', [!Ref Name, !Ref EnvName, BSP registered IP - AZ2]]
 
   ##
   # BSP target resources
@@ -379,11 +404,12 @@ Resources:
                   :INPUT ACCEPT [15:1148]
                   :OUTPUT ACCEPT [222:17540]
                   :POSTROUTING ACCEPT [222:17540]
-                  -A POSTROUTING -s 10.0.0.0/27 -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
-                  -A POSTROUTING -s 10.0.0.0/27 -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
                   COMMIT
                 - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
                   PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
+                  PRIVATE_SUBNET_AZ1: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPrivateSubnetAZ1]
               permissions: 0700
               owner: root
               group: root
@@ -401,8 +427,8 @@ Resources:
                       leftfirewall=yes
                       forceencaps=yes
                       leftid=pchc
-                      left=10.0.0.53 #Registered with BSP
-                      leftsubnet=10.0.0.32/27
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
                       right=121.127.5.157
                       rightsubnet=${PPP_SUBNET}
                       ike=aes256-sha256-modp2048
@@ -417,8 +443,8 @@ Resources:
                       leftfirewall=yes
                       forceencaps=yes
                       leftid=pchc
-                      left=10.0.0.53 #Registered with BSP
-                      leftsubnet=10.0.0.32/27
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
                       right=121.127.5.50
                       rightsubnet=${3RD_SUBNET}
                       ike=aes256-sha256-modp2048
@@ -426,6 +452,8 @@ Resources:
                       esp=aes128-sha256-modp2048
                 - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
                   PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
+                  LEFT_IP: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ1]
+                  LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPublicSubnetAZ1]
               permissions: 0700
               owner: root
               group: root
@@ -440,11 +468,12 @@ Resources:
                   :INPUT ACCEPT [15:1148]
                   :OUTPUT ACCEPT [222:17540]
                   :POSTROUTING ACCEPT [222:17540]
-                  -A POSTROUTING -s 10.0.0.128/27 -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
-                  -A POSTROUTING -s 10.0.0.128/27 -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
                   COMMIT
                 - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
                   PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
+                  PRIVATE_SUBNET_AZ2: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPrivateSubnetAZ2]
               permissions: 0700
               owner: root
               group: root
@@ -461,8 +490,8 @@ Resources:
                       type=tunnel
                       leftfirewall=yes
                       leftid=pchc
-                      left=10.0.0.176 #Registered with BSP
-                      leftsubnet=10.0.0.160/27
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
                       right=121.127.5.157
                       rightsubnet=${PPP_SUBNET}
                       ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
@@ -476,8 +505,8 @@ Resources:
                       type=tunnel
                       leftfirewall=yes
                       leftid=pchc
-                      left=10.0.0.176 #Registered with BSP
-                      leftsubnet=10.0.0.160/27
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
                       right=121.127.5.50
                       rightsubnet=${3RD_SUBNET}
                       ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
@@ -485,6 +514,8 @@ Resources:
                       esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
                 - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
                   PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
+                  LEFT_IP: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ2]
+                  LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPublicSubnetAZ2]
               permissions: 0700
               owner: root
               group: root
@@ -757,9 +788,9 @@ Resources:
         - Name: InstanceId
           Value: !Ref StrongSwanInstanceAZ2
 
-  ##
+  ###
   # PhilPass Application Resources
-  ##
+  ###
 
   ELBStack:
     Type: AWS::CloudFormation::Stack
@@ -899,7 +930,8 @@ Resources:
   BSPInterfaceInstance:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: ami-015773f049325e337 #This should be a parameter
+      # ImageId: ami-015773f049325e337 #This should be a parameter
+      ImageId: !Ref InstanceAMI #This should be a parameter
       InstanceType: t3.medium
       IamInstanceProfile: !Ref BSPInterfaceIamInstanceProfile
       NetworkInterfaces:
@@ -1030,190 +1062,190 @@ Resources:
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
         MonthlyExpiration: 3650 # 10 years
 
-  Dashboard: #Hardcoded for now
-    Type: AWS::CloudWatch::Dashboard
-    Properties:
-        DashboardName: Philpass
-        DashboardBody: !Sub
-          - |
-            {
-              "widgets": [
-                {
-                  "height": 12,
-                  "width": 6,
-                  "y": 0,
-                  "x": 0,
-                  "type": "alarm",
-                  "properties": {
-                    "title": "Alarms",
-                    "alarms": [
-                      "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-interface-high-cpu",
-                      "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-a-high-cpu",
-                      "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-b-high-cpu",
-                      "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-a-low-disk",
-                      "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-b-low-disk",
-                      "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-a-low-mem",
-                      "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-b-low-mem",
-                      "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-db-errors",
-                      "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-db-error-denied"
-                    ]
-                  }
-                },
-                {
-                  "height": 6,
-                  "width": 6,
-                  "y": 0,
-                  "x": 6,
-                  "type": "metric",
-                  "properties": {
-                    "metrics": [
-                      [ "AWS/EC2", "CPUUtilization", "InstanceId", "i-04b96da3e06441b4d", { "label": "BSP-gateway-AZ1" } ],
-                      [ "...", "i-01f664ae523cad99b", { "label": "BSP-Gateway-AZ2" } ],
-                      [ "...", "i-063f2068dc4d332f5", { "label": "BSP-Interface" } ],
-                      [ "AWS/RDS", ".", "DBInstanceIdentifier", "pchc-prd-ase1-philpass", { "label": "RDS" } ]
-                    ],
-                    "view": "timeSeries",
-                    "stacked": false,
-                    "region": "ap-southeast-1",
-                    "period": 300,
-                    "title": "CPU",
-                    "stat": "Average",
-                    "yAxis": {
-                      "left": {
-                        "label": "Utilization"
-                      },
-                      "right": {
-                        "label": "Time"
-                      }
-                    }
-                  }
-                },
-                {
-                    "height": 6,
-                    "width": 6,
-                    "y": 6,
-                    "x": 6,
-                    "type": "metric",
-                    "properties": {
-                        "metrics": [
-                            [ { "expression": "(m4/(1024*1000000))*100", "label": "RDS", "id": "e1", "region": "ap-southeast-1" } ],
-                            [ "CWAgent", "mem_used_percent", "InstanceId", "i-04b96da3e06441b4d", "ImageId", "ami-09ba5d0bc342df8d2", "InstanceType", "t3.nano", { "label": "BSP-gateway-AZ1", "id": "m1" } ],
-                            [ "...", "i-01f664ae523cad99b", ".", ".", ".", ".", { "label": "BSP-gateway-AZ2", "id": "m2" } ],
-                            [ "...", "i-063f2068dc4d332f5", ".", "ami-015773f049325e337", ".", "t3.medium", { "label": "BSP-Interface", "id": "m3" } ],
-                            [ "AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "pchc-prd-ase1-philpass", { "id": "m4", "visible": false } ]
-                        ],
-                        "view": "timeSeries",
-                        "stacked": false,
-                        "region": "ap-southeast-1",
-                        "period": 300,
-                        "title": "Memory",
-                        "stat": "Average",
-                        "yAxis": {
-                            "left": {
-                                "label": "Utilization"
-                            },
-                            "right": {
-                                "label": "Time"
-                            }
-                        }
-                    }
-                },
-                {
-                  "height": 6,
-                  "width": 6,
-                  "y": 0,
-                  "x": 12,
-                  "type": "metric",
-                  "properties": {
-                    "metrics": [
-                      [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "app/pchc-prd-ase1-alb-philpass/f533e82c1910fce8", { "label": "ELB" } ],
-                      [ "AWS/RDS", "ReadLatency", "DBInstanceIdentifier", "pchc-prd-ase1-philpass", { "label": "RDS Read" } ],
-                      [ ".", "WriteLatency", ".", ".", { "label": "RDS Write" } ]
-                    ],
-                    "view": "timeSeries",
-                    "stacked": false,
-                    "region": "ap-southeast-1",
-                    "period": 300,
-                    "title": "Performance",
-                    "stat": "Average",
-                    "yAxis": {
-                      "left": {
-                        "showUnits": true,
-                        "label": "Time"
-                      },
-                      "right": {
-                        "label": "Duration"
-                      }
-                    }
-                  }
-                },
-                {
-                    "height": 6,
-                    "width": 6,
-                    "y": 0,
-                    "x": 18,
-                    "type": "metric",
-                    "properties": {
-                        "metrics": [
-                            [ "AWS/EC2", "NetworkIn", "InstanceId", "i-04b96da3e06441b4d", { "label": "BSP-gateway-AZ1 (In)" } ],
-                            [ "...", "i-01f664ae523cad99b", { "label": "BSP-gateway-AZ2 (n)" } ],
-                            [ "...", "i-063f2068dc4d332f5", { "label": "BSP-Interface (In)" } ],
-                            [ "...", "i-00973696088a677bd", { "label": "Jump Host (In)" } ],
-                            [ ".", "NetworkOut", ".", "i-04b96da3e06441b4d", { "label": "BSP-gateway-AZ1 (Out)" } ],
-                            [ "...", "i-01f664ae523cad99b", { "label": "BSP-gateway-AZ2 (Out)" } ],
-                            [ "...", "i-063f2068dc4d332f5", { "label": "BSP-Interface (Out)" } ],
-                            [ "...", "i-00973696088a677bd", { "label": "Jump Host (Out)" } ]
-                        ],
-                        "view": "timeSeries",
-                        "stacked": false,
-                        "title": "Network",
-                        "region": "ap-southeast-1",
-                        "period": 300,
-                        "stat": "Average"
-                    }
-                },
-                {
-                    "height": 6,
-                    "width": 6,
-                    "y": 6,
-                    "x": 12,
-                    "type": "metric",
-                    "properties": {
-                        "metrics": [
-                            [ "CWAgent", "disk_used_percent", "path", "/", "InstanceId", "i-01f664ae523cad99b", "ImageId", "ami-09ba5d0bc342df8d2", "InstanceType", "t3.nano", "device", "nvme0n1p1", "fstype", "xfs", { "label": "BSP-gateway-AZ2" } ],
-                            [ "...", "i-063f2068dc4d332f5", ".", "ami-015773f049325e337", ".", "t3.medium", ".", ".", ".", ".", { "label": "BSP-Interface" } ],
-                            [ "...", "i-04b96da3e06441b4d", ".", "ami-09ba5d0bc342df8d2", ".", "t3.nano", ".", ".", ".", ".", { "label": "BSP-gateway-AZ1" } ],
-                            [ { "expression": "100*(m1/(20*1024*1000000))", "label": "RDS", "id": "e2", "region": "ap-southeast-1" } ],
-                            [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "pchc-prd-ase1-philpass", { "id": "m1", "visible": false } ]
-                        ],
-                        "view": "timeSeries",
-                        "stacked": false,
-                        "region": "ap-southeast-1",
-                        "period": 300,
-                        "title": "Space",
-                        "stat": "Average"
-                    }
-                },
-                {
-                  "height": 6,
-                  "width": 6,
-                  "y": 6,
-                  "x": 18,
-                  "type": "metric",
-                  "properties": {
-                    "metrics": [
-                      [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "app/pchc-prd-ase1-alb-philpass/f533e82c1910fce8", { "label": "ELB HTTP 5XX_Count" } ],
-                      [ ".", "HTTPCode_ELB_4XX_Count", ".", ".", { "label": "ELB HTTP 4XX_Count" } ]
-                    ],
-                    "view": "timeSeries",
-                    "stacked": false,
-                    "region": "ap-southeast-1",
-                    "title": "Error Count",
-                    "period": 300,
-                    "stat": "Average"
-                  }
-                }
-              ]
-            }
-          - ZONE1_RDS: i-04b96da3e06441b4d
-            ZONE1_RDS_REPLICA: i-04b96da3e06441b4d
+#   Dashboard: #Hardcoded for now
+#     Type: AWS::CloudWatch::Dashboard
+#     Properties:
+#         DashboardName: Philpass
+#         DashboardBody: !Sub
+#           - |
+#             {
+#               "widgets": [
+#                 {
+#                   "height": 12,
+#                   "width": 6,
+#                   "y": 0,
+#                   "x": 0,
+#                   "type": "alarm",
+#                   "properties": {
+#                     "title": "Alarms",
+#                     "alarms": [
+#                       "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-interface-high-cpu",
+#                       "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-a-high-cpu",
+#                       "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-b-high-cpu",
+#                       "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-a-low-disk",
+#                       "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-b-low-disk",
+#                       "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-a-low-mem",
+#                       "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-BSP-gateway-b-low-mem",
+#                       "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-db-errors",
+#                       "arn:aws:cloudwatch:ap-southeast-1:470455329885:alarm:pchc-prd-ase1-philpass-db-error-denied"
+#                     ]
+#                   }
+#                 },
+#                 {
+#                   "height": 6,
+#                   "width": 6,
+#                   "y": 0,
+#                   "x": 6,
+#                   "type": "metric",
+#                   "properties": {
+#                     "metrics": [
+#                       [ "AWS/EC2", "CPUUtilization", "InstanceId", "i-04b96da3e06441b4d", { "label": "BSP-gateway-AZ1" } ],
+#                       [ "...", "i-01f664ae523cad99b", { "label": "BSP-Gateway-AZ2" } ],
+#                       [ "...", "i-063f2068dc4d332f5", { "label": "BSP-Interface" } ],
+#                       [ "AWS/RDS", ".", "DBInstanceIdentifier", "pchc-prd-ase1-philpass", { "label": "RDS" } ]
+#                     ],
+#                     "view": "timeSeries",
+#                     "stacked": false,
+#                     "region": "ap-southeast-1",
+#                     "period": 300,
+#                     "title": "CPU",
+#                     "stat": "Average",
+#                     "yAxis": {
+#                       "left": {
+#                         "label": "Utilization"
+#                       },
+#                       "right": {
+#                         "label": "Time"
+#                       }
+#                     }
+#                   }
+#                 },
+#                 {
+#                     "height": 6,
+#                     "width": 6,
+#                     "y": 6,
+#                     "x": 6,
+#                     "type": "metric",
+#                     "properties": {
+#                         "metrics": [
+#                             [ { "expression": "(m4/(1024*1000000))*100", "label": "RDS", "id": "e1", "region": "ap-southeast-1" } ],
+#                             [ "CWAgent", "mem_used_percent", "InstanceId", "i-04b96da3e06441b4d", "ImageId", "ami-09ba5d0bc342df8d2", "InstanceType", "t3.nano", { "label": "BSP-gateway-AZ1", "id": "m1" } ],
+#                             [ "...", "i-01f664ae523cad99b", ".", ".", ".", ".", { "label": "BSP-gateway-AZ2", "id": "m2" } ],
+#                             [ "...", "i-063f2068dc4d332f5", ".", "ami-015773f049325e337", ".", "t3.medium", { "label": "BSP-Interface", "id": "m3" } ],
+#                             [ "AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "pchc-prd-ase1-philpass", { "id": "m4", "visible": false } ]
+#                         ],
+#                         "view": "timeSeries",
+#                         "stacked": false,
+#                         "region": "ap-southeast-1",
+#                         "period": 300,
+#                         "title": "Memory",
+#                         "stat": "Average",
+#                         "yAxis": {
+#                             "left": {
+#                                 "label": "Utilization"
+#                             },
+#                             "right": {
+#                                 "label": "Time"
+#                             }
+#                         }
+#                     }
+#                 },
+#                 {
+#                   "height": 6,
+#                   "width": 6,
+#                   "y": 0,
+#                   "x": 12,
+#                   "type": "metric",
+#                   "properties": {
+#                     "metrics": [
+#                       [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "app/pchc-prd-ase1-alb-philpass/f533e82c1910fce8", { "label": "ELB" } ],
+#                       [ "AWS/RDS", "ReadLatency", "DBInstanceIdentifier", "pchc-prd-ase1-philpass", { "label": "RDS Read" } ],
+#                       [ ".", "WriteLatency", ".", ".", { "label": "RDS Write" } ]
+#                     ],
+#                     "view": "timeSeries",
+#                     "stacked": false,
+#                     "region": "ap-southeast-1",
+#                     "period": 300,
+#                     "title": "Performance",
+#                     "stat": "Average",
+#                     "yAxis": {
+#                       "left": {
+#                         "showUnits": true,
+#                         "label": "Time"
+#                       },
+#                       "right": {
+#                         "label": "Duration"
+#                       }
+#                     }
+#                   }
+#                 },
+#                 {
+#                     "height": 6,
+#                     "width": 6,
+#                     "y": 0,
+#                     "x": 18,
+#                     "type": "metric",
+#                     "properties": {
+#                         "metrics": [
+#                             [ "AWS/EC2", "NetworkIn", "InstanceId", "i-04b96da3e06441b4d", { "label": "BSP-gateway-AZ1 (In)" } ],
+#                             [ "...", "i-01f664ae523cad99b", { "label": "BSP-gateway-AZ2 (n)" } ],
+#                             [ "...", "i-063f2068dc4d332f5", { "label": "BSP-Interface (In)" } ],
+#                             [ "...", "i-00973696088a677bd", { "label": "Jump Host (In)" } ],
+#                             [ ".", "NetworkOut", ".", "i-04b96da3e06441b4d", { "label": "BSP-gateway-AZ1 (Out)" } ],
+#                             [ "...", "i-01f664ae523cad99b", { "label": "BSP-gateway-AZ2 (Out)" } ],
+#                             [ "...", "i-063f2068dc4d332f5", { "label": "BSP-Interface (Out)" } ],
+#                             [ "...", "i-00973696088a677bd", { "label": "Jump Host (Out)" } ]
+#                         ],
+#                         "view": "timeSeries",
+#                         "stacked": false,
+#                         "title": "Network",
+#                         "region": "ap-southeast-1",
+#                         "period": 300,
+#                         "stat": "Average"
+#                     }
+#                 },
+#                 {
+#                     "height": 6,
+#                     "width": 6,
+#                     "y": 6,
+#                     "x": 12,
+#                     "type": "metric",
+#                     "properties": {
+#                         "metrics": [
+#                             [ "CWAgent", "disk_used_percent", "path", "/", "InstanceId", "i-01f664ae523cad99b", "ImageId", "ami-09ba5d0bc342df8d2", "InstanceType", "t3.nano", "device", "nvme0n1p1", "fstype", "xfs", { "label": "BSP-gateway-AZ2" } ],
+#                             [ "...", "i-063f2068dc4d332f5", ".", "ami-015773f049325e337", ".", "t3.medium", ".", ".", ".", ".", { "label": "BSP-Interface" } ],
+#                             [ "...", "i-04b96da3e06441b4d", ".", "ami-09ba5d0bc342df8d2", ".", "t3.nano", ".", ".", ".", ".", { "label": "BSP-gateway-AZ1" } ],
+#                             [ { "expression": "100*(m1/(20*1024*1000000))", "label": "RDS", "id": "e2", "region": "ap-southeast-1" } ],
+#                             [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "pchc-prd-ase1-philpass", { "id": "m1", "visible": false } ]
+#                         ],
+#                         "view": "timeSeries",
+#                         "stacked": false,
+#                         "region": "ap-southeast-1",
+#                         "period": 300,
+#                         "title": "Space",
+#                         "stat": "Average"
+#                     }
+#                 },
+#                 {
+#                   "height": 6,
+#                   "width": 6,
+#                   "y": 6,
+#                   "x": 18,
+#                   "type": "metric",
+#                   "properties": {
+#                     "metrics": [
+#                       [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "app/pchc-prd-ase1-alb-philpass/f533e82c1910fce8", { "label": "ELB HTTP 5XX_Count" } ],
+#                       [ ".", "HTTPCode_ELB_4XX_Count", ".", ".", { "label": "ELB HTTP 4XX_Count" } ]
+#                     ],
+#                     "view": "timeSeries",
+#                     "stacked": false,
+#                     "region": "ap-southeast-1",
+#                     "title": "Error Count",
+#                     "period": 300,
+#                     "stat": "Average"
+#                   }
+#                 }
+#               ]
+#             }
+#           - ZONE1_RDS: i-04b96da3e06441b4d
+#             ZONE1_RDS_REPLICA: i-04b96da3e06441b4d
