@@ -1,0 +1,49 @@
+  XXX001User:
+    Type: AWS::IAM::User
+    Properties:
+      Groups:
+        - !Ref BankGroup
+      UserName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BANKXXXPBM001]]
+  
+  XXX001Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, XXXPBM001, queue]]
+      MessageRetentionPeriod: 1209600 #14 days
+
+  XXX001QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref XXX001Queue
+      PolicyDocument:
+        Statement:
+          - Action:
+              - SQS:SendMessage
+            Effect: Allow
+            Resource:
+              - !GetAtt XXX001Queue.Arn
+            Principal:
+              AWS: '*'
+
+  XXX001QueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm if queue depth increases to more than 10 messages
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt [XXX001Queue, QueueName]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      InsufficientDataActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+
