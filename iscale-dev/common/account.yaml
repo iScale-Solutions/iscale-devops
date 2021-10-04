@@ -471,6 +471,16 @@ Resources:
           ServerSideEncryptionConfiguration:
             - ServerSideEncryptionByDefault:
                 SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
 
   ConfigBucketPolicy:
     Condition: EnableConfig
@@ -796,6 +806,34 @@ Resources:
       AlarmName: igw_changes
       AlarmDescription: A CloudWatch Alarm that triggers when changes are made to an Internet Gateway in a VPC.
       MetricName: GatewayEventCount
+      Namespace: CloudTrailMetrics
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref CISTopic
+      TreatMissingData: notBreaching
+
+  UnauthorizedAPICallFilter:
+    Condition: EnableCIS
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref CloudTrailCloudWatchLogGroup
+      FilterPattern: "{ ($.errorCode = \"*UnauthorizedOperation\") || ($.errorCode = \"AccessDenied*\") }"
+      MetricTransformations:
+        - MetricValue: 1
+          MetricNamespace: CloudTrailMetrics
+          MetricName: UnauthorizedAPICallCount
+
+  UnauthorizedAPICallAlarm:
+    Condition: EnableCIS
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: denied_api_call
+      AlarmDescription: A CloudWatch Alarm that triggers when an API call was denied
+      MetricName: UnauthorizedAPICallCount
       Namespace: CloudTrailMetrics
       Statistic: Sum
       Period: 300
