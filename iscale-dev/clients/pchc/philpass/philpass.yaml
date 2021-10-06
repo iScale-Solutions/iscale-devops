@@ -25,7 +25,7 @@ Metadata:
           default: Instance Configuration
         Parameters:
           - InstanceKeyName
-          - InstanceAMI
+          - BSPInterfaceAMI
           - InstanceType
       - Label:
           default: Scheduler Configuration
@@ -33,8 +33,9 @@ Metadata:
           - StartScheduleExpression
           - StopScheduleExpression
       - Label:
-          default: BSS Interface Configuration
+          default: BSP Interface Configuration
         Parameters:
+          - StrongswanActive
           - BSPMode
           - StrongswanPPPPSK
           - Strongswan3RDPSK
@@ -52,7 +53,7 @@ Metadata:
         default: BSP interface hostname
       DeletionProtection:
         default: Protect core items against deletion
-      InstanceAMI:
+      BSPInterfaceAMI:
         default: Philpass Instance AMI ID
       InstanceKeyName:
         default: Instance Key Name
@@ -70,6 +71,8 @@ Metadata:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
+      StrongswanActive:
+        default: Active StrongSwan Instance (default is true)
       StrongswanAMI:
         default: Strongswan AMI ID
       StrongswanPPPPSK:
@@ -125,7 +128,7 @@ Parameters:
     AllowedValues:
       - true
       - false
-  InstanceAMI:
+  BSPInterfaceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
     Default: ami-00b8d9cb8a7161e41 #Default Amazon Linux 2 for Singapore
@@ -163,6 +166,13 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
+  StrongswanActive:
+    Description: Set to false only to turn off Strongswan
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
   StrongswanAMI:
     Description: Strongswan Instance AMI ID
     Type: AWS::EC2::Image::Id
@@ -184,7 +194,11 @@ Mappings:
   BSPConfig:
     Production:
       PPPlusSubnetCIDR: 192.168.80.0/24
-      PPPlusResource: 192.168.80.131/32
+      PPPlusResource1: 192.168.80.131
+      PPPlusResource2: 192.168.80.132
+      PPPlusResource3: 192.168.80.141
+      PPPlusDNSServer1: 192.168.80.241
+      PPPlusDNSServer2: 192.168.80.242
       PP3rdPartySubnetCIDR: 192.168.4.0/24
       PP3rdPartyResource: 192.168.4.125/32
       StrongSwanENIPrivIPAZ1: 10.0.0.53
@@ -195,7 +209,11 @@ Mappings:
       StrongSwanPrivateSubnetAZ2: 10.0.0.128/27
     UAT:
       PPPlusSubnetCIDR: 192.168.222.0/24
-      PPPlusResource: 192.168.222.100/32
+      PPPlusResource1: 192.168.222.100
+      PPPlusResource2: 192.168.222.100
+      PPPlusResource3: 192.168.222.100
+      PPPlusDNSServer1: 192.168.222.241 #Check on this
+      PPPlusDNSServer2: 192.168.222.242 #Check on this
       PP3rdPartySubnetCIDR: 192.168.222.0/24
       PP3rdPartyResource: 192.168.222.101/32
       StrongSwanENIPrivIPAZ1: 10.2.0.53
@@ -213,6 +231,8 @@ Conditions:
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
   IsBSPUAT: !Equals [!Ref BSPMode, UAT]
   IsBSPProd: !Equals [!Ref BSPMode, Production]
+  IsStrongswanActive: !Equals [!Ref StrongswanActive, true]
+  IsStrongswanAlarmActive: !And [Condition: IsStrongswanActive, Condition: IsProd]
 
 Resources:
 
@@ -327,22 +347,94 @@ Resources:
       DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
-  BSPPhilPassPlusRouteAZ1:
+  BSPPhilPassPlusRouteIP1AZ1:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource1], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ1ENI
 
-  BSPPhilPassPlusRouteAZ2:
+  BSPPhilPassPlusRouteIP1AZ2:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource1], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  BSPPhilPassPlusRouteIP2AZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource2], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  BSPPhilPassPlusRouteIP2AZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource2], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  BSPPhilPassPlusRouteIP3AZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource3], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  BSPPhilPassPlusRouteIP3AZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource3], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  BSPPhilPassPlusRouteDNS1AZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer1], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  BSPPhilPassPlusRouteDNS1AZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer1], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  BSPPhilPassPlusRouteDNS2AZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer2], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  BSPPhilPassPlusRouteDNS2AZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer2], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
   ##
@@ -565,6 +657,7 @@ Resources:
         - !Ref StrongSwanEC2Role
 
   StrongSwanInstanceAZ1:
+    Condition: IsStrongswanActive
     Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile: !Ref StrongSwanInstanceProfile
@@ -595,7 +688,7 @@ Resources:
       AllocationId: !GetAtt BSPVPNGatewayEIP1.AllocationId
 
   LowDiskSpaceStrongSwanAZ1Alarm:
-    Condition: IsProd
+    Condition: IsStrongswanAlarmActive
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, disk]]
@@ -629,7 +722,7 @@ Resources:
           Value: xfs
 
   LowMemStrongSwanAZ1Alarm:
-    Condition: IsProd
+    Condition: IsStrongswanAlarmActive
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, mem]]
@@ -655,7 +748,7 @@ Resources:
           Value: t3.nano
 
   HighCPUStrongSwanAZ1Alarm:
-    Condition: IsProd
+    Condition: IsStrongswanAlarmActive
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, high, cpu]]
@@ -677,6 +770,7 @@ Resources:
           Value: !Ref StrongSwanInstanceAZ1
 
   StrongSwanInstanceAZ2:
+    Condition: IsStrongswanActive
     Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile: !Ref StrongSwanInstanceProfile
@@ -707,7 +801,7 @@ Resources:
       AllocationId: !GetAtt BSPVPNGatewayEIP2.AllocationId
 
   LowDiskSpaceStrongSwanAZ2Alarm:
-    Condition: IsProd
+    Condition: IsStrongswanAlarmActive
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, disk]]
@@ -741,7 +835,7 @@ Resources:
           Value: xfs
 
   LowMemStrongSwanAZ2Alarm:
-    Condition: IsProd
+    Condition: IsStrongswanAlarmActive
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, mem]]
@@ -767,7 +861,7 @@ Resources:
           Value: t3.nano
 
   HighCPUStrongSwanAZ2Alarm:
-    Condition: IsProd
+    Condition: IsStrongswanAlarmActive
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, high, cpu]]
@@ -931,7 +1025,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       # ImageId: ami-015773f049325e337 #This should be a parameter
-      ImageId: !Ref InstanceAMI #This should be a parameter
+      ImageId: !Ref BSPInterfaceAMI #ami-00b8d9cb8a7161e41
       InstanceType: t3.medium
       IamInstanceProfile: !Ref BSPInterfaceIamInstanceProfile
       NetworkInterfaces:
