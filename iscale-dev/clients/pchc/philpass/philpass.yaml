@@ -236,6 +236,81 @@ Conditions:
 
 Resources:
 
+###
+# BSP DNS Resolver
+###
+
+  BSPDNSResolverSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BSP DNS Resolver Security Group
+      VpcId: 
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupEgress:
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0 #Need to clamp down on this
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0 #Need to clamp down on this
+
+  BSPDNSResolver:
+    Type: AWS::Route53Resolver::ResolverEndpoint
+    Properties:
+      Direction: Outbound
+      IpAddresses:
+        - SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId1'
+        - SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId2'
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, DNS, Resolver]]
+      SecurityGroupIds:
+        - !Ref BSPDNSResolverSecurityGroup
+
+  BSPDomainResolverRule:
+    Type: AWS::Route53Resolver::ResolverRule
+    Properties: 
+      DomainName: bsp.gov.ph
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Domain, Rule]]
+      ResolverEndpointId: !Ref BSPDNSResolver
+      RuleType: FORWARD 
+      TargetIps:
+        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer1]
+          Port: 53
+        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer2]
+          Port: 53
+
+  BSPDomainVPCAssociation:
+    Type: AWS::Route53Resolver::ResolverRuleAssociation
+    Properties: 
+      ResolverRuleId: !Ref BSPDomainResolverRule
+      VPCId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+
+  BSPDNSResolverLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Resolver]]
+
+  BSPDNSResolverLog:
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfig
+    Properties:
+      DestinationArn: !GetAtt BSPDNSResolverLogGroup.Arn
+  
+  BSPDNSResolverLogAssociation:
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
+    Properties: 
+      ResolverQueryLogConfigId: !Ref BSPDNSResolverLog
+      ResourceId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+  
   ###
   # Custom Network resources for BSP
   ###
@@ -243,28 +318,54 @@ Resources:
   StrongSwanSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-        GroupDescription: StrongSwan Public Security Group
-        VpcId: 
-          Fn::ImportValue:
-            !Sub '${NetworkStackName}-VpcId'
-        SecurityGroupIngress:
-          - IpProtocol: tcp
-            FromPort: 22
-            ToPort: 22
-            CidrIp: 0.0.0.0/0
-          - IpProtocol: icmp
-            FromPort: -1
-            ToPort: -1
-            CidrIp: 0.0.0.0/0
+      GroupDescription: StrongSwan Public Security Group
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
 
-  AllowHTTPSFromBSPInterfaceIntoStrongSwan:
+  # AllowSSHIntoStrongSwan:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties:
+  #     IpProtocol: tcp
+  #     GroupId: !Ref StrongSwanSecurityGroup
+  #     FromPort: 22
+  #     ToPort: 22
+  #     CidrIp: 
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-VpcCidrBlock'
+
+  AllowICMPIntoStrongSwan:
     Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
-      IpProtocol: TCP
+    Properties:
+      IpProtocol: icmp
+      GroupId: !Ref StrongSwanSecurityGroup
+      FromPort: -1
+      ToPort: -1
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcCidrBlock'
+
+  AllowHTTPSIntoStrongSwan:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
       GroupId: !Ref StrongSwanSecurityGroup
       FromPort: 443
       ToPort: 443
-      SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcCidrBlock'
+
+  AllowDNSIntoStrongSwan:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: udp
+      GroupId: !Ref StrongSwanSecurityGroup
+      FromPort: 53
+      ToPort: 53
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcCidrBlock'
 
   StrongSwanAZ1ENI:
     Type: AWS::EC2::NetworkInterface
@@ -1025,7 +1126,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       # ImageId: ami-015773f049325e337 #This should be a parameter
-      ImageId: !Ref BSPInterfaceAMI #ami-00b8d9cb8a7161e41
+      ImageId: !Ref BSPInterfaceAMI
       InstanceType: t3.medium
       IamInstanceProfile: !Ref BSPInterfaceIamInstanceProfile
       NetworkInterfaces:
