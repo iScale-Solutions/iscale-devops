@@ -16,12 +16,17 @@ Metadata:
           - NetworkStackName
           - SNSStackName
       - Label:
+          default: Loan balancer configuration
+        Parameters:
+          - LoadBalancerCertificateArn
+          - LoadBalancerHostName
+      - Label:
           default: Instance Configuration
         Parameters:
           - InstanceKeyName
-          - InstanceAMI
+          - BackendAMI
+          - FrontendAMI
           - ClientDomainName
-          - LoadBalancerCertificateArn
       - Label:
           default: Scheduler Configuration
         Parameters:
@@ -39,14 +44,20 @@ Metadata:
         default: Network Stack Name
       SNSStackName:
         default: SNS Topic Stack Name
+      BackendAMI:
+        default: Back end server AMI
       ClientDomainName:
         default: Domain Name
+      FrontendAMI:
+        default: Front end server AMI
       InstanceKeyName:
         default: Instance Key Name
       InstanceAMI:
         default: Instance AMI
       LoadBalancerCertificateArn:
         default: Load Balancer SSL certificate
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
       StartScheduleExpression:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
@@ -81,12 +92,20 @@ Parameters:
     AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
     Default: powerbat.ph
     MinLength: 1
-  InstanceAMI:
-    Description: Instance AMI ID
+  BackendAMI:
+    Description: BackEnd AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0cdb2ce311496b027
+  FrontendAMI:
+    Description: FrontEnd AMI ID
     Type: AWS::EC2::Image::Id
     Default: ami-0cdb2ce311496b027
   InstanceKeyName:
     Description: Instance Key Name
+    Type: String
+    Default: ''
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
     Type: String
     Default: ''
   LoadBalancerCertificateArn:
@@ -123,6 +142,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
       
 Resources:
 
@@ -179,6 +199,20 @@ Resources:
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
+  FrontEndDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, front]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        CreateDeployUser: true
+        # RootStackID: !Ref 'AWS::StackId'
+        # BlueGreenTimeStamp: !Ref BlueGreenTimeStamp
+
   FrontEndStack:
     DependsOn:
       - DBStack
@@ -187,7 +221,7 @@ Resources:
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
       Parameters:
-        Name: !Join ['-', [!Ref Name, 'ui']]
+        Name: !Join ['-', [!Ref Name, front]]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         LoadBalancerPriority: 100
@@ -203,17 +237,23 @@ Resources:
           Fn::GetAtt:
             - DBStack
             - Outputs.SecurityGroupId
+        HealthCheckPath: '/health'
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
-        InstanceAMI: ami-04dd7f3f78388ad34 #!Ref InstanceAMI
+        InstanceAMI: !Ref FrontendAMI #ami-012a1475cea8bb52c
         InstanceKeyName: !Ref InstanceKeyName
-        # InstanceSpotPrice: 0.5
+        InstanceSpotPrice: 0.5
         InstanceType: t3.micro
+        LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref LoadBalancerHostName, 'AWS::NoValue']
         SNSStackName: !Ref SNSStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
         NetworkStackName: !Ref NetworkStackName
         ClientDomainName: !Ref ClientDomainName
         UseFriendlyNames: FALSE
 
-  CalculationStack: 
+  CalculationStack:
     DependsOn:
       - DBStack
     Type: AWS::CloudFormation::Stack
@@ -243,7 +283,7 @@ Resources:
           Fn::GetAtt:
             - FrontEndStack
             - Outputs.AppServerEFSSecurityGroup
-        InstanceAMI: ami-03d33d4492bfdc8ce #!Ref InstanceAMI
+        InstanceAMI: ami-03d33d4492bfdc8ce #!Ref BackendAMI
         InstanceKeyName: !Ref InstanceKeyName
         # InstanceSpotPrice: 0.5
         InstanceType: t3.micro
@@ -282,7 +322,7 @@ Resources:
           Fn::GetAtt:
             - FrontEndStack
             - Outputs.AppServerEFSSecurityGroup
-        InstanceAMI: ami-0a12525e2e65d9e4d #!Ref InstanceAMI
+        InstanceAMI: ami-0a12525e2e65d9e4d #!Ref BackendAMI
         InstanceKeyName: !Ref InstanceKeyName
         # InstanceSpotPrice: 0.5
         InstanceType: t3.micro
@@ -291,25 +331,25 @@ Resources:
         ClientDomainName: !Ref ClientDomainName
         UseFriendlyNames: FALSE
 
-  # BackupStack:
-  #   DependsOn: 
-  #     - DBStack
-  #     - AppServerStack
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties: 
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
-  #     Parameters: 
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       BackupARNList: !Join
-  #         - ','
-  #         - - Fn::GetAtt:
-  #             - DBStack
-  #             - Outputs.DBClusterARN
-  #           - Fn::GetAtt:
-  #             - AppServerStack
-  #             - Outputs.AppServerEFSArn
+  BackupStack:
+    DependsOn: 
+      - DBStack
+      - FrontEndStack
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters: 
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstanceARN
+            - Fn::GetAtt:
+              - FrontEndStack
+              - Outputs.AppServerEFSArn
 
   # SchedulerStack: 
   #   DependsOn: 
