@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for Externisy
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: proseso
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. iscale-solutions.us).
+    Type: String
+    Default: externisy.fr
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join [' ',[Hosted Zone for, !Ref ClientDomainName]]
+      Name: !Ref ClientDomainName
+      HostedZoneTags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], iscale-solutions]]
+
+  HostedZoneDNSSECSigningKey:
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: arn:aws:kms:us-east-1:178070162686:key/315d6bf8-09eb-4b0d-971c-5ef787b8d57b
+      Name: key_signing_key
+      Status: ACTIVE
+
+  HostedZoneDNSSEC:
+    DependsOn: HostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref HostedZone
+
+  DomainTXTRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref ClientDomainName
+      ResourceRecords:
+        - '"v=spf1 include:_spf.google.com include:amazonses.com -all"'
+        - '"google-site-verification=SyCBNt5jcla76ouNqCmCxDNlfu-MQ7zPwpqHnEcUV04"'
+      TTL: 14400
+      Type: TXT
+      Comment: Domain TXT Record
+
+  GoogleMXRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId : !Ref HostedZone
+      Name: !Ref ClientDomainName
+      Comment: Google MX Records
+      ResourceRecords:
+        - 1 ASPMX.L.GOOGLE.COM
+        - 5 ALT1.ASPMX.L.GOOGLE.COM
+        - 5 ALT2.ASPMX.L.GOOGLE.COM
+        - 10 ALT3.ASPMX.L.GOOGLE.COM
+        - 10 ALT4.ASPMX.L.GOOGLE.COM
+      TTL: 14400
+      Type: MX
+
+  WildcardCertificateValidationRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join [".", ["_63185c6cf306c59fbe51cef8cc9d66b2", !Ref ClientDomainName]]
+      Type: CNAME
+      TTL: 14400
+      Comment: !Join ["", ["Validation for *.", !Ref ClientDomainName, " in us-west-2"]]
+      ResourceRecords:
+        - _f15af7fd52c12817b3f10e5a5ebb452a.chvvfdvqrj.acm-validations.aws.
+
+  # WWWCertificateValidationRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join [".", ["_1c085380ae1e8a4ccd39f35889b73574", "www", !Ref ClientDomainName]]
+  #     Type: CNAME
+  #     TTL: 14400
+  #     Comment: !Join ["", ["Validation for www.", !Ref ClientDomainName, "in us-east-1"]]
+  #     ResourceRecords:
+  #       - _a300d476f470d8dcf19d4196135dcea5.bsgbmzkfwj.acm-validations.aws.
+
+  # AmazonSESDnsRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[_amazonses, !Ref ClientDomainName]]
+  #     ResourceRecords: 
+  #       - "\"3Mr138o4sEQWdF6KvX+YuVK+hLia47Zpy4bdD6Boy+Y=\""
+  #     TTL: 14400
+  #     Type: TXT
+  #     Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], amazon-ses]]
+
+  # DKIMDnsRecord1:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[xgk437g65ejkvelfh2dg6ll2a7raw5tq._domainkey, !Ref ClientDomainName]]
+  #     ResourceRecords: 
+  #       - xgk437g65ejkvelfh2dg6ll2a7raw5tq.dkim.amazonses.com
+  #     TTL: 14400
+  #     Type: CNAME
+  #     Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], dkim1]]
+
+  # DKIMDnsRecord2:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[fqnnnokfltev5dghamu54cfnisdw53vm._domainkey, !Ref ClientDomainName]]
+  #     ResourceRecords: 
+  #       - fqnnnokfltev5dghamu54cfnisdw53vm.dkim.amazonses.com
+  #     TTL: 14400
+  #     Type: CNAME
+  #     Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], dkim2]]
+
+  # DKIMDnsRecord3:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[46jukmsxo353vy7oim4lryu3n7epaasn._domainkey, !Ref ClientDomainName]]
+  #     ResourceRecords: 
+  #       - 46jukmsxo353vy7oim4lryu3n7epaasn.dkim.amazonses.com
+  #     TTL: 14400
+  #     Type: CNAME
+  #     Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], dkim3]]
