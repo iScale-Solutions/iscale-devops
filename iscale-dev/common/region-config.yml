@@ -10,14 +10,11 @@ Metadata:
           - AllSupported
           - IncludeGlobalResourceTypes
           - ResourceTypes
+          - RootRegion
       - Label:
           default: Delivery Channel Configuration
         Parameters:
-          - DeliveryChannelName
           - Frequency
-      - Label:
-          default: Delivery Notifications
-        Parameters:
           - TopicArn
           - NotificationEmail
     ParameterLabels:
@@ -27,16 +24,18 @@ Metadata:
         default: Include global resource types
       ResourceTypes:
         default: List of resource types if not all supported
-      DeliveryChannelName:
-        default: Configuration delivery channel name
       Frequency:
         default: Snapshot delivery frequency
+      RootRegion:
+        default: Root Region
       TopicArn:
         default: SNS topic name
       NotificationEmail:
         default: Notification Email (optional)
 
+
 Parameters:
+
   AllSupported:
     Type: String
     Default: True
@@ -53,15 +52,20 @@ Parameters:
       - True
       - False
 
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Email address for AWS Config notifications (for new topics).
+
   ResourceTypes:
     Type: List<String>
     Description: A list of valid AWS resource types to include in this recording group, such as AWS::EC2::Instance or AWS::CloudTrail::Trail.
     Default: <All>
 
-  DeliveryChannelName:
+  TopicArn:
     Type: String
-    Default: <Generated>
-    Description: The name of the delivery channel.
+    Default: <New Topic>
+    Description: The Amazon Resource Name (ARN) of the Amazon Simple Notification Service (Amazon SNS) topic that AWS Config delivers notifications to.
 
   Frequency:
     Type: String
@@ -74,23 +78,34 @@ Parameters:
       - 12hours
       - 24hours
 
-  TopicArn:
+  RootRegion:
     Type: String
-    Default: <New Topic>
-    Description: The Amazon Resource Name (ARN) of the Amazon Simple Notification Service (Amazon SNS) topic that AWS Config delivers notifications to.
-
-  NotificationEmail:
-    Type: String
-    Default: <None>
-    Description: Email address for AWS Config notifications (for new topics).
+    Default: us-west-2
+    Description: Region where global resources are checked
+    AllowedValues:
+      - us-east-2
+      - us-east-1
+      - us-west-1
+      - us-west-2
+      - af-south-1
+      - ap-east-1
+      - ap-south-1
+      - ap-northeast-3	
+      - ap-northeast-2
+      - ap-southeast-1
+      - ap-southeast-2
+      - ap-northeast-1
+      - ca-central-1
+      - eu-central-1
+      - eu-west-1
+      - eu-west-2
+      - eu-south-1
+      - eu-west-3
+      - eu-north-1
+      - me-south-1
+      - sa-east-1
 
 Conditions:
-  IsAllSupported: !Equals
-    - !Ref AllSupported
-    - True
-  IsGeneratedDeliveryChannelName: !Equals
-    - !Ref DeliveryChannelName
-    - <Generated>
   CreateTopic: !Equals
     - !Ref TopicArn
     - <New Topic>
@@ -99,7 +114,14 @@ Conditions:
     - !Not
       - !Equals
         - !Ref NotificationEmail
-        - <None>
+        - ''
+  IsAllSupported: !Equals
+    - !Ref AllSupported
+    - True
+  IsRootRegion: !Equals
+    - !Ref 'AWS::Region'
+    - !Ref RootRegion
+  IsNotAPNorthEast3: !Not [!Equals [!Ref 'AWS::Region', ap-northeast-3]]
 
 Mappings:
   Settings:
@@ -120,6 +142,16 @@ Resources:
           ServerSideEncryptionConfiguration:
             - ServerSideEncryptionByDefault:
                 SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
 
   ConfigBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -135,7 +167,7 @@ Resources:
                 - config.amazonaws.com
             Action: s3:GetBucketAcl
             Resource:
-              - !Sub 'arn:${AWS::Partition}:s3:::${ConfigBucket}''
+              - !Sub 'arn:${AWS::Partition}:s3:::${ConfigBucket}'
           - Sid: AWSConfigBucketDelivery
             Effect: Allow
             Principal:
@@ -143,7 +175,7 @@ Resources:
                 - config.amazonaws.com
             Action: s3:PutObject
             Resource:
-              - !Sub 'arn:${AWS::Partition}:s3:::${ConfigBucket}/AWSLogs/${AWS::AccountId}/*''
+              - !Sub 'arn:${AWS::Partition}:s3:::${ConfigBucket}/AWSLogs/${AWS::AccountId}/*'
           - Sid: AWSConfigBucketSecureTransport
             Action:
               - s3:*
@@ -161,7 +193,7 @@ Resources:
     Condition: CreateTopic
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: !Sub 'config-topic-${AWS::AccountId}'
+      TopicName: !Sub 'config-topic-${AWS::AccountId}-${AWS::Region}'
       DisplayName: AWS Config Notification Topic
       KmsMasterKeyId: alias/aws/sns
 
@@ -182,14 +214,6 @@ Resources:
               Service:
                 - config.amazonaws.com
 
-  EmailNotification:
-    Condition: CreateSubscription
-    Type: AWS::SNS::Subscription
-    Properties:
-      Endpoint: !Ref NotificationEmail
-      Protocol: email
-      TopicArn: !Ref ConfigTopic
-
   ConfigRecorderRole:
     Type: AWS::IAM::Role
     Properties:
@@ -205,6 +229,15 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWS_ConfigRole'
+      Policies:
+        - PolicyName: AWSConfigSNSPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ConfigTopic
 
   ConfigRecorder:
     Type: AWS::Config::ConfigurationRecorder
@@ -225,10 +258,6 @@ Resources:
     DependsOn:
       - ConfigBucketPolicy
     Properties:
-      Name: !If
-        - IsGeneratedDeliveryChannelName
-        - !Ref AWS::NoValue
-        - !Ref DeliveryChannelName
       ConfigSnapshotDeliveryProperties:
         DeliveryFrequency: !FindInMap
           - Settings
@@ -239,3 +268,740 @@ Resources:
         - CreateTopic
         - !Ref ConfigTopic
         - !Ref TopicArn
+
+  EmailNotification:
+    Condition: CreateSubscription
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref NotificationEmail
+      Protocol: email
+      TopicArn: !Ref ConfigTopic
+
+###
+# AWS Config rules
+###
+
+  MFAEnabledConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: mfa-enabled-for-iam-console-access
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A Config rule that checks whether AWS Multi-Factor Authentication (MFA) is enabled for all AWS Identity and Access Management (IAM) users that use a console password. The rule is COMPLIANT if MFA is enabled.
+      Source:
+        Owner: AWS
+        SourceIdentifier: MFA_ENABLED_FOR_IAM_CONSOLE_ACCESS
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+  UnusedIAMCredsConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: iam-user-unused-credentials-check
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A config rule that checks whether your AWS Identity and Access Management (IAM) users have passwords or active access keys that have not been used within the specified number of days you provided. Re-evaluating this rule within 4 hours of the first eva...
+      InputParameters:
+        maxCredentialUsageAge: 90
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_USER_UNUSED_CREDENTIALS_CHECK
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  AccessKeysRotatedCounfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: access-keys-rotated
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A config rule that checks whether the active access keys are rotated within the number of days specified in maxAccessKeyAge. The rule is NON_COMPLIANT if the access keys have not been rotated for more than maxAccessKeyAge number of days.
+      InputParameters:
+        maxAccessKeyAge: 90
+      Source:
+        Owner: AWS
+        SourceIdentifier: ACCESS_KEYS_ROTATED
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  IAMPasswordPolicyCounfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: iam-password-policy
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A Config rule that checks whether the account password policy for IAM users meets the specified requirements.
+      InputParameters:
+        RequireUppercaseCharacters: true
+        RequireLowercaseCharacters: true
+        RequireSymbols: true
+        RequireNumbers: true
+        MinimumPasswordLength: 14
+        PasswordReusePrevention: 24
+        MaxPasswordAge: 90
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_PASSWORD_POLICY
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  NoRootAccessKeyCounfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: iam-root-access-key-check
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A config rule that checks whether the root user access key is available. The rule is COMPLIANT if the root access key does not exist.
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_ROOT_ACCESS_KEY_CHECK
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  RootAccountMFAConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: root-account-mfa-enabled
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A Config rule that checks whether users of your AWS account require a multi-factor authentication (MFA) device to sign in with root credentials.
+      Source:
+        Owner: AWS
+        SourceIdentifier: ROOT_ACCOUNT_MFA_ENABLED
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  # RootAccountHardwareMFAConfigRule:
+  #   Condition: IsRootRegion
+  #   Type: AWS::Config::ConfigRule
+  #   Properties:
+  #     ConfigRuleName: root-account-hardware-mfa-enabled
+  #     Scope:
+  #       ComplianceResourceTypes: []
+  #     Description: A config rule that checks whether your AWS account is enabled to use multi-factor authentication (MFA) hardware device to sign in with root credentials. The rule is NON_COMPLIANT if any virtual MFA devices are permitted for signing in with root credent...
+  #     Source:
+  #       Owner: AWS
+  #       SourceIdentifier: ROOT_ACCOUNT_HARDWARE_MFA_ENABLED
+  #     MaximumExecutionFrequency: TwentyFour_Hours
+
+  NoPoliciesOnIAMUsersConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: iam-user-no-policies-check
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::IAM::User
+      Description: A Config rule that checks that none of your IAM users have policies attached. IAM users must inherit permissions from IAM groups or roles.
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_USER_NO_POLICIES_CHECK
+  
+  IAMRolesForEC2InstancesConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: ec2_iam_instance_roles
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::Instance
+      Description: A config rule to help you ensure IAM instance roles are used for AWS resource access from instances.
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier:
+          Fn::GetAtt:
+            - LambdaFunctionForEC2InstancesConfigRule
+            - Arn
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ConfigurationItemChangeNotification
+          - EventSource: aws.config
+            MessageType: OversizedConfigurationItemChangeNotification
+    DependsOn: LambdaInvokePermissionsIAMRoleForEC2InstancesConfigRule
+  
+  LambdaInvokePermissionsIAMRoleForEC2InstancesConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+          - LambdaFunctionForEC2InstancesConfigRule
+          - Arn
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+  
+  LambdaFunctionForEC2InstancesConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: LambdaForEC2_IAM_instance_roles
+      Handler: index.lambda_handler
+      Role:
+        Fn::GetAtt:
+          - LambdaIamRoleForIAMRolesForEC2InstancesConfigRule
+          - Arn
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          def evaluate_compliance(config_item, instance_id):
+              if (config_item['resourceType'] != 'AWS::EC2::Instance'): 
+                  return 'NOT_APPLICABLE'
+              if (config_item['configurationItemStatus'] == 'ResourceDeleted'): 
+                  return 'NOT_APPLICABLE'
+              reservations = boto3.client('ec2').describe_instances(InstanceIds=[instance_id])['Reservations']
+              if ((reservations[0]['Instances'][0]['State']['Name']).upper() == 'TERMINATED'):
+                  return 'NOT_APPLICABLE'
+              if (reservations and 'IamInstanceProfile' in reservations[0]['Instances'][0]): 
+                  return 'COMPLIANT'
+              else: 
+                  return 'NON_COMPLIANT'
+
+          def lambda_handler(event, context):
+            invoking_event = json.loads(event['invokingEvent'])
+            compliance_value = 'NOT_APPLICABLE'
+            instance_id = invoking_event['configurationItem']['resourceId']
+            compliance_value = evaluate_compliance(invoking_event['configurationItem'], instance_id)
+            config = boto3.client('config')
+            response = config.put_evaluations(
+                Evaluations=[
+                  {
+                    'ComplianceResourceType': invoking_event['configurationItem']['resourceType'],
+                    'ComplianceResourceId': instance_id,
+                    'ComplianceType': compliance_value,
+                    'OrderingTimestamp': invoking_event['configurationItem']['configurationItemCaptureTime']
+                  },
+                ],
+                ResultToken=event['resultToken']
+            )
+
+      Timeout: 300
+    DependsOn: LambdaIamRoleForIAMRolesForEC2InstancesConfigRule
+  
+  LambdaIamRoleForIAMRolesForEC2InstancesConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: IAMRoleForEC2_IAM_instance_roles
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/IAMReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSConfigRulesExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies: []
+  
+  IAMSupportRoleConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: iam_support_role
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::IAM::User
+          - AWS::IAM::Role
+          - AWS::IAM::Group
+      Description: A config rule to help you ensure a support role has been created to manage incidents with AWS Support.
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier:
+          Fn::GetAtt:
+            - LambdaFunctionForIAMSupportRoleConfigRule
+            - Arn
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ConfigurationItemChangeNotification
+          - EventSource: aws.config
+            MessageType: OversizedConfigurationItemChangeNotification
+    DependsOn: LambdaInvokePermissionsForIAMSupportRoleConfigRule
+  
+  LambdaInvokePermissionsForIAMSupportRoleConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+          - LambdaFunctionForIAMSupportRoleConfigRule
+          - Arn
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+
+  LambdaFunctionForIAMSupportRoleConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: LambdaForIAM_support_role
+      Handler: index.lambda_handler
+      Role:
+        Fn::GetAtt:
+          - LambdaIamRoleForSupportRoleConfigRule
+          - Arn
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          
+          def evaluate_compliance(resource_type):
+            return_value = 'COMPLIANT'
+            client = boto3.client('iam')
+            partition = 'aws'
+            if (os.environ['AWS_REGION'].find('-gov-') > 0):
+              partition = 'aws-us-gov'
+            policy_arn = 'arn:' + partition + ':iam::aws:policy/AWSSupportAccess'
+            print 'policyarn = ', policy_arn
+            
+            # If GovCloud, dont evaluate as the Managed Policy 'AWSSupportAccess' doesn't exist
+            if (policy_arn.find('-gov') > 0):
+              return 'NOT_APPLICABLE'
+            # search for all entities that have a specific policy associated: AWSSupportAccess
+            response = client.list_entities_for_policy(PolicyArn=policy_arn)
+            if (resource_type) == 'user' and len(response['PolicyUsers']) == 0:
+              return_value = 'NOT_APPLICABLE'
+            elif (resource_type) == 'group' and len(response['PolicyGroups']) == 0:
+              return_value = 'NOT_APPLICABLE'
+            elif (resource_type) == 'role' and len(response['PolicyRoles']) == 0:
+              return_value = 'NOT_APPLICABLE'
+            else:
+              return_value = 'COMPLIANT'
+            return return_value
+
+          def lambda_handler(event, context):
+            invoking_event = json.loads(event['invokingEvent'])
+            config = boto3.client('config')
+            userAnnotation = 'Atleast one IAM User has the AWSSupportAccess IAM policy assigned'
+            grpAnnotation = 'Atleast one IAM Group has the AWSSupportAccess IAM policy assigned'
+            roleAnnotation = 'Atleast one IAM Role has the AWSSupportAccess IAM policy assigned'
+            userCompliance = evaluate_compliance('user')
+            groupCompliance = evaluate_compliance('group')
+            roleCompliance = evaluate_compliance('role')
+            response = config.put_evaluations(
+              Evaluations=[
+                {
+                  'ComplianceResourceType': 'AWS::IAM::User',
+                  'ComplianceResourceId': 'NA',
+                  'ComplianceType': userCompliance,
+                  'Annotation': userAnnotation,
+                  'OrderingTimestamp': invoking_event['notificationCreationTime']
+                },
+                {
+                  'ComplianceResourceType': 'AWS::IAM::Group',
+                  'ComplianceResourceId': 'NA',
+                  'ComplianceType': groupCompliance,
+                  'Annotation': grpAnnotation,
+                  'OrderingTimestamp': invoking_event['notificationCreationTime']
+                },
+                {
+                  'ComplianceResourceType': 'AWS::IAM::Role',
+                  'ComplianceResourceId': 'NA',
+                  'ComplianceType': roleCompliance,
+                  'Annotation': roleAnnotation,
+                  'OrderingTimestamp': invoking_event['notificationCreationTime']
+                }
+              ],
+              ResultToken=event['resultToken']
+            )
+      Timeout: 300
+    DependsOn: LambdaIamRoleForSupportRoleConfigRule
+  
+  LambdaIamRoleForSupportRoleConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: IAMRoleForiam_support_roleDCM
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/IAMReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSConfigRulesExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies: []
+  
+  NoAdminCustomerPolicyConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: iam-policy-no-statement-with-admin-access
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::IAM::Policy
+      Description: "A config rule that checks whether the default version of AWS Identity and Access Management (IAM) policies do not have administrator access. If any statement has 'Effect': 'Allow' with 'Action': '*' over 'Resource': '*', the rule is NON_COMPLIANT."
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_POLICY_NO_STATEMENTS_WITH_ADMIN_ACCESS
+
+  MultiRegionCloudTrailConfigRule:
+    Condition: IsRootRegion
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: multi-region-cloud-trail-enabled
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A config rule that checks that there is at least one multi-region AWS CloudTrail. The rule is NON_COMPLIANT if the trails do not match inputs parameters.
+      Source:
+        Owner: AWS
+        SourceIdentifier: MULTI_REGION_CLOUD_TRAIL_ENABLED
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  CloudTrailLogFileValidationConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: cloud-trail-log-file-validation-enabled
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A config rule that checks whether AWS CloudTrail creates a signed digest file with logs. AWS recommends that the file validation must be enabled on all trails. The rule is NON_COMPLIANT if the validation is not enabled.
+      Source:
+        Owner: AWS
+        SourceIdentifier: CLOUD_TRAIL_LOG_FILE_VALIDATION_ENABLED
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  CloudTrailS3AccessLoggingConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: cloudtrail_s3_access_logging
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::CloudTrail::Trail
+          - AWS::S3::Bucket
+      Description: A config rule that evaluates whether access logging is enabled on the CloudTrail S3 bucket and the S3 bucket is not publicly accessible.
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier:
+          Fn::GetAtt:
+            - LambdaFunctionForS3AccessLoggingConfigRule
+            - Arn
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ConfigurationItemChangeNotification
+          - EventSource: aws.config
+            MessageType: OversizedConfigurationItemChangeNotification
+    DependsOn: LambdaInvokePermissionsForCloudTrailS3AccessLoggingConfigRule
+  
+  LambdaInvokePermissionsForCloudTrailS3AccessLoggingConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+          - LambdaFunctionForS3AccessLoggingConfigRule
+          - Arn
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+  
+  LambdaFunctionForS3AccessLoggingConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: LambdaForCloudtrail_S3_access_logging
+      Handler: index.lambda_handler
+      Role:
+        Fn::GetAtt:
+          - LambdaIamRoleForS3AccessLoggingConfigRule
+          - Arn
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import datetime
+          import time
+          from botocore.exceptions import ClientError
+
+          def lambda_handler(event, context):
+            # get the trail for the current region
+            client_ct = boto3.client('cloudtrail')
+            for trail in client_ct.describe_trails(includeShadowTrails = False)['trailList']:
+              annotation = ''
+              is_publicly_accessible = False
+              s3_bucket_name = ''
+              is_compliant = True
+              # check if the cloudtrail s3 bucket is publicly accessible and logged
+              if trail['S3BucketName']:
+                s3_bucket_name = trail['S3BucketName']
+                client_s=boto3.client('s3')
+                try:
+                  for grant in client_s.get_bucket_acl(Bucket = s3_bucket_name)['Grants']:
+                    # verify cloudtrail s3 bucket ACL
+                    if grant['Permission'] in ['READ','FULL_CONTROL'] and ('URI' in grant['Grantee'] and ('AuthenticatedUsers' in grant['Grantee']['URI'] or 'AllUsers' in grant['Grantee']['URI'])):
+                      is_publicly_accessible = True
+                  if is_publicly_accessible:
+                    is_compliant = False
+                    annotation = annotation + " The CloudTrail S3 bucket '{}' is publicly accessible.".format(s3_bucket_name)
+                    # verify cloudtrail s3 bucket logging
+                  response = client_s.get_bucket_logging(Bucket = s3_bucket_name)
+                  if 'LoggingEnabled' not in response:
+                    is_compliant=False
+                    annotation = annotation + " The CloudTrail S3 bucket '{}' does not have logging enabled.".format(s3_bucket_name)
+                except Exception as ex:
+                  print (ex)
+                  is_compliant = False
+                  annotation = annotation + " There was an error looking up CloudTrail S3 bucket '{}'.".format(s3_bucket_name)
+              else:
+                annotation = annotation + ' CloudTrail is not integrated with S3.'
+              result_token = 'No token found.'
+              if 'resultToken' in event: result_token = event['resultToken']
+              evaluations = [
+                {
+                  'ComplianceResourceType': 'AWS::S3::Bucket',
+                  'ComplianceResourceId': s3_bucket_name,
+                  'ComplianceType': 'COMPLIANT' if is_compliant else 'NON_COMPLIANT',
+                  'OrderingTimestamp': datetime.datetime.now()
+                }
+              ]
+              if is_compliant: annotation = "Acces logging is enabled on the CloudTrail S3 bucket '{}' and the S3 bucket is not publicly accessible".format(s3_bucket_name)
+              if annotation: evaluations[0]['Annotation'] = annotation
+              config = boto3.client('config')
+              config.put_evaluations(
+                Evaluations = evaluations,
+                ResultToken = result_token
+              )
+
+      Timeout: 300
+    DependsOn: LambdaIamRoleForS3AccessLoggingConfigRule
+  
+  LambdaIamRoleForS3AccessLoggingConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCloudTrailReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSConfigRulesExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies: []
+  
+  CloudTrailCloudWatchLogsEnabledConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: cloud-trail-cloud-watch-logs-enabled
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A config rule that checks whether AWS CloudTrail trails are configured to send logs to Amazon CloudWatch Logs. The trail is NON_COMPLIANT if the CloudWatchLogsLogGroupArn property of the trail is empty.
+      Source:
+        Owner: AWS
+        SourceIdentifier: CLOUD_TRAIL_CLOUD_WATCH_LOGS_ENABLED
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  CloudTrailEncryptionEnabledConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: cloud-trail-encryption-enabled
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A config rule that checks whether AWS CloudTrail is configured to use the server side encryption (SSE) AWS Key Management Service (AWS KMS) customer master key (CMK) encryption. The rule is COMPLIANT if the KmsKeyId is defined.
+      Source:
+        Owner: AWS
+        SourceIdentifier: CLOUD_TRAIL_ENCRYPTION_ENABLED
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  CMKKeyRotationEnabledConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: cmk-backing-key-rotation-enabled
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A config rule that checks that key rotation is enabled for each customer master key (CMK). The rule is COMPLIANT, if the key rotation is enabled for specific key object. The rule is not applicable to CMKs that have imported key material.
+      Source:
+        Owner: AWS
+        SourceIdentifier: CMK_BACKING_KEY_ROTATION_ENABLED
+      MaximumExecutionFrequency: TwentyFour_Hours
+  
+  VPCFlowLogsEnabledConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: vpc-flow-logs-enabled
+      Scope:
+        ComplianceResourceTypes: []
+      Description: A config rule that checks whether Amazon Virtual Private Cloud flow logs are found and enabled for Amazon VPC.
+      Source:
+        Owner: AWS
+        SourceIdentifier: VPC_FLOW_LOGS_ENABLED
+      MaximumExecutionFrequency: TwentyFour_Hours
+
+###
+# Networking config rules
+###
+
+  RestrictedSSHConfigRule:
+    Condition: IsNotAPNorthEast3
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: restricted-ssh
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::SecurityGroup
+      Description: A Config rule that checks whether security groups in use do not allow restricted incoming SSH traffic. This rule applies only to IPv4.
+      Source:
+        Owner: AWS
+        SourceIdentifier: INCOMING_SSH_DISABLED
+  
+  RestrictedCommonPortConfigRule:
+    Condition: IsNotAPNorthEast3
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: restricted-common-ports
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::SecurityGroup
+      Description: A Config rule that checks whether security groups in use do not allow restricted incoming TCP traffic to the specified ports. This rule applies only to IPv4.
+      InputParameters:
+        blockedPort1: 20
+        blockedPort2: 21
+        blockedPort3: 3389
+        blockedPort4: 3306
+        blockedPort5: 4333
+      Source:
+        Owner: AWS
+        SourceIdentifier: RESTRICTED_INCOMING_TRAFFIC
+  
+  VPCDefaultSecurityGroupConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: vpc-default-security-group-closed
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::SecurityGroup
+      Description: A config rule that checks that the default security group of any Amazon Virtual Private Cloud (VPC) does not allow inbound or outbound traffic. The rule returns NOT_APPLICABLE if the security group is not default. The rule is NON_COMPLIANT if the defau...
+      Source:
+        Owner: AWS
+        SourceIdentifier: VPC_DEFAULT_SECURITY_GROUP_CLOSED
+  
+  VPCPeeringLeastAccessConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: vpc_peering_least_access
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::RouteTable
+      Description: A config rule to help you ensure routing tables for VPC peering are 'least access'
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier:
+          Fn::GetAtt:
+            - LambdaFunctionForVPCPeeringLeastAccessConfigRule
+            - Arn
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ConfigurationItemChangeNotification
+          - EventSource: aws.config
+            MessageType: OversizedConfigurationItemChangeNotification
+    DependsOn: LambdaInvokePermissionsForVPCPeeringLeastAccessConfigRule
+  
+  LambdaInvokePermissionsForVPCPeeringLeastAccessConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+          - LambdaFunctionForVPCPeeringLeastAccessConfigRule
+          - Arn
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+  
+  LambdaFunctionForVPCPeeringLeastAccessConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: LambdaForVPC_peering_least_access
+      Handler: index.lambda_handler
+      Role:
+        Fn::GetAtt:
+          - LambdaIamRoleForVPCPeeringLeastAccessConfigRule
+          - Arn
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          def lambda_handler(event, context):
+            is_compliant = True
+            invoking_event = json.loads(event['invokingEvent'])
+            annotation = ''
+            route_table_id = invoking_event['configurationItem']['resourceId']
+            for route_table in boto3.client('ec2').describe_route_tables(RouteTableIds=[route_table_id])['RouteTables']:
+              for route in route_table['Routes']:
+                if 'VpcPeeringConnectionId' in route:
+                  if int(str(route['DestinationCidrBlock']).split('/', 1)[1]) < 24:
+                    is_compliant = False
+                    annotation = 'VPC peered route table has a large CIDR block destination.'
+              evaluations = [
+                {
+                  'ComplianceResourceType': invoking_event['configurationItem']['resourceType'],
+                  'ComplianceResourceId': route_table_id,
+                  'ComplianceType': 'COMPLIANT' if is_compliant else 'NON_COMPLIANT',
+                  'OrderingTimestamp': invoking_event['configurationItem']['configurationItemCaptureTime']
+                }
+              ]
+              if annotation: evaluations[0]['Annotation'] = annotation
+              response = boto3.client('config').put_evaluations(
+              Evaluations = evaluations,
+              ResultToken = event['resultToken'])
+      Timeout: 300
+    DependsOn: LambdaIamRoleForVPCPeeringLeastAccessConfigRule
+  
+  LambdaIamRoleForVPCPeeringLeastAccessConfigRule:
+    DependsOn: ConfigRecorder
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSConfigRulesExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
