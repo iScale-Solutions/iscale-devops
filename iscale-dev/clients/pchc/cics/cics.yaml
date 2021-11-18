@@ -212,6 +212,7 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
         - PolicyName: S3BucketAccess
           PolicyDocument:
@@ -240,20 +241,18 @@ Resources:
           !Sub '${NetworkStackName}-VpcId'
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR, Security, Group]]
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 1
-          ToPort: 65535
+        - IpProtocol: -1
           CidrIp: 
             Fn::ImportValue:
               !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow TCP connections on all ports from inside VPC
-        - IpProtocol: icmp
-          FromPort: -1
-          ToPort: -1
-          CidrIp: 
-            Fn::ImportValue:
-              !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow ICMP connections from inside VPC
+          Description: Allow all traffic on on all ports from inside VPC
+        # - IpProtocol: icmp
+        #   FromPort: -1
+        #   ToPort: -1
+        #   CidrIp: 
+        #     Fn::ImportValue:
+        #       !Sub '${NetworkStackName}-VpcCidrBlock'
+        #   Description: Allow ICMP connections from inside VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR, Security, Group]]
@@ -270,15 +269,16 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
-  CICSAPPSVR1Instance: 
+  CICSAPPSVR1Instance:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref SIOSInstanceAMI
+      # ImageId: ami-01af54c7f4519dc4b
       InstanceType: c5d.4xlarge
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref CICSAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-      BlockDeviceMappings: 
+      BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
             DeleteOnTermination: true
@@ -292,36 +292,56 @@ Resources:
             Iops: 16000
             VolumeSize: 1000
             VolumeType: gp3
-      SecurityGroupIds: 
-        - !Ref CICSAPPSVRSecurityGroup
-      SubnetId:        
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateSubnetId1'
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref CICSAPPSVRSecurityGroup
+          SecondaryPrivateIpAddressCount: 2
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId1'
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR1]]
 
-  HighCPUCICSAPPSVR1Alarm:
-    Condition: IsProd
-    Type: AWS::CloudWatch::Alarm
+  CICSAPPSVR1DNSRecord:
+    Type: AWS::Route53::RecordSet
     Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR1, high, cpu]]
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref CICSAPPSVR1Instance
+      HostedZoneId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-LocalHostedZoneId'
+      Name: !Join
+        - '.'
+        - - !Join ['',[!FindInMap [EnvShort, !Ref EnvName, Name], !Ref OrgName, cicsappsvr1]]
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
+      ResourceRecords:
+        - !GetAtt [CICSAPPSVR1Instance, PrivateIp]
+      TTL: 14400
+      Type: A
+
+  # HighCPUCICSAPPSVR1Alarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR1, high, cpu]]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/EC2
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: InstanceId
+  #         Value: !Ref CICSAPPSVR1Instance
 
 ###
 # CICSAPPSVR2
@@ -331,11 +351,12 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref SIOSInstanceAMI
+      # ImageId: ami-03eb877927b7934d1
       InstanceType: c5d.4xlarge
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref CICSAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-      BlockDeviceMappings: 
+      BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
             DeleteOnTermination: true
@@ -349,36 +370,56 @@ Resources:
             Iops: 16000
             VolumeSize: 1000
             VolumeType: gp3
-      SecurityGroupIds: 
-        - !Ref CICSAPPSVRSecurityGroup
-      SubnetId:        
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateSubnetId3'
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref CICSAPPSVRSecurityGroup
+          SecondaryPrivateIpAddressCount: 2
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId3'
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR2]]
 
-  HighCPUCICSAPPSVR2Alarm:
-    Condition: IsProd
-    Type: AWS::CloudWatch::Alarm
+  # HighCPUCICSAPPSVR2Alarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR2, high, cpu]]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/EC2
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: InstanceId
+  #         Value: !Ref CICSAPPSVR2Instance
+
+  CICSAPPSVR2DNSRecord:
+    Type: AWS::Route53::RecordSet
     Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR2, high, cpu]]
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref CICSAPPSVR2Instance
+      HostedZoneId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-LocalHostedZoneId'
+      Name: !Join
+        - '.'
+        - - !Join ['',[!FindInMap [EnvShort, !Ref EnvName, Name], !Ref OrgName, cicsappsvr2]]
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
+      ResourceRecords:
+        - !GetAtt [CICSAPPSVR2Instance, PrivateIp]
+      TTL: 14400
+      Type: A
 
 ###
 # GLBLSCPSVR1
@@ -399,6 +440,7 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
   GLBLSCPSVRInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -414,20 +456,11 @@ Resources:
           !Sub '${NetworkStackName}-VpcId'
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR1, Security, Group]]
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 1
-          ToPort: 65535
+        - IpProtocol: -1
           CidrIp: 
             Fn::ImportValue:
               !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow TCP connections on all ports from inside VPC
-        - IpProtocol: icmp
-          FromPort: -1
-          ToPort: -1
-          CidrIp: 
-            Fn::ImportValue:
-              !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow ICMP connections from inside VPC
+          Description: Allow all connections on all ports from inside VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR1, Security, Group]]
@@ -559,6 +592,7 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
   IWEBAPPSVRInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -574,20 +608,11 @@ Resources:
           !Sub '${NetworkStackName}-VpcId'
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR, Security, Group]]
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 1
-          ToPort: 65535
+        - IpProtocol: -1
           CidrIp: 
             Fn::ImportValue:
               !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow TCP connections on all ports from inside VPC
-        - IpProtocol: icmp
-          FromPort: -1
-          ToPort: -1
-          CidrIp: 
-            Fn::ImportValue:
-              !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow ICMP connections from inside VPC
+          Description: Allow all connections on all ports from inside VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR, Security, Group]]
@@ -719,6 +744,7 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
   CICSWITSVRInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -734,20 +760,11 @@ Resources:
           !Sub '${NetworkStackName}-VpcId'
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSWITSVR, Security, Group]]
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 1
-          ToPort: 65535
+        - IpProtocol: -1
           CidrIp: 
             Fn::ImportValue:
               !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow TCP connections on all ports from inside VPC
-        - IpProtocol: icmp
-          FromPort: -1
-          ToPort: -1
-          CidrIp: 
-            Fn::ImportValue:
-              !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow ICMP connections from inside VPC
+          Description: Allow all connections on all ports from inside VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSWITSVR, Security, Group]]
@@ -829,6 +846,7 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
   PCHCADSVRInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -844,20 +862,11 @@ Resources:
           !Sub '${NetworkStackName}-VpcId'
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHCADSVR, Security, Group]]
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 1
-          ToPort: 65535
+        - IpProtocol: -1
           CidrIp: 
             Fn::ImportValue:
               !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow TCP connections on all ports from inside VPC
-        - IpProtocol: icmp
-          FromPort: -1
-          ToPort: -1
-          CidrIp: 
-            Fn::ImportValue:
-              !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow ICMP connections from inside VPC
+          Description: Allow all connections on all ports from inside VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHCADSVR, Security, Group]]
@@ -874,7 +883,7 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
-  PCHCADSVRENI1:
+  PCHCADSVRENI1: #disabled
     Type: AWS::EC2::NetworkInterface
     Properties:
       Description: PCHCADSVR First Interface
@@ -924,27 +933,57 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHCADSVR]]
 
-  HighCPUADSVRAlarm:
-    Condition: IsProd
-    Type: AWS::CloudWatch::Alarm
+  PCHCADSVRDefaultDNSRecord: #domain name
+    Type: AWS::Route53::RecordSet
     Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ADSVR, high, cpu]]
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref PCHCADSVRInstance
+      HostedZoneId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-LocalHostedZoneId'
+      Name: 
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
+      ResourceRecords:
+        - !GetAtt [PCHCADSVRENI2, PrimaryPrivateIpAddress]
+      TTL: 14400
+      Type: A
+
+  PCHCADSVRDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-LocalHostedZoneId'
+      Name: !Join
+        - '.'
+        - - !Join ['',[!FindInMap [EnvShort, !Ref EnvName, Name], !Ref OrgName, adsvr1]]
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
+      ResourceRecords:
+        - !GetAtt [PCHCADSVRENI2, PrimaryPrivateIpAddress]
+      TTL: 14400
+      Type: A
+
+  # HighCPUADSVRAlarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ADSVR, high, cpu]]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/EC2
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: InstanceId
+  #         Value: !Ref PCHCADSVRInstance
 
 ###
 # PCHJUMPSVR
@@ -965,6 +1004,7 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
   PCHJUMPSVRInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -1057,6 +1097,22 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHJUMPSVR]]
 
+  PCHJUMPSVRDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-LocalHostedZoneId'
+      Name: !Join
+        - '.'
+        - - !Join ['',[!FindInMap [EnvShort, !Ref EnvName, Name], !Ref OrgName, jumpsvr]]
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
+      ResourceRecords:
+        - !GetAtt [PCHJUMPSVRInstance, PrivateIp]
+      TTL: 14400
+      Type: A
+
   HighCPUJUMPSVRAlarm:
     Condition: IsProd
     Type: AWS::CloudWatch::Alarm
@@ -1102,8 +1158,10 @@ Resources:
         Family: sqlserver-se-15.0
         InstanceType: db.m5.xlarge
         MasterUser: root
+        MultiAz: !If [IsProd, true, false]
         NetworkStackName: !Ref NetworkStackName
         NetworkType: Private
+        Port: 1433
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
