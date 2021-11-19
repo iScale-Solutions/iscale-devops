@@ -1135,6 +1135,31 @@ Resources:
         - Name: InstanceId
           Value: !Ref PCHJUMPSVRInstance
 
+##
+# Active Directory
+##
+
+  ActiveDirectory:
+    Type: AWS::DirectoryService::MicrosoftAD
+    Properties:
+      Name: !Join
+        - '.'
+        - - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], ad]]
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
+      Password: '12$yiasdb@#'
+      ShortName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], ad]]
+      Edition: Standard
+      VpcSettings:
+        SubnetIds:
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId1'
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId3'
+        VpcId:
+          Fn::ImportValue:
+            !Sub '${NetworkStackName}-VpcId'
+
 ###
 # Database
 ###
@@ -1149,6 +1174,7 @@ Resources:
         AllocatedStorage: 1000
         BackupRetentionPeriod: !If [IsProd, 30, 7]
         DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
+        Domain: !Ref ActiveDirectory
         EnableCPUCreditAlarm: !If [IsProd, true, false]
         EnableEnhancedMonitoring: !If [IsProd, true, false]
         EnablePerformanceInsights: !If [IsProd, true, false]
@@ -1224,29 +1250,29 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
-  SlowTargetResponseTimeCloudWatchAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Condition: IsProd
-    Properties:
-      MetricName: TargetResponseTime
-      Namespace: AWS/ApplicationELB
-      ComparisonOperator: GreaterThanThreshold
-      EvaluationPeriods: 1
-      Period: 300
-      Statistic: Average
-      Threshold: 5 #if greater than 5 seconds
-      AlarmActions:
-        - Fn::ImportValue:
-            Fn::Sub: '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            Fn::Sub: '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: LoadBalancer
-          Value: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
-        - Name: TargetGroup
-          Value: !Ref CICSTargetGroup
-      TreatMissingData: notBreaching
+  # SlowTargetResponseTimeCloudWatchAlarm:
+  #   Type: AWS::CloudWatch::Alarm
+  #   Condition: IsProd
+  #   Properties:
+  #     MetricName: TargetResponseTime
+  #     Namespace: AWS/ApplicationELB
+  #     ComparisonOperator: GreaterThanThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 300
+  #     Statistic: Average
+  #     Threshold: 5 #if greater than 5 seconds
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           Fn::Sub: '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           Fn::Sub: '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: LoadBalancer
+  #         Value: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
+  #       - Name: TargetGroup
+  #         Value: !Ref CICSTargetGroup
+  #     TreatMissingData: notBreaching
 
   TargetGroupHealthyHostCountAlarm:
     Type: AWS::CloudWatch::Alarm

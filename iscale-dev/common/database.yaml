@@ -20,6 +20,7 @@ Metadata:
           - DatabaseUser
           - DatabaseUserPassword
           - DeletionProtection
+          - Domain
           - ParameterGroup
           - Port
           - StorageEncrypted
@@ -74,6 +75,8 @@ Metadata:
         default: Database User Password (leave blank to auto-generate)
       DeletionProtection:
         default: Set to true to protect DB instance or cluster from deletion
+      Domain:
+        default: Name of the AD domain to link to the DB (SQLServer only - optional)
       Port:
         default: Port
       StorageEncrypted:
@@ -149,6 +152,10 @@ Parameters:
     AllowedValues:
       - true
       - false
+  Domain:
+    Description: Windows Auth AD domain
+    Type: String
+    Default: ''
   ExportStackValues:
     Description: Set to true to export
     Type: String
@@ -324,6 +331,7 @@ Conditions:
   IsAuroraPostgreSQL: !Equals [!Ref Engine, aurora-postgresql]
   IsAuroraMySQL: !Equals [!Ref Engine, aurora-mysql]
   IsSQLServer: !Or [!Equals [!Ref Engine, sqlserver-web], !Equals [!Ref Engine, sqlserver-se]]
+  IsSQLServerWithDomain: !And [Condition: IsSQLServer, Condition: HasDomain]
   HasExports: !Equals [!Ref ExportStackValues, true]
   HasNoExports: !Not [Condition: HasExports]
   IsAurora: !Or [Condition: IsAuroraPostgreSQL, Condition: IsAuroraMySQL]
@@ -331,6 +339,7 @@ Conditions:
   HasDBUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
   HasDBRootPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
   HasDBPasswords: !Or [Condition: HasDBUserPassword, Condition: HasDBRootPassword]
+  HasDomain: !Not [!Equals [!Ref Domain, '']]
   HasNoCluster: !Not [Condition: IsAurora]
   HasNoClusterHasExports: !And [Condition: HasNoCluster, Condition: HasExports]
   HasNoClusterHasNoExports: !And [Condition: HasNoCluster, Condition: HasNoExports]
@@ -623,6 +632,8 @@ Resources:
           - !Ref RDSParameterGroup
       DBSnapshotIdentifier: !If [HasSnapshotAndNoCluster, !Ref SnapshotIdentifier, !Ref 'AWS::NoValue']
       DBSubnetGroupName: !Ref DBSubnetGroup
+      Domain: !If [IsSQLServerWithDomain, !Ref Domain, !Ref 'AWS::NoValue']
+      DomainIAMRoleName: !If [IsSQLServerWithDomain, !Ref RDSDirectoryServiceAccessRole, !Ref 'AWS::NoValue']
       DeletionProtection: !If [HasNoCluster, !Ref DeletionProtection, !Ref 'AWS::NoValue']
       EnablePerformanceInsights: !Ref EnablePerformanceInsights
       PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsights, 731, !Ref 'AWS::NoValue']
@@ -741,6 +752,22 @@ Resources:
                   - logs:DescribeLogStream
                   - logs:PutLogEvents
                 Resource: 'arn:aws:logs:*:*:*'
+
+  RDSDirectoryServiceAccessRole:
+    Type: AWS::IAM::Role
+    Condition: IsSQLServerWithDomain
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: rds.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSDirectoryServiceAccess
 
 ####
 # CloudWatch Section
