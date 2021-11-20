@@ -35,6 +35,10 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
+      - Label:
+          default: Active Directory Configuration
+        Parameters:
+          - ADPassword
 
     ParameterLabels:
       Name:
@@ -43,6 +47,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      ADPassword:
+        default: Active Directory Password
       DeletionProtection:
         default: Protect core items against deletion
       InstanceAMI:
@@ -95,6 +101,11 @@ Parameters:
       - Staging
       - Development
       - Test
+  ADPassword:
+    Description: Active Directory admin password
+    Type: String
+    MinLength: 8
+    NoEcho: true
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com)
     Type: String
@@ -501,27 +512,27 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR1]]
 
-  HighCPUGLBLSCPSVR1Alarm:
-    Condition: IsProd
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR1, high, cpu]]
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref GLBLSCPSVR1Instance
+  # HighCPUGLBLSCPSVR1Alarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR1, high, cpu]]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/EC2
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: InstanceId
+  #         Value: !Ref GLBLSCPSVR1Instance
 
 ###
 # GLBLSCPSVR2
@@ -1113,27 +1124,27 @@ Resources:
       TTL: 14400
       Type: A
 
-  HighCPUJUMPSVRAlarm:
-    Condition: IsProd
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, JUMPSVR, high, cpu]]
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref PCHJUMPSVRInstance
+  # HighCPUJUMPSVRAlarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, JUMPSVR, high, cpu]]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/EC2
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: InstanceId
+  #         Value: !Ref PCHJUMPSVRInstance
 
 ##
 # Active Directory
@@ -1147,7 +1158,7 @@ Resources:
         - - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], ad]]
           - Fn::ImportValue:
               !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
-      Password: '12$yiasdb@#'
+      Password: !Ref ADPassword
       ShortName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], ad]]
       Edition: Standard
       VpcSettings:
@@ -1163,6 +1174,55 @@ Resources:
 ###
 # Database
 ###
+
+  SQLServerBackupRestoreIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - rds.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: S3BucketAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !GetAtt ArchiveS3Bucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObjectMetaData
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListMultipartUploadParts
+                  - s3:AbortMultipartUpload
+                Resource:
+                  - !Join ['', [!GetAtt ArchiveS3Bucket.Arn, '/*']]
+
+  SQLServerOptionGroup:
+    Type: AWS::RDS::OptionGroup
+    Properties:
+      EngineName: sqlserver-se
+      MajorEngineVersion: '15.00'
+      OptionGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      OptionConfigurations:
+        - OptionName: SQLSERVER_BACKUP_RESTORE
+          OptionSettings: 
+            - Name: IAM_ROLE_ARN
+              Value: !GetAtt SQLServerBackupRestoreIAMRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
   DBStack:
     Type: AWS::CloudFormation::Stack
@@ -1187,6 +1247,7 @@ Resources:
         MultiAz: !If [IsProd, true, false]
         NetworkStackName: !Ref NetworkStackName
         NetworkType: Private
+        OptionGroupName: !Ref SQLServerOptionGroup
         Port: 1433
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
