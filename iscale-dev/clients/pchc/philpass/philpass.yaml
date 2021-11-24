@@ -210,15 +210,13 @@ Mappings:
     UAT:
       PPPlusSubnetCIDR: 192.168.222.0/24
       PPPlusResource1: 192.168.222.100
-      PPPlusResource2: 192.168.222.100
-      PPPlusResource3: 192.168.222.100
       PPPlusDNSServer1: 192.168.222.241 #Check on this
       PPPlusDNSServer2: 192.168.222.242 #Check on this
       PP3rdPartySubnetCIDR: 192.168.222.0/24
       PP3rdPartyResource: 192.168.222.101/32
       StrongSwanENIPrivIPAZ1: 10.2.0.53
       StrongSwanPublicSubnetAZ1: 10.2.0.32/27
-      StrongSwanPrivateSubnetAZ1: 10.2.0.32/27
+      StrongSwanPrivateSubnetAZ1: 10.2.0.0/27
       StrongSwanENIPrivIPAZ2: 10.2.0.176
       StrongSwanPublicSubnetAZ2: 10.2.0.160/27
       StrongSwanPrivateSubnetAZ2: 10.2.0.128/27
@@ -242,6 +240,7 @@ Resources:
 
   BSPDNSResolverSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Condition: IsProd
     Properties:
       GroupDescription: BSP DNS Resolver Security Group
       VpcId: 
@@ -259,6 +258,7 @@ Resources:
 
   BSPDNSResolver:
     Type: AWS::Route53Resolver::ResolverEndpoint
+    Condition: IsProd
     Properties:
       Direction: Outbound
       IpAddresses:
@@ -274,6 +274,7 @@ Resources:
 
   BSPDomainResolverRule:
     Type: AWS::Route53Resolver::ResolverRule
+    Condition: IsProd
     Properties: 
       DomainName: bsp.gov.ph
       Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Domain, Rule]]
@@ -287,6 +288,7 @@ Resources:
 
   BSPDomainVPCAssociation:
     Type: AWS::Route53Resolver::ResolverRuleAssociation
+    Condition: IsProd
     Properties: 
       ResolverRuleId: !Ref BSPDomainResolverRule
       VPCId:
@@ -295,16 +297,19 @@ Resources:
 
   BSPDNSResolverLogGroup:
     Type: AWS::Logs::LogGroup
+    Condition: IsProd
     Properties:
       LogGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Resolver]]
 
   BSPDNSResolverLog:
     Type: AWS::Route53Resolver::ResolverQueryLoggingConfig
+    Condition: IsProd
     Properties:
       DestinationArn: !GetAtt BSPDNSResolverLogGroup.Arn
   
   BSPDNSResolverLogAssociation:
     Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
+    Condition: IsProd
     Properties: 
       ResolverQueryLogConfigId: !Ref BSPDNSResolverLog
       ResourceId:
@@ -468,6 +473,7 @@ Resources:
 
   BSPPhilPassPlusRouteIP2AZ1:
     Type: AWS::EC2::Route
+    Condition: IsProd #No IP2 except in prod
     Properties:
       RouteTableId:
         Fn::ImportValue:
@@ -477,6 +483,7 @@ Resources:
 
   BSPPhilPassPlusRouteIP2AZ2:
     Type: AWS::EC2::Route
+    Condition: IsProd #No IP2 except in prod
     Properties:
       RouteTableId:
         Fn::ImportValue:
@@ -486,6 +493,7 @@ Resources:
 
   BSPPhilPassPlusRouteIP3AZ1:
     Type: AWS::EC2::Route
+    Condition: IsProd #No IP3 except in prod
     Properties:
       RouteTableId:
         Fn::ImportValue:
@@ -495,6 +503,7 @@ Resources:
 
   BSPPhilPassPlusRouteIP3AZ2:
     Type: AWS::EC2::Route
+    Condition: IsProd #No IP3 except in prod
     Properties:
       RouteTableId:
         Fn::ImportValue:
@@ -1054,6 +1063,22 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
+  CacheStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        EncryptInTransit: TRUE
+        NodeType: cache.t3.micro
+        NumCacheClusters: 1
+        OrgName: !Ref OrgName
+        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: TRUE
+
 ###
 # BSP Interface
 ###
@@ -1158,6 +1183,25 @@ Resources:
         Fn::GetAtt:
           - DBStack
           - Outputs.DBInstancePort
+      SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
+
+  AllowBSPinterfaceIntoCache:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from BSP Interface
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - CacheStack
+          - Outputs.SecurityGroupId
+      FromPort:
+        Fn::GetAtt:
+          - CacheStack
+          - Outputs.ClusterPort
+      ToPort:
+        Fn::GetAtt:
+          - CacheStack
+          - Outputs.ClusterPort
       SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
 
   BSPInterfaceTargetGroup:
