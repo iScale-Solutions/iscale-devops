@@ -159,7 +159,7 @@ Resources:
       Parameters:
         Name: !Ref Name
         DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
-        AllocatedStorage: 35 #Gb
+        AllocatedStorage: !If [IsDev, 20, 35] #Gb
         BackupRetentionPeriod: !If [IsProd, 30, 7]
         EnableCPUCreditAlarm: !If [IsProd, true, false]
         EnableEnhancedMonitoring: !If [IsProd, true, false]
@@ -216,7 +216,7 @@ Resources:
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 8080
-        InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 0.5]
+        InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 0.6]
         InstanceType: t3.small
         LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
         LoadBalancerPriority: !Ref LoadBalancerPriority
@@ -269,6 +269,7 @@ Resources:
           Fn::GetAtt:
             - DeployStack
             - Outputs.CodeDeployApplicationName
+        CodeDeployASGDesiredSize: 2
         CodeDeployDeploymentGroupName:
           Fn::GetAtt:
             - DeployStack
@@ -379,6 +380,64 @@ Resources:
 ###
 # Periodic Cron Job
 ###
+
+  CronJobAPIConnection:
+    Type: AWS::Events::Connection
+    Properties:
+      AuthorizationType: API_KEY
+      Description: Connection to Cron Job API
+      AuthParameters:
+        ApiKeyAuthParameters:
+          ApiKeyName: app-id
+          ApiKeyValue: EVdqi7Nv2REPNB248i1Y2NZziNNWShLUPyDggg1gkKF1
+
+  CronJobApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination to send events to cron job
+      Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name ]]      
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskAboutToDue']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskAboutToDue']]
+
+  CronJobEventsIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: events.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: InvokeApiDestination
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: events:InvokeApiDestination
+                Resource: 
+                  - !GetAtt CronJobApiDestination.Arn
+  
+  CronJobEventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: Triggers a cron job by calling an API endpoint
+      RoleArn: !GetAtt CronJobEventsIamRole.Arn
+      ScheduleExpression: 'cron(0 */5 * * ? *)' #every 5 hours
+      # ScheduleExpression: 'rate(1 minute)' #every 1 minute
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronJobApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          RoleArn: !GetAtt CronJobEventsIamRole.Arn
 
 ###
 # Dev S3 bucket and associated account

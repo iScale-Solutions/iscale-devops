@@ -17,6 +17,7 @@ Metadata:
           - DatabaseInstanceName
           - DocDBClusterArn
           - CodeDeployApplicationName
+          - CodeDeployASGDesiredSize
           - CodeDeployDeploymentGroupName
           - EC2InstanceId
       - Label:
@@ -34,6 +35,8 @@ Metadata:
         default: Environment Name
       CodeDeployApplicationName:
         default: CodeDeploy Application name (for autoscale)
+      CodeDeployASGDesiredSize:
+        default: Auto Scaling Group desired capacity
       CodeDeployDeploymentGroupName:
         default: CodeDeploy Deployment Group name (for autoscale)
       DatabaseClusterArn:
@@ -75,6 +78,10 @@ Parameters:
     Description: Name of the CodeDeploy Application (for autoscale)
     Type: String
     Default: ''
+  CodeDeployASGDesiredSize:
+    Description: Desired size of the auto-scaling group
+    Type: Number
+    Default: 1
   CodeDeployDeploymentGroupName:
     Description: Name of the CodeDeploy Deployment Group (for autoscale)
     Type: String
@@ -831,6 +838,7 @@ Resources:
           REGION: !Ref AWS::Region
           CODEDEPLOY_APP: !Ref CodeDeployApplicationName
           CODEDEPLOY_GROUP: !Ref CodeDeployDeploymentGroupName
+          ASG_DESIRED_SIZE: !Ref CodeDeployASGDesiredSize
       Code:
         ZipFile: |
           import boto3
@@ -844,6 +852,7 @@ Resources:
             region=os.environ['REGION']
             appName=os.environ['CODEDEPLOY_APP']
             groupName=os.environ['CODEDEPLOY_GROUP']
+            desiredSize=os.environ['ASG_DESIRED_SIZE']
 
             try:
               codedeploy = boto3.client('codedeploy',region_name=region)
@@ -856,14 +865,14 @@ Resources:
               
               logger.info(response)
 
-              asgToStop=response['deploymentGroupInfo']['autoScalingGroups'][0]['name']
-              logger.info('AutoScaling Group to augment is : ' + str(asgToStop))
+              asgToStart=response['deploymentGroupInfo']['autoScalingGroups'][0]['name']
+              logger.info('AutoScaling Group to augment is : ' + str(asgToStart))
 
-              logger.info('Making: ' + str(asgToStop) + ' desired size to 1.')
+              logger.info('Making: ' + str(asgToStart) + ' desired size to ' + str(desiredSize) + '.')
               autoscaling = boto3.client('autoscaling',region_name=region)
               response = autoscaling.set_desired_capacity(
-                          AutoScalingGroupName=asgToStop,
-                          DesiredCapacity=1,
+                          AutoScalingGroupName=asgToStart,
+                          DesiredCapacity=desiredSize,
                           HonorCooldown=False
                         )
 
