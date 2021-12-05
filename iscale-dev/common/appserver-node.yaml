@@ -23,6 +23,12 @@ Metadata:
           - InstanceSpotPrice
           - InstancePort
       - Label:
+          default: Cache Settings
+        Parameters:
+          - CacheEndpoint
+          - CachePort
+          - CacheSecurityGroupId
+      - Label:
           default: Load Balancer Configuration
         Parameters:
           - LoadBalancerPriority
@@ -50,6 +56,12 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      CacheEndpoint:
+        default: Cache Endpoint
+      CachePort:
+        default: Cache Port
+      CacheSecurityGroupId:
+        default: Cache Security Group ID
       DatabaseEndpoint:
         default: Database Endpoint
       DatabasePort:
@@ -95,6 +107,20 @@ Parameters:
       - Staging
       - Development
       - Test
+  CacheEndpoint:
+    Description: Cache Endpoint
+    Type: String
+    Default: ''
+  CachePort:
+    Description: Cache Port Number
+    Type: Number
+    MinValue: 1
+    MaxValue: 65535
+    Default: 6379
+  CacheSecurityGroupId:
+    Description: Cache Security Group
+    Type: String
+    Default: ''
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
     Type: String
@@ -202,6 +228,7 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
+  HasCache: !And [!Not [!Equals [!Ref CacheEndpoint, '']], !Not [!Equals [!Ref CacheSecurityGroupId, '']]]
   HasInstanceKey: !Not [!Equals [!Ref InstanceKeyName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
   HasLoadBalancerStackName: !Equals [1, 1] #true - we only support for ELB for now
@@ -219,7 +246,18 @@ Resources:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/appserver.yaml
-  
+
+  # When the setup has a cache, allow the cache access from the AppServer
+  AllowCacheAccessFromAppServer:
+    Condition: HasCache
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: TCP
+      GroupId: !Ref CacheSecurityGroupId
+      FromPort: !Ref CachePort
+      ToPort: !Ref CachePort
+      SourceSecurityGroupId: !GetAtt AppServerSecurityGroup.GroupId
+
 ####
 # AutoScaling Group 
 ####
