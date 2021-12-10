@@ -203,6 +203,8 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasSSLCert: !Not [!Equals [!Ref CertificateArn, '']]
   IsApplication: !Equals [!Ref ElbType, application]
+  IsApplicationInternetFacing: !And [!Condition IsApplication, !Condition IsInternetFacing]
+  IsApplicationInternalFacing: !And [!Condition IsApplication, !Condition IsInternalFacing]
   IsNetwork: !Equals [!Ref ElbType, network]
   IsInstanceSsl: !Equals [!Ref InstancePort, 443]
   IsInternalFacing: !Equals [!Ref Scheme, internal]
@@ -263,15 +265,30 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-VpcCidrBlock'
 
+  ELBElasticIp1:
+    Type: AWS::EC2::EIP
+    Condition: IsNetwork
+    Properties:
+      Domain: vpc
+
+  ELBElasticIp2:
+    Type: AWS::EC2::EIP
+    Condition: IsNetwork
+    Properties:
+      Domain: vpc
+
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       IpAddressType: ipv4
-      LoadBalancerAttributes:
-        - Key: idle_timeout.timeout_seconds
-          Value: 300
-        - Key: deletion_protection.enabled
-          Value: !If [IsProd, !Ref DeletionProtection, false]
+      LoadBalancerAttributes: !If
+        - IsNetwork
+        - - Key: deletion_protection.enabled
+            Value: !If [IsProd, !Ref DeletionProtection, false]
+        - - Key: idle_timeout.timeout_seconds
+            Value: 300
+          - Key: deletion_protection.enabled
+            Value: !If [IsProd, !Ref DeletionProtection, false]
       Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name]]
       # Name: !If
       #   - UseFriendlyNames
@@ -279,8 +296,9 @@ Resources:
       #   - !Ref 'AWS::NoValue'
       Scheme: !Ref Scheme
       SecurityGroups: [!If [ IsApplication, !GetAtt ELBSecurityGroup.GroupId, !Ref 'AWS::NoValue']]
-      Subnets:
-        Fn::If:
+      Subnets: !If
+        - IsApplication
+        - !If
           - IsInternetFacing
           - - Fn::ImportValue:
                 !Sub '${NetworkStackName}-PublicSubnetId1'
@@ -290,6 +308,21 @@ Resources:
                 !Sub '${NetworkStackName}-PrivateSubnetId1'
             - Fn::ImportValue:
                 !Sub '${NetworkStackName}-PrivateSubnetId2'
+        - !Ref 'AWS::NoValue'
+      SubnetMappings: !If
+        - IsNetwork
+        - !If
+          - IsInternetFacing
+          - - SubnetId:
+                Fn::ImportValue:
+                  !Sub '${NetworkStackName}-PublicSubnetId1'
+              AllocationId: !GetAtt ELBElasticIp1.AllocationId
+            - SubnetId:
+                Fn::ImportValue:
+                  !Sub '${NetworkStackName}-PublicSubnetId2'
+              AllocationId: !GetAtt ELBElasticIp2.AllocationId
+          - !Ref 'AWS::NoValue'
+        - !Ref 'AWS::NoValue'
       Type: !Ref ElbType
       Tags:
         - Key: Name
@@ -298,7 +331,7 @@ Resources:
   # This listener redirects HTTP request to https
   LoadBalancerHTTPListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsInternetFacing
+    Condition: IsApplicationInternetFacing
     Properties:
       DefaultActions:
         - Type: redirect
@@ -315,7 +348,7 @@ Resources:
 
   LoadBalancerHTTPListenerInternal:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsInternalFacing
+    Condition: IsApplicationInternalFacing
     Properties:
       Port: !Ref ElbHTTPPort
       Protocol: HTTP
@@ -379,7 +412,7 @@ Resources:
     Condition: IsNetwork
     Properties:
       Port: !Ref InstancePort
-      Protocol: !Ref InstancePort
+      Protocol: !Ref ElbProtocol
       VpcId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-VpcId'
