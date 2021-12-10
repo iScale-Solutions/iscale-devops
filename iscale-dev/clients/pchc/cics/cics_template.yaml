@@ -257,13 +257,6 @@ Resources:
             Fn::ImportValue:
               !Sub '${NetworkStackName}-VpcCidrBlock'
           Description: Allow all traffic on on all ports from inside VPC
-        # - IpProtocol: icmp
-        #   FromPort: -1
-        #   ToPort: -1
-        #   CidrIp: 
-        #     Fn::ImportValue:
-        #       !Sub '${NetworkStackName}-VpcCidrBlock'
-        #   Description: Allow ICMP connections from inside VPC
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR, Security, Group]]
@@ -312,6 +305,17 @@ Resources:
           SubnetId:
             Fn::ImportValue:
               !Sub '${NetworkStackName}-PrivateSubnetId1'
+      SsmAssociations:
+        - DocumentName: !Ref EC2JoinADSSMDocument
+          AssociationParameters:
+            - Key: directoryId
+              Value:
+                - !Ref ActiveDirectory
+            - Key: directoryName
+              Value:
+                - !Join ['.', [!Join ['-', [!Ref OrgName, !Ref Name]], !FindInMap [EnvShort, !Ref EnvName, Name]]]
+            - Key: dnsIpAddresses
+              Value: !GetAtt [ActiveDirectory, DnsIpAddresses]
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR1]]
@@ -358,7 +362,7 @@ Resources:
 # CICSAPPSVR2
 ###
 
-  CICSAPPSVR2Instance: 
+  CICSAPPSVR2Instance:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref SIOSInstanceAMI
@@ -390,6 +394,17 @@ Resources:
           SubnetId:
             Fn::ImportValue:
               !Sub '${NetworkStackName}-PrivateSubnetId3'
+      SsmAssociations:
+        - DocumentName: !Ref EC2JoinADSSMDocument
+          AssociationParameters:
+            - Key: directoryId
+              Value:
+                - !Ref ActiveDirectory
+            - Key: directoryName
+              Value:
+                - !Join ['.', [!Join ['-', [!Ref OrgName, !Ref Name]], !FindInMap [EnvShort, !Ref EnvName, Name]]]
+            - Key: dnsIpAddresses
+              Value: !GetAtt [ActiveDirectory, DnsIpAddresses]
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR2]]
@@ -792,11 +807,11 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
-  CICSWITSVRInstance: 
+  CICSWITSVRInstance:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
-      InstanceType: t3.micro
+      InstanceType: t3.large
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref CICSWITSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
@@ -809,6 +824,17 @@ Resources:
             VolumeType: gp3
       SecurityGroupIds: 
         - !Ref CICSWITSVRSecurityGroup
+      SsmAssociations:
+        - DocumentName: !Ref EC2JoinADSSMDocument
+          AssociationParameters:
+            - Key: directoryId
+              Value:
+                - !Ref ActiveDirectory
+            - Key: directoryName
+              Value:
+                - !Join ['.', [!Join ['-', [!Ref OrgName, !Ref Name]], !FindInMap [EnvShort, !Ref EnvName, Name]]]
+            - Key: dnsIpAddresses
+              Value: !GetAtt [ActiveDirectory, DnsIpAddresses]
       SubnetId:        
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateSubnetId2'
@@ -816,169 +842,11 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSWITSVR]]
 
-  HighCPUCICSWITSVRAlarm:
-    Condition: IsProd
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSWITSVR, high, cpu]]
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref CICSWITSVRInstance
-
-###
-# PCHCADSVR
-###
-
-  PCHCADSVREC2Role:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - ec2.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      Path: /
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
-  PCHCADSVRInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles:
-        - !Ref PCHCADSVREC2Role
-
-  PCHCADSVRSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-VpcId'
-      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHCADSVR, Security, Group]]
-      SecurityGroupIngress:
-        - IpProtocol: -1
-          CidrIp: 
-            Fn::ImportValue:
-              !Sub '${NetworkStackName}-VpcCidrBlock'
-          Description: Allow all connections on all ports from inside VPC
-      Tags:
-        - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHCADSVR, Security, Group]]
-
-  AllowJumpHostIntoPCHCADSVR:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from jump host
-      IpProtocol: TCP
-      GroupId: !Ref PCHCADSVRSecurityGroup
-      FromPort: 3389
-      ToPort: 3389
-      SourceSecurityGroupId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
-
-  PCHCADSVRENI1: #disabled
-    Type: AWS::EC2::NetworkInterface
-    Properties:
-      Description: PCHCADSVR First Interface
-      GroupSet:
-        - !Ref PCHCADSVRSecurityGroup
-      PrivateIpAddress: 10.0.2.26 #TODO - Need to fix this based on CIDR (e.g. for UAT)
-      SourceDestCheck: true
-      SubnetId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateSubnetId1'
-
-  PCHCADSVRENI2:
-    Type: AWS::EC2::NetworkInterface
-    Properties:
-      Description: PCHCADSVR Second Interface
-      GroupSet:
-        - !Ref PCHCADSVRSecurityGroup
-      PrivateIpAddress: 10.0.2.29 #TODO - Need to fix this based on CIDR (e.g. for UAT)
-      SourceDestCheck: true
-      SubnetId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateSubnetId1'
-
-  PCHCADSVRInstance:
-    Type: AWS::EC2::Instance
-    Properties:
-      # ImageId: !Ref InstanceAMI
-      # ImageId: ami-035d490a9d10b7a52 #Hardcoded since changes were made
-      ImageId: ami-0a7006c3750c33741 #Hardcoded since changes were made
-      InstanceType: t3.micro
-      DisableApiTermination: !Ref DeletionProtection
-      IamInstanceProfile: !Ref PCHCADSVRInstanceProfile
-      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-      NetworkInterfaces:
-        - DeviceIndex: 0
-          NetworkInterfaceId: !Ref PCHCADSVRENI1
-        - DeviceIndex: 1
-          NetworkInterfaceId: !Ref PCHCADSVRENI2
-      BlockDeviceMappings:
-        - DeviceName: /dev/sda1
-          Ebs:
-            DeleteOnTermination: true
-            Encrypted: true
-            VolumeSize: 30
-            VolumeType: gp3
-      Tags:
-        - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHCADSVR]]
-
-  PCHCADSVRDefaultDNSRecord: #domain name
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-LocalHostedZoneId'
-      Name: 
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
-      ResourceRecords:
-        - !GetAtt [PCHCADSVRENI2, PrimaryPrivateIpAddress]
-      TTL: 14400
-      Type: A
-
-  PCHCADSVRDNSRecord:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-LocalHostedZoneId'
-      Name: !Join
-        - '.'
-        - - !Join ['',[!FindInMap [EnvShort, !Ref EnvName, Name], !Ref OrgName, adsvr1]]
-          - Fn::ImportValue:
-              !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
-      ResourceRecords:
-        - !GetAtt [PCHCADSVRENI2, PrimaryPrivateIpAddress]
-      TTL: 14400
-      Type: A
-
-  # HighCPUADSVRAlarm:
+  # HighCPUCICSWITSVRAlarm:
   #   Condition: IsProd
   #   Type: AWS::CloudWatch::Alarm
   #   Properties:
-  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ADSVR, high, cpu]]
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSWITSVR, high, cpu]]
   #     MetricName: CPUUtilization
   #     Namespace: AWS/EC2
   #     ComparisonOperator: GreaterThanOrEqualToThreshold
@@ -994,7 +862,7 @@ Resources:
   #           !Sub '${SNSStackName}-TopicArn'
   #     Dimensions:
   #       - Name: InstanceId
-  #         Value: !Ref PCHCADSVRInstance
+  #         Value: !Ref CICSWITSVRInstance
 
 ###
 # PCHJUMPSVR
@@ -1087,7 +955,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
-      InstanceType: t3.large
+      InstanceType: t3.xlarge
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref PCHJUMPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
@@ -1101,7 +969,7 @@ Resources:
       SecurityGroupIds:
         - Fn::ImportValue:
             !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
-      SubnetId:        
+      SubnetId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PublicSubnetId1'
       Tags:
@@ -1153,13 +1021,9 @@ Resources:
   ActiveDirectory:
     Type: AWS::DirectoryService::MicrosoftAD
     Properties:
-      Name: !Join
-        - '.'
-        - - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], ad]]
-          - Fn::ImportValue:
-              !Sub '${NetworkStackName}-LocalHostedZoneDomainName'
+      Name: !Join ['.', [!Join ['-', [!Ref OrgName, !Ref Name]], !FindInMap [EnvShort, !Ref EnvName, Name]]]
       Password: !Ref ADPassword
-      ShortName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], ad]]
+      ShortName: !Join ['-', [!Ref OrgName, !Ref Name]]
       Edition: Standard
       VpcSettings:
         SubnetIds:
@@ -1170,6 +1034,42 @@ Resources:
         VpcId:
           Fn::ImportValue:
             !Sub '${NetworkStackName}-VpcId'
+
+  EC2JoinADSSMDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Content: 
+        |
+        {
+          "schemaVersion":"1.2",
+          "description":"Join instances to an AWS Directory Service domain.",
+          "parameters":{
+            "directoryId":{
+              "type":"String",
+              "description":"(Required) The ID of the AWS Directory Service directory."
+            },
+            "directoryName":{
+              "type":"String",
+              "description":"(Required) The name of the directory; for example, test.example.com"
+            },
+            "dnsIpAddresses":{
+              "type":"StringList",
+              "default":[
+              ],
+              "description":"(Optional) The IP addresses of the DNS servers in the directory. Required when DHCP is not configured. Learn more at http://docs.aws.amazon.com/directoryservice/latest/simple-ad/join_get_dns_addresses.html",
+              "allowedPattern":"((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)"
+            }
+          },
+          "runtimeConfig":{
+          "aws:domainJoin":{
+            "properties":{
+              "directoryId":"{{ directoryId }}",
+              "directoryName":"{{ directoryName }}",
+              "dnsIpAddresses":"{{ dnsIpAddresses }}"
+              }
+            }
+          }
+        }
 
 ###
 # Database
@@ -1243,7 +1143,7 @@ Resources:
         EngineVersion: 15.00.4073.23.v1
         Family: sqlserver-se-15.0
         InstanceType: db.m5.xlarge
-        MasterUser: root
+        MasterUser: admin
         MultiAz: !If [IsProd, true, false]
         NetworkStackName: !Ref NetworkStackName
         NetworkType: Private
