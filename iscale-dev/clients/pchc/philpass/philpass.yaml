@@ -1079,6 +1079,70 @@ Resources:
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: TRUE
 
+  DeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  ServerStack:
+    DependsOn:
+      - DBStack
+      - DeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        # InstanceAMI: !Ref InstanceAMI
+        InstanceAMI: ami-01e07f712a046fa8a 
+        #InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+        InstancePort: 80
+        InstanceSubnet: Private
+        InstanceType: t3.small #!Ref InstanceType
+        #LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: 100
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+
 ###
 # BSP Interface
 ###
@@ -1120,32 +1184,32 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: BSP Interface Security Group
-      VpcId: 
+      VpcId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-VpcId'
 
-  AllowHTTPOnBSPInterfaceFromELB:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
-      IpProtocol: TCP
-      GroupId: !Ref BSPInterfaceSecurityGroup
-      FromPort: 80
-      ToPort: 80
-      SourceSecurityGroupId: 
-        Fn::GetAtt:
-          - ELBStack
-          - Outputs.SecurityGroupId
+  # AllowHTTPOnBSPInterfaceFromELB:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties: 
+  #     IpProtocol: TCP
+  #     GroupId: !Ref BSPInterfaceSecurityGroup
+  #     FromPort: 80
+  #     ToPort: 80
+  #     SourceSecurityGroupId: 
+  #       Fn::GetAtt:
+  #         - ELBStack
+  #         - Outputs.SecurityGroupId
 
-  AllowSSHOnBSPInterfaceFromJumpHost:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
-      IpProtocol: TCP
-      GroupId: !Ref BSPInterfaceSecurityGroup
-      FromPort: 22
-      ToPort: 22
-      SourceSecurityGroupId: 
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+  # AllowSSHOnBSPInterfaceFromJumpHost:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties: 
+  #     IpProtocol: TCP
+  #     GroupId: !Ref BSPInterfaceSecurityGroup
+  #     FromPort: 22
+  #     ToPort: 22
+  #     SourceSecurityGroupId: 
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
   
   BSPInterfaceInstance:
     Type: AWS::EC2::Instance
@@ -1166,115 +1230,115 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,BSP,Interface]]
 
-  AllowBSPinterfaceIntoDB:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from BSP Interface
-      IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.SecurityGroupId
-      FromPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      ToPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
+  # AllowBSPinterfaceIntoDB:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties:
+  #     Description: Allow connection from BSP Interface
+  #     IpProtocol: TCP
+  #     GroupId:
+  #       Fn::GetAtt:
+  #         - DBStack
+  #         - Outputs.SecurityGroupId
+  #     FromPort:
+  #       Fn::GetAtt:
+  #         - DBStack
+  #         - Outputs.DBInstancePort
+  #     ToPort:
+  #       Fn::GetAtt:
+  #         - DBStack
+  #         - Outputs.DBInstancePort
+  #     SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
 
-  AllowBSPinterfaceIntoCache:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from BSP Interface
-      IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-          - CacheStack
-          - Outputs.SecurityGroupId
-      FromPort:
-        Fn::GetAtt:
-          - CacheStack
-          - Outputs.ClusterPort
-      ToPort:
-        Fn::GetAtt:
-          - CacheStack
-          - Outputs.ClusterPort
-      SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
+  # AllowBSPinterfaceIntoCache:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties:
+  #     Description: Allow connection from BSP Interface
+  #     IpProtocol: TCP
+  #     GroupId:
+  #       Fn::GetAtt:
+  #         - CacheStack
+  #         - Outputs.SecurityGroupId
+  #     FromPort:
+  #       Fn::GetAtt:
+  #         - CacheStack
+  #         - Outputs.ClusterPort
+  #     ToPort:
+  #       Fn::GetAtt:
+  #         - CacheStack
+  #         - Outputs.ClusterPort
+  #     SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
 
-  BSPInterfaceTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Matcher: 
-        HttpCode: 200,301,302
-      Port: 80
-      Protocol: HTTP
-      TargetType: instance
-      Targets:
-        - Id: !Ref BSPInterfaceInstance
-      VpcId:
-        Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcId"
-      Tags:
-        - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP,interface,target,group]]
+  # BSPInterfaceTargetGroup:
+  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
+  #   Properties:
+  #     Matcher: 
+  #       HttpCode: 200,301,302
+  #     Port: 80
+  #     Protocol: HTTP
+  #     TargetType: instance
+  #     Targets:
+  #       - Id: !Ref BSPInterfaceInstance
+  #     VpcId:
+  #       Fn::ImportValue:
+  #         !Sub "${NetworkStackName}-VpcId"
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP,interface,target,group]]
 
-  BSPInterfaceListenerRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties: 
-      Actions: 
-        - Type: forward
-          TargetGroupArn: !Ref BSPInterfaceTargetGroup
-      Conditions: 
-        - Field: host-header
-          Values: 
-            - !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
-      ListenerArn:
-        Fn::GetAtt:
-          - ELBStack
-          - Outputs.ApplicationListenerArn
-      Priority: 105
+  # BSPInterfaceListenerRule:
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  #   Properties: 
+  #     Actions: 
+  #       - Type: forward
+  #         TargetGroupArn: !Ref BSPInterfaceTargetGroup
+  #     Conditions: 
+  #       - Field: host-header
+  #         Values: 
+  #           - !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
+  #     ListenerArn:
+  #       Fn::GetAtt:
+  #         - ELBStack
+  #         - Outputs.ApplicationListenerArn
+  #     Priority: 105
 
-  BSPInterfaceInstancePublicDNSRecord:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
-      Name: !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
-      Type: A
-      AliasTarget:
-        DNSName:
-          Fn::GetAtt:
-            - ELBStack
-            - Outputs.DNSName
-        EvaluateTargetHealth: true
-        HostedZoneId:
-          Fn::GetAtt:
-            - ELBStack
-            - Outputs.CanonicalHostedZoneID
+  # BSPInterfaceInstancePublicDNSRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+  #     Name: !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
+  #     Type: A
+  #     AliasTarget:
+  #       DNSName:
+  #         Fn::GetAtt:
+  #           - ELBStack
+  #           - Outputs.DNSName
+  #       EvaluateTargetHealth: true
+  #       HostedZoneId:
+  #         Fn::GetAtt:
+  #           - ELBStack
+  #           - Outputs.CanonicalHostedZoneID
 
-  HighCPUBSPInterfaceAlarm:
-    Condition: IsProd
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, interface, high, cpu]]
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref BSPInterfaceInstance
+  # HighCPUBSPInterfaceAlarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, interface, high, cpu]]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/EC2
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: InstanceId
+  #         Value: !Ref BSPInterfaceInstance
 
   BackupStack:
     Condition: IsProd
