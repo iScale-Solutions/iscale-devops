@@ -209,7 +209,8 @@ Conditions:
   IsInstanceSsl: !Equals [!Ref InstancePort, 443]
   IsInternalFacing: !Equals [!Ref Scheme, internal]
   IsInternetFacing: !Not [Condition: IsInternalFacing]
-  IsEnableSSL: !And [Condition: IsApplication, Condition: HasSSLCert, Condition: IsInternetFacing]
+  IsInternetApplication: !And [Condition: IsApplication, Condition: IsInternetFacing]
+  IsInternetApplicationSSL: !And [Condition: IsApplication, Condition: HasSSLCert, Condition: IsInternetFacing]
   IsEnableWebAcl: !Equals [!Ref EnableWebAcl, true]
   IsEnableAlarm: !Equals [!Ref EnableAlarm, true]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, true]
@@ -222,6 +223,7 @@ Resources:
 
   ELBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Condition: IsApplication
     Properties:
       GroupName: !If
         - UseFriendlyNames
@@ -237,7 +239,7 @@ Resources:
 
   ELBSecurityGroupHTTPSIngress:
     Type: AWS::EC2::SecurityGroupIngress
-    Condition: IsEnableSSL
+    Condition: IsInternetApplicationSSL
     Properties:
       GroupId: !GetAtt ELBSecurityGroup.GroupId
       IpProtocol: tcp
@@ -247,6 +249,7 @@ Resources:
 
   ELBSecurityGroupHTTPIngress:
     Type: AWS::EC2::SecurityGroupIngress
+    Condition: IsInternetApplication
     Properties:
       GroupId: !GetAtt ELBSecurityGroup.GroupId
       IpProtocol: tcp
@@ -256,6 +259,7 @@ Resources:
 
   ELBSecurityGroupEgress:
     Type: AWS::EC2::SecurityGroupEgress
+    Condition: IsApplication
     Properties:
       GroupId: !GetAtt ELBSecurityGroup.GroupId
       IpProtocol: -1
@@ -360,7 +364,7 @@ Resources:
   # Listener for application load balancer
   LoadBalancerHTTPSListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsEnableSSL
+    Condition: IsInternetApplicationSSL
     Properties:
       Certificates:
         - CertificateArn: !Ref CertificateArn
@@ -476,7 +480,14 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-LoadBalancerName'
 
+  LoadBalancerType:
+    Description: The type of the load balancer
+    Value: !If [IsApplication, 'Application', 'Network']
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadBalancerType'
+
   SecurityGroupId:
+    Condition: IsApplication
     Description: The security group ID of the load balancer
     Value: !GetAtt ELBSecurityGroup.GroupId
     Export:
@@ -493,7 +504,7 @@ Outputs:
       Name: !Sub '${AWS::StackName}-HttpListenerArn'
 
   ApplicationListenerArn:
-    Condition: IsEnableSSL
+    Condition: IsInternetApplicationSSL
     Description: The HTTPS listener ARN of the application load balancer 
     Value: !Ref LoadBalancerHTTPSListener
     Export:
