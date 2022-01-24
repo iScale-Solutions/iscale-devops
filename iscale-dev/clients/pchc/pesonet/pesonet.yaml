@@ -312,7 +312,7 @@ Resources:
         InstancePort: 443
         InstanceSpotPrice: 0.5
         InstanceSubnet: Private
-        InstanceType: t3.medium
+        InstanceType: !If [IsProd, t3.large, t3.medium]
         LoadBalancerPriority: 100
         LoadBalancerHostName: !If [IsTest, pesonetmbsuat, pesonetmbs]
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkAppELBStack]]
@@ -347,6 +347,120 @@ Resources:
         CodeDeployDeploymentGroupName:
           Fn::GetAtt:
             - AppServerDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+###
+# App Server Treasury
+###
+
+  TreasuryELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, treas]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        InstancePort: 80
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  TreasuryDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, treas]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  TreasuryServerStack:
+    DependsOn:
+      - DBStack
+      - TreasuryDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, treas]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGMaxSize: 2
+        ASGDesiredSize: 2
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        ExternalEFSID:
+          Fn::GetAtt:
+            - ServerStack
+            - Outputs.AppServerEFS
+        ExternalEFSSecurityGroup:
+          Fn::GetAtt:
+            - ServerStack
+            - Outputs.AppServerEFSSecurityGroup
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 80
+        InstanceSpotPrice: 0.5
+        InstanceSubnet: Private
+        InstanceType: t3.medium
+        LoadBalancerHostName: !If [IsTest, treasury-pesonetmbsuat, treasury-pesonetmbs]
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref TreasuryELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+
+  TreasurySchedulerStack:
+    DependsOn:
+      - DBStack
+      - TreasuryServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - TreasuryDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - TreasuryDeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
 ###
@@ -517,7 +631,7 @@ Resources:
         InstancePort: 443
         InstanceSpotPrice: 0.5
         InstanceSubnet: Private
-        InstanceType: t3.medium        
+        InstanceType: !If [IsProd, t3.large, t3.medium]
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkSidekiqELBStack]]
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
