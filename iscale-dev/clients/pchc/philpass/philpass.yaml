@@ -109,6 +109,7 @@ Parameters:
     Default: UAT
     AllowedValues:
       - Production
+      - ProductionDR
       - UAT
   BSPInterfaceHostname:
     Description: Hostname for the BSP interface instance
@@ -193,12 +194,31 @@ Mappings:
       Location: s3://iscale-dev-cloudformation/include/mappings.yaml
   BSPConfig:
     Production:
+      PPPlusGateway: 121.127.5.157
       PPPlusSubnetCIDR: 192.168.80.0/24
       PPPlusResource1: 192.168.80.131
       PPPlusResource2: 192.168.80.132
       PPPlusResource3: 192.168.80.141
       PPPlusDNSServer1: 192.168.80.241
       PPPlusDNSServer2: 192.168.80.242
+      PP3rdPartyGateway: 121.127.5.50
+      PP3rdPartySubnetCIDR: 192.168.4.0/24
+      PP3rdPartyResource: 192.168.4.125/32
+      StrongSwanENIPrivIPAZ1: 10.0.0.53
+      StrongSwanPublicSubnetAZ1: 10.0.0.32/27
+      StrongSwanPrivateSubnetAZ1: 10.0.0.0/27
+      StrongSwanENIPrivIPAZ2: 10.0.0.176
+      StrongSwanPublicSubnetAZ2: 10.0.0.160/27
+      StrongSwanPrivateSubnetAZ2: 10.0.0.128/27
+    ProductionDR:
+      PPPlusGateway: 121.127.17.175 #DR Gateway
+      PPPlusSubnetCIDR: 192.168.90.0/24
+      PPPlusResource1: 192.168.90.141
+      PPPlusResource2: 192.168.90.142
+      PPPlusResource3: 192.168.90.143 #not needed
+      PPPlusDNSServer1: 192.168.80.241
+      PPPlusDNSServer2: 192.168.80.242
+      PP3rdPartyGateway: 121.127.5.50 #Same as regular prod - no DR given yet
       PP3rdPartySubnetCIDR: 192.168.4.0/24
       PP3rdPartyResource: 192.168.4.125/32
       StrongSwanENIPrivIPAZ1: 10.0.0.53
@@ -208,10 +228,12 @@ Mappings:
       StrongSwanPublicSubnetAZ2: 10.0.0.160/27
       StrongSwanPrivateSubnetAZ2: 10.0.0.128/27
     UAT:
+      PPPlusGateway: 121.127.5.157 #Same as Prod
       PPPlusSubnetCIDR: 192.168.222.0/24
       PPPlusResource1: 192.168.222.100
       PPPlusDNSServer1: 192.168.222.241 #Check on this
       PPPlusDNSServer2: 192.168.222.242 #Check on this
+      PP3rdPartyGateway: 121.127.5.50 #Same as Prod
       PP3rdPartySubnetCIDR: 192.168.222.0/24
       PP3rdPartyResource: 192.168.222.101/32
       StrongSwanENIPrivIPAZ1: 10.2.0.53
@@ -228,8 +250,6 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref BSPInterfaceHostname, '']]
-  IsBSPUAT: !Equals [!Ref BSPMode, UAT]
-  IsBSPProd: !Equals [!Ref BSPMode, Production]
   IsStrongswanActive: !Equals [!Ref StrongswanActive, true]
   IsStrongswanAlarmActive: !And [Condition: IsStrongswanActive, Condition: IsProd]
 
@@ -592,10 +612,12 @@ Resources:
             /etc/strongswan/ipsec.secrets:
               content: !Sub
                 - |
-                  @pchc 121.127.5.157 : PSK "${PSK_PPP}"
-                  @pchc 121.127.5.50 : PSK "${PSK_3RD}"
+                  @pchc ${PPP_GATEWAY} : PSK "${PSK_PPP}"
+                  @pchc ${3RD_GATEWAY} : PSK "${PSK_3RD}"
                 - PSK_PPP: !Ref StrongswanPPPPSK
                   PSK_3RD: !Ref Strongswan3RDPSK
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusGateway]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
 
         AZ1Config:
           files:
@@ -632,7 +654,7 @@ Resources:
                       leftid=pchc
                       left=${LEFT_IP} #Registered with BSP
                       leftsubnet=${LEFT_SUBNET}
-                      right=121.127.5.157
+                      right=${PPP_GATEWAY}
                       rightsubnet=${PPP_SUBNET}
                       ike=aes256-sha256-modp2048
                       ikelifetime=43200s
@@ -648,7 +670,7 @@ Resources:
                       leftid=pchc
                       left=${LEFT_IP} #Registered with BSP
                       leftsubnet=${LEFT_SUBNET}
-                      right=121.127.5.50
+                      right=${3RD_GATEWAY}
                       rightsubnet=${3RD_SUBNET}
                       ike=aes256-sha256-modp2048
                       ikelifetime=43200s
@@ -657,6 +679,8 @@ Resources:
                   PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
                   LEFT_IP: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ1]
                   LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPublicSubnetAZ1]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusGateway]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
               permissions: 0700
               owner: root
               group: root
@@ -695,7 +719,7 @@ Resources:
                       leftid=pchc
                       left=${LEFT_IP} #Registered with BSP
                       leftsubnet=${LEFT_SUBNET}
-                      right=121.127.5.157
+                      right=${PPP_GATEWAY}
                       rightsubnet=${PPP_SUBNET}
                       ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
                       ikelifetime=43200s #Time before re authentication of keys
@@ -710,7 +734,7 @@ Resources:
                       leftid=pchc
                       left=${LEFT_IP} #Registered with BSP
                       leftsubnet=${LEFT_SUBNET}
-                      right=121.127.5.50
+                      right=${3RD_GATEWAY}
                       rightsubnet=${3RD_SUBNET}
                       ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
                       ikelifetime=43200s #Time before re authentication of keys
@@ -719,6 +743,8 @@ Resources:
                   PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
                   LEFT_IP: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ2]
                   LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPublicSubnetAZ2]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusGateway]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
               permissions: 0700
               owner: root
               group: root
