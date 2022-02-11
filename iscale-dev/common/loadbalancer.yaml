@@ -110,7 +110,7 @@ Parameters:
     Default: 0.0.0.0/0
     AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
   ElbHTTPPort:
-    Description: The Load Balancer HTTP port.
+    Description: The Load Balancer HTTP port. Set to 0 to disable HTTP
     Type: Number
     Default: 80
   ElbHTTPSPort:
@@ -203,14 +203,15 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasSSLCert: !Not [!Equals [!Ref CertificateArn, '']]
   IsApplication: !Equals [!Ref ElbType, application]
-  IsApplicationInternetFacing: !And [!Condition IsApplication, !Condition IsInternetFacing]
-  IsApplicationInternalFacing: !And [!Condition IsApplication, !Condition IsInternalFacing]
+  IsHTTPEnabled: !Not [!Equals [!Ref ElbHTTPPort, 0]]
+  IsApplicationHTTPEnabled: !And [Condition: IsApplication, Condition: IsHTTPEnabled]
   IsNetwork: !Equals [!Ref ElbType, network]
   IsInstanceSsl: !Equals [!Ref InstancePort, 443]
   IsInternalFacing: !Equals [!Ref Scheme, internal]
   IsInternetFacing: !Not [Condition: IsInternalFacing]
-  IsInternetApplication: !And [Condition: IsApplication, Condition: IsInternetFacing]
-  IsInternetApplicationSSL: !And [Condition: IsApplication, Condition: HasSSLCert, Condition: IsInternetFacing]
+  IsInternalApplication: !And [Condition: IsApplication, Condition: IsInternalFacing, Condition: IsHTTPEnabled]
+  IsInternetApplication: !And [Condition: IsApplication, Condition: IsInternetFacing, Condition: IsHTTPEnabled]
+  IsInternetApplicationSSL: !And [Condition: IsApplication, Condition: IsInternetFacing, Condition: HasSSLCert]
   IsEnableWebAcl: !Equals [!Ref EnableWebAcl, true]
   IsEnableAlarm: !Equals [!Ref EnableAlarm, true]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, true]
@@ -335,7 +336,7 @@ Resources:
   # This listener redirects HTTP request to https
   LoadBalancerHTTPListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsApplicationInternetFacing
+    Condition: IsInternetApplication
     Properties:
       DefaultActions:
         - Type: redirect
@@ -352,7 +353,7 @@ Resources:
 
   LoadBalancerHTTPListenerInternal:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsApplicationInternalFacing
+    Condition: IsInternalApplication
     Properties:
       Port: !Ref ElbHTTPPort
       Protocol: HTTP
@@ -494,10 +495,10 @@ Outputs:
       Name: !Sub '${AWS::StackName}-SecurityGroupId'
 
   HttpListenerArn:
-    Condition: IsApplication
+    Condition: IsApplicationHTTPEnabled
     Description: The HTTP listener ARN of the application load balancer 
     Value: !If
-      - IsInternetFacing
+      - IsInternetApplication
       - !Ref LoadBalancerHTTPListener
       - !Ref LoadBalancerHTTPListenerInternal
     Export:
