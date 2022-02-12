@@ -25,7 +25,8 @@ Metadata:
       - Label:
           default: Network Configuration
         Parameters:
-          - Subnets
+          - UseCustomSubnets
+          - CustomSubnets
       - Label:
           default: Certificate Configuration
         Parameters:
@@ -35,6 +36,8 @@ Metadata:
     ParameterLabels:
       Name:
         default: Resource Name
+      CustomSubnets:
+        defaut: Custom Subnet (only if not using AZ1 and AZ2) - Works only for ALB
       DeletionProtection:
         default: Deletion Protection
       ElbType:
@@ -55,6 +58,8 @@ Metadata:
         default: Certificate ID
       SslPolicy:
         default: SSL Policy
+      UseCustomSubnets:
+        default: Use custom subnets
       UseFriendlyNames:
         default: Use friendly names
 
@@ -79,6 +84,9 @@ Parameters:
       - Staging
       - Development
       - Test
+  CustomSubnets:
+    Description: List of Custom Subnets to use
+    Type: List<AWS::EC2::Subnet::Id>
   DeletionProtection:
     Description: Set to true to enable deletion protection (for production only)
     Type: String
@@ -182,6 +190,13 @@ Parameters:
     Description: The name of the cloudformation SNS stack
     Type: String
     Default: iscale-dev-dev-uw2-sns
+  UseCustomSubnets:
+    Description: Set to true to enable custom subnets
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
   UseFriendlyNames:
     Description: Set to true to enable friendly names
     Type: String
@@ -201,6 +216,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasCustomSubnets: !Equals [!Ref UseCustomSubnets, true]
   HasSSLCert: !Not [!Equals [!Ref CertificateArn, '']]
   IsApplication: !Equals [!Ref ElbType, application]
   IsHTTPEnabled: !Not [!Equals [!Ref ElbHTTPPort, 0]]
@@ -304,15 +320,18 @@ Resources:
       Subnets: !If
         - IsApplication
         - !If
-          - IsInternetFacing
-          - - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PublicSubnetId1'
-            - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PublicSubnetId2'
-          - - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId1'
-            - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId2'
+          - HasCustomSubnets
+          - !Ref CustomSubnets
+          - !If
+            - IsInternetFacing
+            - - Fn::ImportValue:
+                  !Sub '${NetworkStackName}-PublicSubnetId1'
+              - Fn::ImportValue:
+                  !Sub '${NetworkStackName}-PublicSubnetId2'
+            - - Fn::ImportValue:
+                  !Sub '${NetworkStackName}-PrivateSubnetId1'
+              - Fn::ImportValue:
+                  !Sub '${NetworkStackName}-PrivateSubnetId2'
         - !Ref 'AWS::NoValue'
       SubnetMappings: !If
         - IsNetwork
