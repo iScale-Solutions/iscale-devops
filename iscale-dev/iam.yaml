@@ -180,31 +180,34 @@ Resources:
 # Groups
 ####
 
-  #
-  # Adding users to Group
-  #
-
   # All users must be associated in MFA Group
   MFAUserGroupUsers:
     Type: AWS::IAM::UserToGroupAddition
-    Properties: 
+    Properties:
       GroupName: !Ref MFAUserGroup
       Users:
         - !Ref JeanEmmanuel
         - !Ref Ceseng
 
+  DevOpsGroupUser:
+    Type: AWS::IAM::UserToGroupAddition
+    Properties:
+      GroupName: !Ref DevOpsGroup
+      Users:
+        - !Ref Ceseng
+
   AdministratorsGroupUsers:
     Type: AWS::IAM::UserToGroupAddition
-    Properties: 
+    Properties:
       GroupName: !Ref AdministratorsGroup
-      Users: 
+      Users:
         - !Ref JeanEmmanuel
 
   ReadOnlyGroupUsers:
     Type: AWS::IAM::UserToGroupAddition
-    Properties: 
+    Properties:
       GroupName: !Ref ReadOnlyGroup
-      Users: 
+      Users:
         - !Ref Aira
         - !Ref Ceseng
         - !Ref Gerald
@@ -219,7 +222,7 @@ Resources:
   # Groups
   ###
 
-  # oDoo Admin Group
+  # Odoo Admin Group
   OdooAdministratorsGroup:
     Type: AWS::IAM::Group
     Properties:
@@ -233,13 +236,13 @@ Resources:
             Statement:
               - Sid: AssumeRole
                 Effect: Allow
-                Action: 
+                Action:
                   - sts:AssumeRole
-                Resource: 
+                Resource:
                   - arn:aws:iam::178070162686:role/iscale-hosting-prd-uw2-odoo-admin-role
               - Sid: InvokeOdooFunctions
                 Effect: Allow
-                Action: 
+                Action:
                   - lambda:InvokeFunction
                 Resource: 
                   - arn:aws:lambda:us-west-2:338284463834:function:iscale-dev-dev-uw2-odoo-scheduler
@@ -258,15 +261,99 @@ Resources:
             Statement:
               - Sid: AssumeRole
                 Effect: Allow
-                Action: 
+                Action:
                   - sts:AssumeRole
                 Resource: '*' #user can switch to any role
               - Sid: InvokeOdooFunctions
                 Effect: Allow
-                Action: 
+                Action:
                   - lambda:InvokeFunction
-                Resource: 
+                Resource:
                   - arn:aws:lambda:us-west-2:338284463834:function:iscale-dev-dev-uw2-odoo-scheduler
+
+  DevOpsGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: DevOps
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECS_FullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AutoScalingFullAccess
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+      Policies:
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], devops-policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: TerminateSSM
+                Effect: Allow
+                Action:
+                  - ssm:ResumeSession
+                  - ssm:TerminateSession
+                Resource:
+                  - arn:aws:ssm:*:*:session/${aws:username}-*
+              - Sid: ManageEC2Instance
+                Effect: Allow
+                Action:
+                  - ec2:*
+                  - elasticloadbalancing:*
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ec2:resourceTag/Environment:
+                      - Development
+                      - Staging
+              - Sid: ManageAutoScalingGroups
+                Effect: Allow
+                Action:
+                  - autoscaling:*
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    autoscaling:resourceTag/Environment:
+                      - Development
+                      - Staging
+              - Sid: AllowSSMinEC2
+                Effect: Deny
+                Action:
+                  - ssm:StartSession
+                Resource: 'arn:aws:ec2:::instance/*'
+              - Sid: NoTouchingProdEC2
+                Effect: Deny
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - autoscaling:CreateTags
+                  - autoscaling:DeleteTags
+                  - elasticloadbalancing:CreateTags
+                  - elasticloadbalancing:DeleteTags
+                Resource: '*'
+                Condition:
+                  StringEqualsIgnoreCase:
+                    ec2:resourceTag/Environment:
+                      - Production
+              - Sid: NoTouchingProdSSM
+                Effect: Deny
+                Action:
+                  - ssm:StartSession
+                  - ssm:TerminateSession
+                  - ssm:ResumeSession
+                Resource: '*'
+                Condition:
+                  StringEqualsIgnoreCase:
+                    ssm:resourceTag/Environment:
+                      - Production
+              - Sid: NoTouchingProdCFT
+                Effect: Deny
+                Action:
+                  - cloudformation:Delete*
+                  - cloudformation:Set*
+                  - cloudformation:Update*
+                Resource: '*'
+                Condition:
+                  StringEqualsIgnoreCase:
+                    aws:ResourceTag/Environment:
+                      - Production
 
   # Multi-Factor Authentication Group
   MFAUserGroup:
@@ -274,21 +361,20 @@ Resources:
     Properties:
       GroupName: MFA
       Policies:
-        - 
-          PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], mfa-user-policy]]
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], mfa-user-policy]]
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - Sid: AllowAllUsersToListAccounts
                 Effect: Allow
-                Action: 
+                Action:
                   - iam:ListAccountAliases
                   - iam:ListVirtualMFADevices
                   - iam:GetAccountPasswordPolicy
                 Resource: '*'
               - Sid: AllowIndividualUserToSeeAndManageOnlyTheirOwnAccountInformation
                 Effect: Allow
-                Action: 
+                Action:
                   - iam:ChangePassword
                   - iam:CreateAccessKey
                   - iam:CreateLoginProfile
@@ -309,32 +395,37 @@ Resources:
                   - iam:UpdateSSHPublicKey
                   - iam:UploadSSHPublicKey
                   - iam:GetUser
-                Resource: 
+                Resource:
                   - "arn:aws:iam::*:user/${aws:username}"
               - Sid: AllowIndividualUserToViewAndManageTheirOwnMFA
                 Effect: Allow
-                Action: 
+                Action:
                   - iam:CreateVirtualMFADevice
                   - iam:DeleteVirtualMFADevice
                   - iam:EnableMFADevice
                   - iam:ListMFADevices
                   - iam:ResyncMFADevice
-                Resource: 
+                Resource:
                   - "arn:aws:iam::*:user/${aws:username}"
                   - "arn:aws:iam::*:mfa/${aws:username}"
               - Sid: AllowIndividualUserToDeactivateOnlyTheirOwnMFAOnlyWhenUsingMFA
                 Effect: Allow
-                Action: 
+                Action:
                   - iam:DeactivateMFADevice
-                Resource: 
+                Resource:
                   - "arn:aws:iam::*:user/${aws:username}"
                   - "arn:aws:iam::*:mfa/${aws:username}"
                 Condition:
                   Bool:
                     aws:MultiFactorAuthPresent: true
+              - Sid: AssumeRole
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: '*' #user can switch to any role
               - Sid: BlockMostAccessUnlessSignedInWithMFA
                 Effect: Deny
-                NotAction: 
+                NotAction:
                   - iam:CreateVirtualMFADevice
                   - iam:DeleteVirtualMFADevice
                   - iam:ListVirtualMFADevices
@@ -370,8 +461,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/ReadOnlyAccess
       Policies:
-        - 
-          PolicyName: AllowPasswordChange
+        - PolicyName: AllowPasswordChange
           PolicyDocument:
             Version: 2012-10-17
             Statement:
