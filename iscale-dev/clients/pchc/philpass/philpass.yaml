@@ -109,7 +109,6 @@ Parameters:
     Default: UAT
     AllowedValues:
       - Production
-      - ProductionDR
       - UAT
   BSPInterfaceHostname:
     Description: Hostname for the BSP interface instance
@@ -194,52 +193,42 @@ Mappings:
       Location: s3://iscale-dev-cloudformation/include/mappings.yaml
   BSPConfig:
     Production:
-      PPPlusGateway: 121.127.5.157
-      PPPlusSubnetCIDR: 192.168.80.0/24
-      PPPlusResource1: 192.168.80.131
-      PPPlusResource2: 192.168.80.132
-      PPPlusResource3: 192.168.80.141
-      PPPlusDNSServer1: 192.168.80.241
-      PPPlusDNSServer2: 192.168.80.242
+      PPPGateway: 121.127.5.157
+      PPPSubnetCIDR: 192.168.80.0/24
+      PPPResource1: 192.168.80.141
+      PPPResource2: 192.168.80.152
+      PPPResource3: 192.168.80.153
+      PPPResource4: 192.168.80.154
+      PPPDNSServer1: 192.168.80.241
+      PPPDNSServer2: 192.168.80.242
       PP3rdPartyGateway: 121.127.5.50
       PP3rdPartySubnetCIDR: 192.168.4.0/24
       PP3rdPartyResource: 192.168.4.125/32
-      StrongSwanENIPrivIPAZ1: 10.0.0.53
+      StrongSwanENIPrivIPAZ1: 10.0.0.53 #registered with BSP
       StrongSwanPublicSubnetAZ1: 10.0.0.32/27
       StrongSwanPrivateSubnetAZ1: 10.0.0.0/27
-      StrongSwanENIPrivIPAZ2: 10.0.0.176
+      StrongSwanENIPrivIPAZ2: 10.0.0.176 #registered with BSP
       StrongSwanPublicSubnetAZ2: 10.0.0.160/27
       StrongSwanPrivateSubnetAZ2: 10.0.0.128/27
-    ProductionDR:
-      PPPlusGateway: 121.127.17.175 #DR Gateway
-      PPPlusSubnetCIDR: 192.168.90.0/24
-      PPPlusResource1: 192.168.90.141
-      PPPlusResource2: 192.168.90.142
-      PPPlusResource3: 192.168.90.143 #not needed
-      PPPlusDNSServer1: 192.168.80.241
-      PPPlusDNSServer2: 192.168.80.242
-      PP3rdPartyGateway: 121.127.5.50 #Same as regular prod - no DR given yet
-      PP3rdPartySubnetCIDR: 192.168.4.0/24
-      PP3rdPartyResource: 192.168.4.125/32
-      StrongSwanENIPrivIPAZ1: 10.0.0.53
-      StrongSwanPublicSubnetAZ1: 10.0.0.32/27
-      StrongSwanPrivateSubnetAZ1: 10.0.0.0/27
-      StrongSwanENIPrivIPAZ2: 10.0.0.176
-      StrongSwanPublicSubnetAZ2: 10.0.0.160/27
-      StrongSwanPrivateSubnetAZ2: 10.0.0.128/27
+      PPPDRGateway: 121.127.17.175 #DR Gateway
+      PPPDRSubnetCIDR: 192.168.90.0/24
+      PPPDRResource1: 192.168.90.131
+      PPPDRResource2: 192.168.90.152
+      PPPDRResource3: 192.168.90.153
+      PPPDRResource4: 192.168.90.154
     UAT:
-      PPPlusGateway: 121.127.5.157 #Same as Prod
-      PPPlusSubnetCIDR: 192.168.222.0/24
-      PPPlusResource1: 192.168.222.100
-      PPPlusDNSServer1: 192.168.222.241 #Check on this
-      PPPlusDNSServer2: 192.168.222.242 #Check on this
+      PPPGateway: 121.127.5.157 #Same as Prod
+      PPPSubnetCIDR: 192.168.222.0/24
+      PPPResource1: 192.168.222.100
+      PPPDNSServer1: 192.168.222.241 #Check on this
+      PPPDNSServer2: 192.168.222.242 #Check on this
       PP3rdPartyGateway: 121.127.5.50 #Same as Prod
       PP3rdPartySubnetCIDR: 192.168.222.0/24
       PP3rdPartyResource: 192.168.222.101/32
-      StrongSwanENIPrivIPAZ1: 10.2.0.53
+      StrongSwanENIPrivIPAZ1: 10.2.0.53 #registered with BSP
       StrongSwanPublicSubnetAZ1: 10.2.0.32/27
       StrongSwanPrivateSubnetAZ1: 10.2.0.0/27
-      StrongSwanENIPrivIPAZ2: 10.2.0.176
+      StrongSwanENIPrivIPAZ2: 10.2.0.176 #registered with BSP
       StrongSwanPublicSubnetAZ2: 10.2.0.160/27
       StrongSwanPrivateSubnetAZ2: 10.2.0.128/27
 
@@ -252,6 +241,8 @@ Conditions:
   HasLoadBalancerHostName: !Not [!Equals [!Ref BSPInterfaceHostname, '']]
   IsStrongswanActive: !Equals [!Ref StrongswanActive, true]
   IsStrongswanAlarmActive: !And [Condition: IsStrongswanActive, Condition: IsProd]
+  IsBSPProd: !And [Condition: IsStrongswanActive, !Equals [!Ref BSPMode, Production]]
+  IsBSPUAT: !And [Condition: IsStrongswanActive, !Equals [!Ref BSPMode, UAT]]
 
 Resources:
 
@@ -302,9 +293,9 @@ Resources:
       ResolverEndpointId: !Ref BSPDNSResolver
       RuleType: FORWARD 
       TargetIps:
-        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer1]
+        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1]
           Port: 53
-        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer2]
+        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2]
           Port: 53
 
   BSPDomainVPCAssociation:
@@ -349,18 +340,8 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-VpcId'
 
-  # AllowSSHIntoStrongSwan:
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     IpProtocol: tcp
-  #     GroupId: !Ref StrongSwanSecurityGroup
-  #     FromPort: 22
-  #     ToPort: 22
-  #     CidrIp: 
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-VpcCidrBlock'
-
   AllowICMPIntoStrongSwan:
+    Condition: IsStrongswanActive
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: icmp
@@ -372,6 +353,7 @@ Resources:
           !Sub '${NetworkStackName}-VpcCidrBlock'
 
   AllowHTTPSIntoStrongSwan:
+    Condition: IsStrongswanActive
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -383,6 +365,7 @@ Resources:
           !Sub '${NetworkStackName}-VpcCidrBlock'
 
   AllowDNSIntoStrongSwan:
+    Condition: IsStrongswanActive
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: udp
@@ -435,17 +418,14 @@ Resources:
 
   BSPVPNGatewayEIP1: # - Hardcoded for BSP
     DeletionPolicy: Retain #Make sure to retain always
-    # Condition: IsProd
     Type: AWS::EC2::EIP
     Properties:
       Tags:
         - Key: Name
           Value: !Join [' ', [!Ref Name, !Ref EnvName, BSP registered IP - AZ1]]
 
-
   BSPVPNGatewayEIP2: # - Hardcoded for BSP
     DeletionPolicy: Retain #Make sure to retain always
-    # Condition: IsProd
     Type: AWS::EC2::EIP
     Properties:
       Tags:
@@ -458,6 +438,7 @@ Resources:
 
   BSP3rdPartyRouteAZ1:
     Type: AWS::EC2::Route
+    Condition: IsStrongswanActive
     Properties:
       RouteTableId:
         Fn::ImportValue:
@@ -467,6 +448,7 @@ Resources:
 
   BSP3rdPartyRouteAZ2:
     Type: AWS::EC2::Route
+    Condition: IsStrongswanActive
     Properties:
       RouteTableId:
         Fn::ImportValue:
@@ -474,62 +456,164 @@ Resources:
       DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
-  BSPPhilPassPlusRouteIP1AZ1:
+  PPPResource1AZ1Route:
     Type: AWS::EC2::Route
+    Condition: IsStrongswanActive
     Properties:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource1], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ1ENI
 
-  BSPPhilPassPlusRouteIP1AZ2:
+  PPPResource1AZ2Route:
     Type: AWS::EC2::Route
+    Condition: IsStrongswanActive
     Properties:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource1], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
-  BSPPhilPassPlusRouteIP2AZ1:
+  PPPResource2AZ1Route:
     Type: AWS::EC2::Route
-    Condition: IsProd #No IP2 except in prod
+    Condition: IsBSPProd #No IP2 except in prod
     Properties:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource2], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ1ENI
 
-  BSPPhilPassPlusRouteIP2AZ2:
+  PPPResource2AZ2Route:
     Type: AWS::EC2::Route
-    Condition: IsProd #No IP2 except in prod
+    Condition: IsBSPProd #No IP2 except in prod
     Properties:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource2], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
-  BSPPhilPassPlusRouteIP3AZ1:
+  PPPResource3AZ1Route:
     Type: AWS::EC2::Route
-    Condition: IsProd #No IP3 except in prod
+    Condition: IsBSPProd #No IP3 except in prod
     Properties:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource3], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ1ENI
 
-  BSPPhilPassPlusRouteIP3AZ2:
+  PPPResource3AZ2Route:
     Type: AWS::EC2::Route
-    Condition: IsProd #No IP3 except in prod
+    Condition: IsBSPProd #No IP3 except in prod
     Properties:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusResource3], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  PPPResource4AZ1Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No IP4 except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  PPPResource4AZ2Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No IP4 except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  PPPDRResource1AZ1Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No DR resource except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  PPPDRResource1AZ2Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No DR resource except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  PPPDRResource2AZ1Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No DR resource except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  PPPDRResource2AZ2Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No DR resource except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  PPPDRResource3AZ1Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No DR resource except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  PPPDRResource3AZ2Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No DR resource except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  PPPDRResource4AZ1Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No DR resource except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  PPPDRResource4AZ2Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No DR resource except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
   BSPPhilPassPlusRouteDNS1AZ1:
@@ -538,7 +622,7 @@ Resources:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer1], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ1ENI
 
   BSPPhilPassPlusRouteDNS1AZ2:
@@ -547,7 +631,7 @@ Resources:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer1], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
   BSPPhilPassPlusRouteDNS2AZ1:
@@ -556,7 +640,7 @@ Resources:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer2], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ1ENI
 
   BSPPhilPassPlusRouteDNS2AZ2:
@@ -565,7 +649,7 @@ Resources:
       RouteTableId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPlusDNSServer2], '/32']]
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
   ##
@@ -576,15 +660,25 @@ Resources:
     Metadata:
       AWS::CloudFormation::Init:
         configSets:
-          AZ1Config:
+          AZ1ConfigProd:
             - NetworkFiles
             - PSK
-            - AZ1Config
+            - AZ1ConfigProd
             - StartStrongSwan
-          AZ2Config:
+          AZ2ConfigProd:
             - NetworkFiles
             - PSK
-            - AZ2Config
+            - AZ2ConfigProd
+            - StartStrongSwan
+          AZ1ConfigUAT:
+            - NetworkFiles
+            - PSK
+            - AZ1ConfigUAT
+            - StartStrongSwan
+          AZ2ConfigUAT:
+            - NetworkFiles
+            - PSK
+            - AZ2ConfigUAT
             - StartStrongSwan
 
         StartStrongSwan:
@@ -613,13 +707,186 @@ Resources:
               content: !Sub
                 - |
                   @pchc ${PPP_GATEWAY} : PSK "${PSK_PPP}"
+                  @pchc ${PPP_DR_GATEWAY} : PSK "${PSK_PPP}"
                   @pchc ${3RD_GATEWAY} : PSK "${PSK_3RD}"
                 - PSK_PPP: !Ref StrongswanPPPPSK
                   PSK_3RD: !Ref Strongswan3RDPSK
-                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusGateway]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPGateway]
+                  PPP_DR_GATEWAY: !If
+                    - IsBSPUAT
+                    - !FindInMap [BSPConfig, UAT, PPPGateway]
+                    - !FindInMap [BSPConfig, Production, PPPDRGateway]
                   3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
 
-        AZ1Config:
+        AZ1ConfigProd:
+          files:
+            /etc/iptables.rules:
+              content: !Sub
+                - |
+                  *nat
+                  :PREROUTING ACCEPT [18:1376]
+                  :INPUT ACCEPT [15:1148]
+                  :OUTPUT ACCEPT [222:17540]
+                  :POSTROUTING ACCEPT [222:17540]
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${PPP_DR_SUBNET} -o eth0 -j MASQUERADE
+                  COMMIT
+                - 3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+                  PRIVATE_SUBNET_AZ1: !FindInMap [BSPConfig, Production, StrongSwanPrivateSubnetAZ1]
+              permissions: 0700
+              owner: root
+              group: root
+            /etc/strongswan/ipsec.conf:
+              content: !Sub
+                - |
+                  config setup
+                    charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
+
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      forceencaps=yes
+                      leftid=pchc
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+
+                  conn bspPPPlusDR
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      leftid=pchc
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_DR_GATEWAY}
+                      rightsubnet=${PPP_DR_SUBNET}
+                      ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                      ikelifetime=43200s #Time before re authentication of keys
+                      esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      forceencaps=yes
+                      leftid=pchc
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                - 3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+                  LEFT_IP: !FindInMap [BSPConfig, Production, StrongSwanENIPrivIPAZ1]
+                  LEFT_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPublicSubnetAZ1]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
+                  PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
+              permissions: 0700
+              owner: root
+              group: root
+
+        AZ2ConfigProd:
+          files:
+            /etc/iptables.rules:
+              content: !Sub
+                - |
+                  *nat
+                  :PREROUTING ACCEPT [18:1376]
+                  :INPUT ACCEPT [15:1148]
+                  :OUTPUT ACCEPT [222:17540]
+                  :POSTROUTING ACCEPT [222:17540]
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
+                  -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${PPP_DR_SUBNET} -o eth0 -j MASQUERADE
+                  COMMIT
+                - 3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+                  PRIVATE_SUBNET_AZ2: !FindInMap [BSPConfig, Production, StrongSwanPrivateSubnetAZ2]
+              permissions: 0700
+              owner: root
+              group: root
+            /etc/strongswan/ipsec.conf:
+              content: !Sub
+                - |
+                  config setup
+                    charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
+
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      leftid=pchc
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                      ikelifetime=43200s #Time before re authentication of keys
+                      esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+
+                  conn bspPPPlusDR
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      leftid=pchc
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_DR_GATEWAY}
+                      rightsubnet=${PPP_DR_SUBNET}
+                      ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                      ikelifetime=43200s #Time before re authentication of keys
+                      esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      keyexchange=ikev1
+                      type=tunnel
+                      leftfirewall=yes
+                      leftid=pchc
+                      left=${LEFT_IP} #Registered with BSP
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
+                      ikelifetime=43200s #Time before re authentication of keys
+                      esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
+                - 3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+                  LEFT_IP: !FindInMap [BSPConfig, Production, StrongSwanENIPrivIPAZ2]
+                  LEFT_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPublicSubnetAZ2]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
+                  PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
+              permissions: 0700
+              owner: root
+              group: root
+        
+        AZ1ConfigUAT:
           files:
             /etc/iptables.rules:
               content: !Sub
@@ -632,9 +899,9 @@ Resources:
                   -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
                   -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
                   COMMIT
-                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
-                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
-                  PRIVATE_SUBNET_AZ1: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPrivateSubnetAZ1]
+                - 3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+                  PRIVATE_SUBNET_AZ1: !FindInMap [BSPConfig, UAT, StrongSwanPrivateSubnetAZ1]
               permissions: 0700
               owner: root
               group: root
@@ -675,17 +942,17 @@ Resources:
                       ike=aes256-sha256-modp2048
                       ikelifetime=43200s
                       esp=aes128-sha256-modp2048
-                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
-                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
-                  LEFT_IP: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ1]
-                  LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPublicSubnetAZ1]
-                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusGateway]
-                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
+                - 3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+                  LEFT_IP: !FindInMap [BSPConfig, UAT, StrongSwanENIPrivIPAZ1]
+                  LEFT_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPublicSubnetAZ1]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
               permissions: 0700
               owner: root
               group: root
 
-        AZ2Config:
+        AZ2ConfigUAT:
           files:
             /etc/iptables.rules:
               content: !Sub
@@ -698,9 +965,9 @@ Resources:
                   -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
                   -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
                   COMMIT
-                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
-                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
-                  PRIVATE_SUBNET_AZ2: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPrivateSubnetAZ2]
+                - 3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+                  PRIVATE_SUBNET_AZ2: !FindInMap [BSPConfig, UAT, StrongSwanPrivateSubnetAZ2]
               permissions: 0700
               owner: root
               group: root
@@ -739,12 +1006,12 @@ Resources:
                       ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
                       ikelifetime=43200s #Time before re authentication of keys
                       esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
-                - 3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
-                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusSubnetCIDR]
-                  LEFT_IP: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ2]
-                  LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanPublicSubnetAZ2]
-                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPlusGateway]
-                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
+                - 3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+                  LEFT_IP: !FindInMap [BSPConfig, UAT, StrongSwanENIPrivIPAZ2]
+                  LEFT_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPublicSubnetAZ2]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
               permissions: 0700
               owner: root
               group: root
@@ -754,6 +1021,7 @@ Resources:
       InstanceType: t3.nano
 
   StrongSwanEC2Role:
+    Condition: IsStrongswanActive
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -788,6 +1056,7 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
 
   StrongSwanInstanceProfile:
+    Condition: IsStrongswanActive
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
@@ -798,6 +1067,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile: !Ref StrongSwanInstanceProfile
+      # DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref StrongswanAMI
       InstanceType: t3.nano
@@ -811,12 +1081,13 @@ Resources:
         Fn::Base64: !Sub
           - |
             #!/bin/bash -xe
-             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c AZ1Config --region ${AWS::Region} --role ${ROLE}
+             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c ${AZ1CONFIG} --region ${AWS::Region} --role ${ROLE}
             # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
              /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
             # Signal the status from cfn-init
              /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource StrongSwanLaunchConfig  --region ${AWS::Region}
-          - ROLE: !Ref StrongSwanEC2Role
+          - AZ1CONFIG: !If [IsBSPUAT, AZ1ConfigUAT, AZ1ConfigProd]
+            ROLE: !Ref StrongSwanEC2Role
   
   StrongSwanPublicEIPAttachAZ1:
     Type: AWS::EC2::EIPAssociation
@@ -911,6 +1182,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile: !Ref StrongSwanInstanceProfile
+      # DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref StrongswanAMI
       InstanceType: t3.nano
@@ -924,12 +1196,14 @@ Resources:
         Fn::Base64: !Sub
           - |
             #!/bin/bash -xe
-             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c AZ2Config --region ${AWS::Region} --role ${ROLE}
+             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c ${AZ2CONFIG} --region ${AWS::Region} --role ${ROLE}
             # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
              /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
             # Signal the status from cfn-init
              /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource StrongSwanLaunchConfig  --region ${AWS::Region}
-          - ROLE: !Ref StrongSwanEC2Role
+          - AZ2CONFIG: !If [IsBSPUAT, AZ2ConfigUAT, AZ2ConfigProd]
+            ROLE: !Ref StrongSwanEC2Role
+          
 
   StrongSwanPublicEIPAttachAZ2:
     Type: AWS::EC2::EIPAssociation
@@ -1032,6 +1306,7 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         CertificateArn: !Ref LoadBalancerCertificateArn
+        DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
@@ -1090,85 +1365,85 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
-  CacheStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        NetworkStackName: !Ref NetworkStackName
-        EncryptInTransit: TRUE
-        NodeType: cache.t3.micro
-        NumCacheClusters: 1
-        OrgName: !Ref OrgName
-        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
-        SNSStackName: !Ref SNSStackName
-        UseFriendlyNames: TRUE
+  # CacheStack:
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       NetworkStackName: !Ref NetworkStackName
+  #       EncryptInTransit: TRUE
+  #       NodeType: cache.t3.micro
+  #       NumCacheClusters: 1
+  #       OrgName: !Ref OrgName
+  #       SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+  #       SNSStackName: !Ref SNSStackName
+  #       UseFriendlyNames: TRUE
 
-  DeployStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
+  # DeployStack:
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SNSStackName: !Ref SNSStackName
 
-  ServerStack:
-    DependsOn:
-      - DBStack
-      - DeployStack
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
-        ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
-        # InstanceAMI: !Ref InstanceAMI
-        InstanceAMI: ami-01e07f712a046fa8a 
-        #InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-        InstancePort: 80
-        InstanceSubnet: Private
-        InstanceType: t3.small #!Ref InstanceType
-        LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref BSPInterfaceHostname, !Ref 'AWS::NoValue']
-        LoadBalancerPriority: 100
-        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
-        NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
-        SNSStackName: !Ref SNSStackName
-        UseFriendlyNames: FALSE
+  # ServerStack:
+  #   DependsOn:
+  #     - DBStack
+  #     - DeployStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       CacheEndpoint:
+  #         Fn::GetAtt:
+  #           - CacheStack
+  #           - Outputs.CachePrimaryEndpoint
+  #       CachePort:
+  #         Fn::GetAtt:
+  #           - CacheStack
+  #           - Outputs.ClusterPort
+  #       CacheSecurityGroupId:
+  #         Fn::GetAtt:
+  #           - CacheStack
+  #           - Outputs.SecurityGroupId
+  #       ClientDomainName: !Ref ClientDomainName
+  #       DatabaseEndpoint:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstanceAddress
+  #       DatabasePort:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstancePort
+  #       DatabaseSecurityGroupId:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.SecurityGroupId
+  #       # InstanceAMI: !Ref InstanceAMI
+  #       InstanceAMI: ami-01e07f712a046fa8a 
+  #       #InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+  #       InstancePort: 80
+  #       InstanceSubnet: Private
+  #       InstanceType: t3.small #!Ref InstanceType
+  #       LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref BSPInterfaceHostname, !Ref 'AWS::NoValue']
+  #       LoadBalancerPriority: 100
+  #       LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SharedSecretId:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBSecretManagerKeyId
+  #       SNSStackName: !Ref SNSStackName
+  #       UseFriendlyNames: FALSE
 
 ###
 # BSP Interface
@@ -1215,17 +1490,17 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-VpcId'
 
-  # AllowHTTPOnBSPInterfaceFromELB:
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     IpProtocol: TCP
-  #     GroupId: !Ref BSPInterfaceSecurityGroup
-  #     FromPort: 80
-  #     ToPort: 80
-  #     SourceSecurityGroupId: 
-  #       Fn::GetAtt:
-  #         - ELBStack
-  #         - Outputs.SecurityGroupId
+  AllowHTTPOnBSPInterfaceFromELB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      IpProtocol: TCP
+      GroupId: !Ref BSPInterfaceSecurityGroup
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: 
+        Fn::GetAtt:
+          - ELBStack
+          - Outputs.SecurityGroupId
 
   # AllowSSHOnBSPInterfaceFromJumpHost:
   #   Type: AWS::EC2::SecurityGroupIngress
@@ -1242,6 +1517,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       # ImageId: ami-015773f049325e337 #This should be a parameter
+      DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
       ImageId: !Ref BSPInterfaceAMI
       InstanceType: t3.medium
       IamInstanceProfile: !Ref BSPInterfaceIamInstanceProfile
@@ -1257,24 +1533,24 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,BSP,Interface]]
 
-  # AllowBSPinterfaceIntoDB:
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     Description: Allow connection from BSP Interface
-  #     IpProtocol: TCP
-  #     GroupId:
-  #       Fn::GetAtt:
-  #         - DBStack
-  #         - Outputs.SecurityGroupId
-  #     FromPort:
-  #       Fn::GetAtt:
-  #         - DBStack
-  #         - Outputs.DBInstancePort
-  #     ToPort:
-  #       Fn::GetAtt:
-  #         - DBStack
-  #         - Outputs.DBInstancePort
-  #     SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
+  AllowBSPinterfaceIntoDB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from BSP Interface
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.SecurityGroupId
+      FromPort:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.DBInstancePort
+      ToPort:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.DBInstancePort
+      SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
 
   # AllowBSPinterfaceIntoCache:
   #   Type: AWS::EC2::SecurityGroupIngress
@@ -1295,77 +1571,77 @@ Resources:
   #         - Outputs.ClusterPort
   #     SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
 
-  # BSPInterfaceTargetGroup:
-  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
-  #   Properties:
-  #     Matcher: 
-  #       HttpCode: 200,301,302
-  #     Port: 80
-  #     Protocol: HTTP
-  #     TargetType: instance
-  #     Targets:
-  #       - Id: !Ref BSPInterfaceInstance
-  #     VpcId:
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-VpcId"
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP,interface,target,group]]
+  BSPInterfaceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Matcher: 
+        HttpCode: 200,301,302
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      Targets:
+        - Id: !Ref BSPInterfaceInstance
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP,interface,target,group]]
 
-  # BSPInterfaceListenerRule:
-  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
-  #   Properties: 
-  #     Actions: 
-  #       - Type: forward
-  #         TargetGroupArn: !Ref BSPInterfaceTargetGroup
-  #     Conditions: 
-  #       - Field: host-header
-  #         Values: 
-  #           - !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
-  #     ListenerArn:
-  #       Fn::GetAtt:
-  #         - ELBStack
-  #         - Outputs.ApplicationListenerArn
-  #     Priority: 105
+  BSPInterfaceListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref BSPInterfaceTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
+      ListenerArn:
+        Fn::GetAtt:
+          - ELBStack
+          - Outputs.ApplicationListenerArn
+      Priority: 105
 
-  # BSPInterfaceInstancePublicDNSRecord:
-  #   Type: AWS::Route53::RecordSet
-  #   Properties:
-  #     HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
-  #     Name: !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
-  #     Type: A
-  #     AliasTarget:
-  #       DNSName:
-  #         Fn::GetAtt:
-  #           - ELBStack
-  #           - Outputs.DNSName
-  #       EvaluateTargetHealth: true
-  #       HostedZoneId:
-  #         Fn::GetAtt:
-  #           - ELBStack
-  #           - Outputs.CanonicalHostedZoneID
+  BSPInterfaceInstancePublicDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+      Name: !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::GetAtt:
+            - ELBStack
+            - Outputs.DNSName
+        EvaluateTargetHealth: true
+        HostedZoneId:
+          Fn::GetAtt:
+            - ELBStack
+            - Outputs.CanonicalHostedZoneID
 
-  # HighCPUBSPInterfaceAlarm:
-  #   Condition: IsProd
-  #   Type: AWS::CloudWatch::Alarm
-  #   Properties:
-  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, interface, high, cpu]]
-  #     MetricName: CPUUtilization
-  #     Namespace: AWS/EC2
-  #     ComparisonOperator: GreaterThanOrEqualToThreshold
-  #     EvaluationPeriods: 1
-  #     Period: 60
-  #     Statistic: Average
-  #     Threshold: 80
-  #     AlarmActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     OKActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     Dimensions:
-  #       - Name: InstanceId
-  #         Value: !Ref BSPInterfaceInstance
+  HighCPUBSPInterfaceAlarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, interface, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref BSPInterfaceInstance
 
   BackupStack:
     Condition: IsProd
