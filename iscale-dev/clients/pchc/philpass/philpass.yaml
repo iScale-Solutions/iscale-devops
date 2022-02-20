@@ -195,10 +195,12 @@ Mappings:
     Production:
       PPPGateway: 121.127.5.157
       PPPSubnetCIDR: 192.168.80.0/24
-      PPPResource1: 192.168.80.141
-      PPPResource2: 192.168.80.152
-      PPPResource3: 192.168.80.153
-      PPPResource4: 192.168.80.154
+      PPPResource1: 192.168.80.131
+      PPPResource2: 192.168.80.132
+      PPPResource3: 192.168.80.141
+      PPPResource4: 192.168.80.152
+      PPPResource5: 192.168.80.153
+      PPPResource6: 192.168.80.154
       PPPDNSServer1: 192.168.80.241
       PPPDNSServer2: 192.168.80.242
       PP3rdPartyGateway: 121.127.5.50
@@ -213,9 +215,11 @@ Mappings:
       PPPDRGateway: 121.127.17.175 #DR Gateway
       PPPDRSubnetCIDR: 192.168.90.0/24
       PPPDRResource1: 192.168.90.131
-      PPPDRResource2: 192.168.90.152
-      PPPDRResource3: 192.168.90.153
-      PPPDRResource4: 192.168.90.154
+      PPPDRResource2: 192.168.90.141
+      PPPDRResource3: 192.168.90.142
+      PPPDRResource4: 192.168.90.152
+      PPPDRResource5: 192.168.90.153
+      PPPDRResource6: 192.168.90.154
     UAT:
       PPPGateway: 121.127.5.157 #Same as Prod
       PPPSubnetCIDR: 192.168.222.0/24
@@ -534,6 +538,46 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PrivateRouteTable2'
       DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  PPPResource5AZ1Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No IP5 except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  PPPResource5AZ2Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No IP5 except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ2ENI
+
+  PPPResource6AZ1Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No IP6 except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
+      NetworkInterfaceId: !Ref StrongSwanAZ1ENI
+
+  PPPResource6AZ2Route:
+    Type: AWS::EC2::Route
+    Condition: IsBSPProd #No IP6 except in prod
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
       NetworkInterfaceId: !Ref StrongSwanAZ2ENI
 
   PPPDRResource1AZ1Route:
@@ -1067,7 +1111,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile: !Ref StrongSwanInstanceProfile
-      # DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
+      DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref StrongswanAMI
       InstanceType: t3.nano
@@ -1182,7 +1226,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile: !Ref StrongSwanInstanceProfile
-      # DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
+      DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref StrongswanAMI
       InstanceType: t3.nano
@@ -1667,6 +1711,74 @@ Resources:
         DailyExpiration: 10 #5 days requirement only
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
         MonthlyExpiration: 3650 # 10 years
+
+###
+# Connectivity Analyser
+###
+
+  StrongSwanAZ1CanReachInternet:
+    Type: AWS::EC2::NetworkInsightsPath
+    Condition: IsStrongswanActive
+    Properties:
+      Source: !Ref StrongSwanInstanceAZ1
+      Destination:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-InternetGateway'
+      Protocol: tcp
+      Tags:
+        - Key: Name
+          Value: StrongSwan AZ1 to Internet
+
+  StrongSwanAZ2CanReachInternet:
+    Type: AWS::EC2::NetworkInsightsPath
+    Condition: IsStrongswanActive
+    Properties:
+      Source: !Ref StrongSwanInstanceAZ2
+      Destination:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-InternetGateway'
+      Protocol: tcp
+      Tags:
+        - Key: Name
+          Value: StrongSwan AZ2 to Internet
+
+  BSPInterfaceCanReachInternet:
+    Type: AWS::EC2::NetworkInsightsPath
+    Condition: IsStrongswanActive
+    Properties:
+      Source: !Ref BSPInterfaceInstance
+      Destination:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-InternetGateway'
+      Protocol: tcp
+      Tags:
+        - Key: Name
+          Value: BSP Interface to Internet
+
+  BSPInterfaceCanReachStrongSwanAZ1:
+    Type: AWS::EC2::NetworkInsightsPath
+    Condition: IsStrongswanActive
+    Properties:
+      Source: !Ref BSPInterfaceInstance
+      Destination: !Ref StrongSwanAZ1ENI
+      DestinationPort: 443
+      Protocol: tcp
+      Tags:
+        - Key: Name
+          Value: BSP Interface to StrongSwan AZ1
+
+  BSPInterfaceCanReachStrongSwanAZ2:
+    Type: AWS::EC2::NetworkInsightsPath
+    Condition: IsStrongswanActive
+    Properties:
+      Source: !Ref BSPInterfaceInstance
+      Destination: !Ref StrongSwanAZ1ENI
+      DestinationPort: 443
+      Protocol: tcp
+      Tags:
+        - Key: Name
+          Value: BSP Interface to StrongSwan AZ2
+
 
 #   Dashboard: #Hardcoded for now
 #     Type: AWS::CloudWatch::Dashboard
