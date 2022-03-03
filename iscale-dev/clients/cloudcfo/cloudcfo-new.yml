@@ -1,0 +1,776 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudCFO App Resources
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - LoadBalancerStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerPriority
+          - LoadBalancerHostName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
+      LoadBalancerPriority:
+        default: Load Balancer Rule Priority
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: app
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: cloudcfo
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production #Prod
+      - Staging #Pre-production
+      - Development #Regular day to day commit / deplay
+      - Test #WFH Setup with a simple S3 bucket and an access key for it
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: cloudcfo.co
+    MinLength: 1
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0528a5175983e7f28 #Default Amazon Linux 2
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: app
+    MaxLength: 12
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 50000
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: cloudcfo-stg-uw2-alb
+    MinLength: 1
+  MaintenanceWebsiteCertificate:
+    Description: Maintenance site certificate (For Prod Only)
+    Type: String
+    Default: arn:aws:acm:us-east-1:880804344419:certificate/61fe97b2-2645-4112-825d-51b69e5c8f58
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: cloudcfo-stg-uw2-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack.
+    Type: String
+    Default: cloudcfo-prd-uw2-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+      
+Resources:
+
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: IsNotTest
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: !If [IsDev, 20, 35] #Gb
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        EnableCPUCreditAlarm: !If [IsProd, true, false]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: mysql
+        EngineVersion: 8.0.23
+        Family: mysql8.0
+        InstanceType: !If [IsProd, db.t3.medium, db.t3.micro]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
+  DeployStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: IsNotTest
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  CacheStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        EncryptInTransit: TRUE
+        NodeType: cache.t3.micro
+        NumCacheClusters: 1
+        OrgName: !Ref OrgName
+        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: TRUE
+
+  AppServerStack:
+    DependsOn:
+      - DBStack
+      - DeployStack
+    Type: AWS::CloudFormation::Stack
+    Condition: IsNotTest
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-node.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 8080
+        InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 0.6]
+        InstanceType: t3.small
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: !Ref LoadBalancerPriority
+        LoadBalancerStackName: !Ref LoadBalancerStackName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+
+  BackupStack:
+    Condition: IsNotTest
+    DependsOn:
+      - DBStack
+      - AppServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstanceARN
+            - Fn::GetAtt:
+              - AppServerStack
+              - Outputs.AppServerEFSArn
+
+  SchedulerStack:
+    DependsOn:
+      - DBStack
+      - AppServerStack
+    Condition: IsDevOrStaging
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployASGDesiredSize: 2
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+  ####
+  #  Maintenance section
+  ####
+  MaintenanceBucket:
+    Condition: IsProd
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        ErrorDocument: index.html
+        IndexDocument: index.html
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], maintenance]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  MaintenanceBucketPolicy:
+    Condition: IsProd
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MaintenanceBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForMaintenance
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Join ['/', [!GetAtt MaintenanceBucket.Arn, '*' ]]
+
+####
+# CloudFront Section
+####
+
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Condition: IsProd
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: CloudFront Access to the S3 static origin
+
+  MaintenanceWebsiteCloudFront:
+    Type: AWS::CloudFront::Distribution
+    Condition: IsProd
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !GetAtt [MaintenanceBucket, DomainName]
+          Id: S3MaintenanceBucketOrigin
+          S3OriginConfig:
+            OriginAccessIdentity: !Join ['', ['origin-access-identity/cloudfront/', !Ref CloudFrontOriginAccessIdentity]]
+        Enabled: true
+        Comment: !Join [' ', [ 'Maintenance page for', !Ref ClientDomainName]]
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        Aliases:
+        - !Join ['.', ['maintenance', !Ref ClientDomainName]]
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          TargetOriginId: S3MaintenanceBucketOrigin
+          ForwardedValues:
+            QueryString: false
+          Compress: true
+          ViewerProtocolPolicy: redirect-to-https
+          MinTTL: 3600
+          MaxTTL: 86400
+        PriceClass: PriceClass_All
+        ViewerCertificate:
+          SslSupportMethod: sni-only
+          AcmCertificateArn: !Ref MaintenanceWebsiteCertificate
+
+  MaintenanceCNAMERecord:
+    Type: AWS::Route53::RecordSet
+    Condition: IsProd
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
+      Name: !Join ['.', ['maintenance', !Ref ClientDomainName]]
+      Type: CNAME
+      TTL: 300
+      Comment: Maintenance Site
+      ResourceRecords:
+        - Fn::GetAtt:
+          - MaintenanceWebsiteCloudFront
+          - DomainName
+
+###
+# Periodic Cron Job
+###
+
+  CronJobAPIConnection:
+    Type: AWS::Events::Connection
+    Properties:
+      AuthorizationType: API_KEY
+      Description: Connection to Cron Job API
+      AuthParameters:
+        ApiKeyAuthParameters:
+          ApiKeyName: app-id
+          ApiKeyValue: EVdqi7Nv2REPNB248i1Y2NZziNNWShLUPyDggg1gkKF1
+
+  CronAboutToDueApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination to send events to cron job
+      #Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name ]]      
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskAboutToDue']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskAboutToDue']]
+
+  CronGenerateRecurringInstanceApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination for generateRecurringInstance
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/generateRecurringInstance']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/generateRecurringInstance']]
+
+  CronCleanTrashApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination for cleanTrash
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/cleanTrash']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/cleanTrash']]
+
+  CronExpiredActivationApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination for expiredActivation
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/expiredActivation']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/expiredActivation']]
+
+  CronTaskTeamApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination for taskCompletedNotificationTeam
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskCompletedNotificationTeam']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskCompletedNotificationTeam']]
+
+  CronTaskFollowersApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination for taskCompletedNotificationFollowed
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskCompletedNotificationFollowed']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskCompletedNotificationFollowed']]
+
+  CronMissedDeadlineApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination for taskMissedDeadline
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskMissedDeadline']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskMissedDeadline']]
+
+  CronMissedDeadlineFollowedApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination for taskFollowedMissedDeadline
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskFollowedMissedDeadline']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskFollowedMissedDeadline']]
+
+  CronTeamMissedDeadlineApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination for teamMemberMissedDeadline
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/teamMemberMissedDeadline']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/teamMemberMissedDeadline']]
+
+  CronEsUsersTimelogApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination Elastic/Open Search
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/ES_usersTimelog']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/ES_usersTimelog']]
+
+  CronEsTaskReportApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+      Description: API Destination Elastic/Open Search
+      HttpMethod: POST
+      InvocationEndpoint: !If
+        - IsNotProd
+        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/ES_taskReport']]
+        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/ES_taskReport']]
+
+  CronJobIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: events.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: InvokeApiDestination
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: events:InvokeApiDestination
+                Resource: 
+                  - !GetAtt CronAboutToDueApiDestination.Arn
+  
+  CronAboutToDueEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for aboutToDue
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      # ScheduleExpression: 'cron(0 */5 * * ? *)' #every 5 hours
+      ScheduleExpression: 'cron(0 18 * * ? *)' # daily 6PM UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronAboutToDueApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, aboutToDue]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronGenerateRecurringInstanceEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for generateRecurringInstance
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(15 18 * * ? *)' # daily 6:15PM UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronGenerateRecurringInstanceApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, generateRecurringInstance]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronCleanTrashEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for cleanTrash
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(30 18 * * ? *)' # daily 6:30PM UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronCleanTrashApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cleanTrash]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronExpiredActivationEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for ExpiredActivation
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(45 18 * * ? *)' # daily 6:45PM UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronExpiredActivationApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, expiredActivation]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronTaskTeamEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for TaskTeam
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(0 19 * * ? *)' # daily 7:00PM UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronTaskTeamApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, taskTeam]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronTaskFollowersEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for TaskFollowers
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(15 19 * * ? *)' # daily 7:15PM UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronTaskFollowersApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, taskFollowers]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronMissedDeadlineEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for MissedDeadline
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(30 19 * * ? *)' # daily 7:30PM UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronMissedDeadlineApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, missedDeadline]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronMissedDeadlineFollowedEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for MissedDeadline
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(30 19 * * ? *)' # daily 7:30PM UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronMissedDeadlineFollowedApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, missedDeadlineFollowed]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronTeamMissedDeadlineEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for TeamMissedDeadline
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(45 19 * * ? *)' # daily 7:45PM UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronTeamMissedDeadlineApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, teamMissedDeadline]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronEsUsersTimelogEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for Elastic/Open Search UsersTimelog
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(30 17 * * ? *)' # daily 9:30 UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronEsUsersTimelogApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, esUsersTimelog]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+
+  CronEsTaskReportEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Cron job for Elastic/Open Search TaskReport
+      RoleArn: !GetAtt CronJobIamRole.Arn
+      ScheduleExpression: 'cron(45 17 * * ? *)' # daily 9:45 UTC
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt CronEsTaskReportApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, esTaskReport]]
+          RoleArn: !GetAtt CronJobIamRole.Arn
+          
+###
+# Dev S3 bucket and associated account
+###
+
+  TestBucket:
+    Type: AWS::S3::Bucket
+    Condition: IsTest
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], test-bucket]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  TestBucketUser:
+    Condition: IsTest
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, test-bucket-access]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Join ['/', [!GetAtt [TestBucket, Arn], '*']]
+                  - !GetAtt [TestBucket, Arn]
+  
+  TestBucketUserKey:
+    Condition: IsTest
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName:
+        Ref: TestBucketUser
+
+Outputs:
+
+  TestBucket:
+    Condition: IsTest
+    Description: Test Bucket
+    Value: !Ref TestBucket
+  
+  TestBucketUserAccessKeyId:
+    Condition: IsTest
+    Description: Access Key Id for the S3 bucket
+    Value: !Ref TestBucketUserKey
+  
+  StaticWebsiteUserAccessKeySecret:
+    Condition: IsTest
+    Description: Secret Key for the S3 bucket
+    Value: !GetAtt [TestBucketUserKey, SecretAccessKey]
+
+#   DeploymentUserGroup:
+#     Description: Add the BitBucket user into this group
+#     Value: 
+#       Fn::GetAtt:
+#         - DeployStack
+#         - Outputs.DeploymentUserGroup
+
