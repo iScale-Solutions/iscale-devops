@@ -1,0 +1,516 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Provisions an OpenSearch instance
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: OpenSearch Configuration
+        Parameters:
+          - Version
+          - InstanceType
+          - VolumeType
+          - VolumeSize
+          - AutomatedSnapshotStartHour
+          - EncryptAtRestEnabled
+          - RestActionMultiAllowExplicitIndexEnabled
+          - LogPublishingIndexEnabled
+          - LogPublishingSearchEnabled
+          - LogPublishingApplicationEnabled
+      - Label:
+          default: CloudWatch Configuration
+        Parameters:
+          - LogRetentionPeriod
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      Version:
+        default: OpenSearch Version
+      InstanceType:
+        default: OpenSearch Instance Type
+      VolumeType:
+        default: Volume Type
+      VolumeSize:
+        default: Volume Size
+      RestActionMultiAllowExplicitIndexEnabled:
+        default: Enable Rest Action Multi Allow Explicti Index
+      AutomatedSnapshotStartHour:
+        default: Automated Snapshot Start Hour
+      EncryptAtRestEnabled:
+        default: Enable Encrypt at Rest
+      LogPublishingIndexEnabled:
+        default: Enable Index Log Publishing
+      LogPublishingSearchEnabled:
+        default: Enable Search Log Publishing
+      LogPublishingApplicationEnabled:
+        default: Enable Application Log Publishing
+      LogRetentionPeriod:
+        default: Log Retention Period
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Stack Name
+
+Parameters: 
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: opensearch
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+  Version:
+    Description: The OpenSearch version
+    Type: String
+    Default: 6.7
+  InstanceType:
+    Description: Instance type
+    Type: String
+    Default: t3.small.search
+  VolumeType:
+    Description: Values must be [gp2, io1, standard]
+    Type: String
+    Default: gp2
+    AllowedValues:
+      - gp2
+      - io1
+      - standard
+  VolumeSize:
+    Description: OpenSearch Volume Size
+    Type: Number
+    Default: 10
+  AutomatedSnapshotStartHour:
+    Description: The hour in UTC during which the service takes an automated daily snapshot of the indices in the Amazon ES domain.
+    Type: Number
+    Default: 0
+  EncryptAtRestEnabled:
+    Description: Enables encrypt data at rest.
+    Type: String
+    Default: TRUE
+    AllowedValues:
+      - TRUE
+      - FALSE
+  RestActionMultiAllowExplicitIndexEnabled:
+    Description: Specifies whether explicit references to indices are allowed inside the body of HTTP requests. Setting this property to false prevents users from bypassing access control for subresources.
+    Type: String
+    Default: TRUE
+    AllowedValues:
+      - TRUE
+      - FALSE
+  LogPublishingIndexEnabled:
+    Description: Enables publishing of the OpenSearch index logs.
+    Type: String
+    Default: TRUE
+    AllowedValues:
+      - TRUE
+      - FALSE
+  LogPublishingSearchEnabled:
+    Description: Enables publishing of the OpenSearch search logs.
+    Type: String
+    Default: TRUE
+    AllowedValues:
+      - TRUE
+      - FALSE
+  LogPublishingApplicationEnabled:
+    Description: Enables publishing of the OpenSearch application logs.
+    Type: String
+    Default: TRUE
+    AllowedValues:
+      - TRUE
+      - FALSE
+  LogRetentionPeriod:
+    Description: The number of days to retain the log events in the specified log group
+    Type: Number
+    Default: 365
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+  UseFriendlyNames:
+    Description: Set to TRUE to have nice object names
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: TRUE
+
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsEncrypted: !Equals [!Ref EncryptAtRestEnabled, TRUE]
+  IsLogPublishingIndexEnabled: !Equals [!Ref LogPublishingIndexEnabled, TRUE]
+  IsLogPublishingSearchEnabled: !Equals [!Ref LogPublishingSearchEnabled, TRUE]
+  IsLogPublishingApplicationEnabled: !Equals [!Ref LogPublishingApplicationEnabled, TRUE]
+  UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
+
+Resources: 
+
+####
+# OpenSearch Section
+####
+
+  # AwsLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Join ['-',[!Join ['',['/', !Ref OrgName]], !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], index-logs]]
+  
+  # LambdaLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Sub '/aws/lambda/${logGroupPolicyFunction}'
+  
+  # LambdaExecutionRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: 2012-10-17
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service:
+  #               - lambda.amazonaws.com
+  #           Action:
+  #             - sts:AssumeRole
+  #     Path: /
+  #     Policies:
+  #       - PolicyName: root1
+  #         PolicyDocument:
+  #           Version: 2012-10-17
+  #           Statement:
+  #             - Effect: Allow
+  #               Action:
+  #                 - 'logs:CreateLogStream'
+  #                 - 'logs:PutLogEvents'
+  #               Resource: !Sub >-
+  #                 arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${logGroupPolicyFunction}:log-stream:*
+  #       - PolicyName: root2
+  #         PolicyDocument:
+  #           Version: 2012-10-17
+  #           Statement:
+  #             - Effect: Allow
+  #               Action:
+  #                 - 'logs:CreateLogGroup'
+  #               Resource:
+  #                 - !Sub >-
+  #                   arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${logGroupPolicyFunction}
+  #                 - !Sub >-
+  #                   arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AwsLogGroup}
+  #             - Effect: Allow
+  #               Action:
+  #                 - 'logs:PutResourcePolicy'
+  #                 - 'logs:DeleteResourcePolicy'
+  #               Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+  
+  # logGroupPolicyFunction:
+  #   DependsOn: LambdaLogGroup
+  #   Type: AWS::Lambda::Function
+  #   Properties:
+  #     # FunctionName: !Ref LambdaFunctionName
+  #     Code:
+  #       ZipFile: >
+  #         import urllib3
+
+  #         import json
+
+  #         import boto3
+
+  #         http = urllib3.PoolManager()
+
+  #         SUCCESS = "SUCCESS"
+
+  #         FAILED = "FAILED"
+
+  #         def send(event, context, responseStatus, responseData,
+  #         physicalResourceId=None, noEcho=False):
+  #             responseUrl = event['ResponseURL']
+  #             print(responseUrl)
+  #             responseBody = {}
+  #             responseBody['Status'] = responseStatus
+  #             responseBody['Reason'] = 'See the details in CloudWatch Log Stream: ' + context.log_stream_name
+  #             responseBody['PhysicalResourceId'] = physicalResourceId or context.log_stream_name
+  #             responseBody['StackId'] = event['StackId']
+  #             responseBody['RequestId'] = event['RequestId']
+  #             responseBody['LogicalResourceId'] = event['LogicalResourceId']
+  #             responseBody['NoEcho'] = noEcho
+  #             responseBody['Data'] = responseData
+  #             json_responseBody = json.dumps(responseBody)
+  #             print("Response body:\n" + json_responseBody)
+  #             headers = {
+  #                 'content-type' : '',
+  #                 'content-length' : str(len(json_responseBody))
+  #             }
+  #             try:
+  #                 response = http.request('PUT',responseUrl,body=json_responseBody.encode('utf-8'),headers=headers)
+  #                 print("Status code: " + response.reason)
+  #             except Exception as e:
+  #                 print("send(..) failed executing requests.put(..): " + str(e))
+  #         def handler(event, context):
+  #             logsgroup_policy_name=event['ResourceProperties']['CWLOGS_NAME']
+  #             cw_log_group_arn=event['ResourceProperties']['CWLOG_ARN']
+  #             cwlogs = boto3.client('logs')
+  #             loggroup_policy={
+  #                 "Version": "2012-10-17",
+  #                 "Statement": [{
+  #                 "Sid": "",
+  #                 "Effect": "Allow",
+  #                 "Principal": { "Service": "es.amazonaws.com"},
+  #                 "Action":[
+  #                 "logs:PutLogEvents",
+  #                 " logs:PutLogEventsBatch",
+  #                 "logs:CreateLogStream"
+  #                     ],
+  #                 'Resource': f'{cw_log_group_arn}'
+  #                 }]
+  #                 }
+  #             loggroup_policy = json.dumps(loggroup_policy)
+  #             if(event['RequestType'] == 'Delete'):
+  #                 print("Request Type:",event['RequestType'])
+  #                 cwlogs.delete_resource_policy(
+  #                 policyName=logsgroup_policy_name
+  #                )
+  #                 responseData={}
+  #                 send(event, context, SUCCESS, responseData)
+  #             elif(event['RequestType'] == 'Create'):
+  #                 try:
+  #                     cwlogs.put_resource_policy(
+  #                     policyName = logsgroup_policy_name,
+  #                     policyDocument = loggroup_policy
+  #                      )
+  #                     responseData={}
+  #                     print("Sending response to custom resource")
+  #                     send(event, context, SUCCESS, responseData)
+  #                 except Exception as  e:
+  #                     print('Failed to process:', e)
+  #                     send(event, context, FAILED, responseData)
+  #             elif(event['RequestType'] == 'Update'):
+  #                 try:
+  #                     responseData={}
+  #                     print("Update is not supported on this resource")
+  #                     send(event, context, SUCCESS, responseData)
+  #                 except Exception as  e:
+  #                     print('Failed to process:', e)
+  #                     send(event, context, FAILED, responseData)
+  #     Handler: index.handler
+  #     Role: !GetAtt 
+  #       - LambdaExecutionRole
+  #       - Arn
+  #     Runtime: python3.6
+  # logGroupPolicycustomresource:
+  #   Type: 'Custom::LogGroupPolicy'
+  #   Properties:
+  #     ServiceToken: !GetAtt 
+  #       - logGroupPolicyFunction
+  #       - Arn
+  #     # CWLOGS_NAME: !Ref LogGroupName
+  #     CWLOGS_NAME: !Ref AwsLogGroup
+  #     CWLOG_ARN: !GetAtt 
+  #       - AwsLogGroup
+  #       - Arn
+
+  OpenSearchDomain:
+    Type: AWS::OpenSearchService::Domain
+    Properties:
+      DomainName: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - !Ref 'AWS::NoValue'
+      ClusterConfig:
+        InstanceCount: 1
+        InstanceType: !Ref InstanceType
+      EBSOptions:
+        EBSEnabled: true
+        VolumeSize: !Ref VolumeSize
+        VolumeType: !Ref VolumeType
+      EncryptionAtRestOptions:
+        Enabled: !Ref EncryptAtRestEnabled
+      SnapshotOptions:
+        AutomatedSnapshotStartHour: !Ref AutomatedSnapshotStartHour
+      AccessPolicies:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              # AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+              AWS: '*'
+            Action:
+              - es:*
+            Resource: '*'
+          # - Effect: Allow
+          #   Principal:
+          #     AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+          #   Action:
+          #     - logs:CreateLogGroup
+          #     - logs:CreateLogStream
+          #     - logs:DescribeLogStreams
+          #     - logs:GetLogEvents
+          #     - logs:FilterLogEvents
+          #     - logs:PutLogEvents
+          #   Resource: '*'
+          # - Effect: Allow
+          #   Action:
+          #     - logs:PutResourcePolicy
+          #     - logs:DeleteResourcePolicy
+          #   Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+      AdvancedOptions:
+        rest.action.multi.allow_explicit_index: !Ref RestActionMultiAllowExplicitIndexEnabled
+      # LogPublishingOptions:
+      #   INDEX_SLOW_LOGS:
+      #     CloudWatchLogsLogGroupArn: !GetAtt IndexLogLogGroup.Arn
+      #     Enabled: !Ref LogPublishingIndexEnabled
+      #   SEARCH_SLOW_LOGS:
+      #     CloudWatchLogsLogGroupArn: !GetAtt SearchLogLogGroup.Arn
+      #     Enabled: !Ref LogPublishingSearchEnabled
+      #   ES_APPLICATION_LOGS:
+      #     CloudWatchLogsLogGroupArn: !GetAtt ApplicationLogLogGroup.Arn
+      #     Enabled: !Ref LogPublishingApplicationEnabled
+      VPCOptions:
+        SubnetIds:
+          - Fn::ImportValue:
+             !Sub '${NetworkStackName}-InternalSubnetId1'
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+####
+# VPC Section
+####
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !If
+        - UseFriendlyNames
+        - !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], opensearch]]
+        - !Ref 'AWS::NoValue'
+      GroupDescription: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], opensearch]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+
+####
+# CloudWatch Section
+####
+
+  # IndexLog Log Group
+  IndexLogLogGroup:
+    Condition: IsLogPublishingIndexEnabled
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionPeriod
+      LogGroupName: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Join ['',['/', !Ref OrgName]], !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, index-logs]]
+        - !Ref 'AWS::NoValue'
+
+  # SearchLog Log Group
+  SearchLogLogGroup:
+    Condition: IsLogPublishingSearchEnabled
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionPeriod
+      LogGroupName: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Join ['',['/', !Ref OrgName]], !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, search-logs]]
+        - !Ref 'AWS::NoValue'
+
+  # ApplicationLog Log Group
+  ApplicationLogLogGroup:
+    Condition: IsLogPublishingApplicationEnabled
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionPeriod
+      LogGroupName: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Join ['',['/', !Ref OrgName]], !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, application-logs]]
+        - !Ref 'AWS::NoValue'
+
+  # CPUUtilizationCloudWatchAlarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], db-cpu-utilization]]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/RDS
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 300
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue: 
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue: 
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: DBInstanceIdentifier
+  #         Value: !Ref DefaultDbInstance
+
+  # CPUCreditBalanceCloudWatchAlarm:
+  #   Type: AWS::CloudWatch::Alarm
+  #   Condition: IsProd
+  #   Properties:
+  #     AlarmName: !Join ['-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], db-cpu-credit-balance]]
+  #     MetricName: CPUCreditBalance
+  #     Namespace: AWS/RDS
+  #     ComparisonOperator: LessThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 300
+  #     Statistic: Minimum
+  #     Threshold: 24
+  #     AlarmActions:
+  #       - Fn::ImportValue: 
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue: 
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: DBInstanceIdentifier
+  #         Value: !Ref DefaultDbInstance
+
+Outputs:
+
+  SecurityGroupId:
+    Description: The instance security group id
+    Value: !GetAtt SecurityGroup.GroupId
+    Export: 
+      Name: !Sub ${AWS::StackName}-SecurityGroupId
