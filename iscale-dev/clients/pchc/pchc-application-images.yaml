@@ -146,7 +146,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.5
+      Version: 1.0.7
       Description: Installs NginX
       ChangeDescription: Initial version
       Data: |
@@ -160,7 +160,7 @@ Resources:
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - amazon-linux-extras install nginx1.12
+                    - sudo yum install -y nginx
               - name: CreateNginxCloudWatchConfig
                 action: CreateFile
                 inputs:
@@ -198,7 +198,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.0
+      Version: 1.0.1
       Description: Installs NodeJS
       ChangeDescription: Initial version
       Data: |
@@ -212,8 +212,9 @@ Resources:
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - yum install -y gcc-c++ make
-                    - yum install -y nodejs
+                    - sudo yum install -y gcc-c++ make
+                    - curl -sL https://rpm.nodesource.com/setup_16.x | sudo bash -
+                    - sudo yum install -y nodejs
 
   PesonetLogComponent:
     Type: AWS::ImageBuilder::Component
@@ -261,6 +262,53 @@ Resources:
                 inputs:
                   commands:
                     - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/pesonet-cloudwatch.json
+
+  PDDTSLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PDDTS_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Setup PDDTS logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: PDDTSLogs - InlineData
+        description: Setup PDDTS logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/pddts-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/pddts-main/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/pddts-main/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/pddts-main/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/pddts-main/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/pddts-cloudwatch.json
 
   PhilpassLogComponent:
     Type: AWS::ImageBuilder::Component
@@ -348,7 +396,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'paygate']]
-      Version: 1.0.13
+      Version: 1.0.16
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'paygate']]
@@ -371,7 +419,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pddts']]
-      Version: 1.0.9
+      Version: 1.0.13
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pddts']]
@@ -381,6 +429,7 @@ Resources:
         - ComponentArn: !Ref NodeJSComponent
         - ComponentArn: !Ref RoRComponent
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+        - ComponentArn: !Ref PDDTSLogComponent
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
@@ -394,7 +443,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pesonet']]
-      Version: 1.0.9
+      Version: 1.0.12
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pesonet']]
@@ -418,7 +467,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'philpass']]
-      Version: 1.0.1
+      Version: 1.0.4
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'philpass']]
