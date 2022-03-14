@@ -19,6 +19,7 @@ Metadata:
           - UseOwnDatabase
           - LoadBalancerStackName
           - UseOwnLoadBalancer
+          - UseSharedEFS
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -26,6 +27,11 @@ Metadata:
           - LoadBalancerCertificateArn
           - LoadBalancerPriority
           - LoadBalancerHostName
+      - Label:
+          default: EFS Configuration
+        Parameters:
+          - SharedEFSID
+          - SharedEFSSecurityGroup
       - Label:
           default: DB Instance Configuration
         Parameters:
@@ -82,6 +88,10 @@ Metadata:
         default: Instance Key Name
       InstanceAMI:
         default: Instance AMI
+      SharedEFSID:
+        default: Shared EFS ID (if using shared EFS, else leave blank)
+      SharedEFSSecurityGroup:
+        default: Shared EFS Security Group (if using shared EFS, else leave blank)
       StartScheduleExpression:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
@@ -112,6 +122,7 @@ Parameters:
       - Staging
       - Development
       - Test
+      - PreProd
   AllowDatabaseBlur:
     Description: Set to true to allow blur script to be enabled
     Type: String
@@ -197,6 +208,14 @@ Parameters:
     Type: String
     Default: iscale-dev-dev-uw2-network
     MinLength: 1
+  SharedEFSID:
+    Description: The name of the shared EFS (if using Shared EFS, else leave blank)
+    Type: String
+    Default: ''
+  SharedEFSSecurityGroup:
+    Description: The name of the shared EFS Security Group (if using Shared EFS, else leave blank)
+    Type: String
+    Default: ''
   SNSStackName:
     Description: the name of the SNS stack.
     Type: String
@@ -224,6 +243,13 @@ Parameters:
     AllowedValues:
       - true
       - false
+  UseSharedEFS:
+    Description: Do you want to use an existing, shared EFS ?
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
 
 Mappings:
   Fn::Transform:
@@ -245,6 +271,7 @@ Conditions:
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
   HasOwnDatabase: !Equals [!Ref UseOwnDatabase, true]
   HasOwnLoadBalancer: !Equals [!Ref UseOwnLoadBalancer, true]
+  HasSharedEFS: !Equals [!Ref UseSharedEFS, true]
   HasStartScheduleExpression: !Not [!Equals [!Ref StartScheduleExpression, '']]
   HasStopScheduleExpression: !Not [!Equals [!Ref StopScheduleExpression, '']]
   HasScheduleExpression: !Or [!Condition HasStartScheduleExpression, !Condition HasStopScheduleExpression]
@@ -266,6 +293,7 @@ Resources:
 
   DBStack:
     Condition: HasOwnDatabase
+    DeletionPolicy: Retain
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -337,6 +365,8 @@ Resources:
             - Outputs.SecurityGroupId
           - Fn::ImportValue:
               !Sub '${DatabaseStackName}-SecurityGroupId'
+        ExternalEFSID: !If [HasSharedEFS, !Ref SharedEFSID, !Ref 'AWS::NoValue']
+        ExternalEFSSecurityGroup: !If [HasSharedEFS, !Ref SharedEFSSecurityGroup, !Ref 'AWS::NoValue']
         LoadBalancerPriority: !Ref LoadBalancerPriority
         LoadBalancerStackName: !If [HasOwnLoadBalancer, !Select [ 1, !Split [ '/', !Ref ELBStack]], !Ref LoadBalancerStackName]
         InstanceAMI: !Ref InstanceAMI
@@ -371,9 +401,13 @@ Resources:
               - Fn::GetAtt:
                 - AppServerStack
                 - Outputs.AppServerEFSArn
-          - Fn::GetAtt:
-              - AppServerStack
-              - Outputs.AppServerEFSArn
+          - !Join
+            - ',' 
+            - - Fn::ImportValue:
+                  !Sub '${DatabaseStackName}-DBClusterARN'
+              - Fn::GetAtt:
+                - AppServerStack
+                - Outputs.AppServerEFSArn
 
   SchedulerStack:
     Condition: HasScheduleExpression
