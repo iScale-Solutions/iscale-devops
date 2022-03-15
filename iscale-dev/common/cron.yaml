@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: EventBridge based cron (calling a URL)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Cron Configuration
+        Parameters:
+          - ApiKeyName
+          - ApiKeyValue
+          - Description
+          - Endpoint
+          - Schedule
+          
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      ApiKeyName:
+        default: API Key name
+      ApiKeyValue:
+        default: API Key Value (Secret)
+      Description:
+        default: Description
+      Endpoint:
+        default: Destination Endpoint
+      Schedule:
+        default: Cron Schedule Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ApiKeyName:
+    Description: The name of the API Key Name
+    Type: String
+    Default: app-id
+  ApiKeyValue:
+    Description: Secret value of the API Key name parameter
+    Type: String
+    NoEcho: true
+  Description:
+    Description: Description
+    Type: String
+    Default: Cron Job
+  Endpoint:
+    Description: Destination endpoint (URL format)
+    Type: String
+    MinLength: 1
+  Schedule:
+    Description: Schedule of the cron (cron format)
+    Type: String
+    MinLength: 1
+  
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  ApiConnection:
+    Type: AWS::Events::Connection
+    Condition: IsNotProd
+    Properties:
+      AuthorizationType: API_KEY
+      Description: !Join [ '', ['Connection to "', !Ref Description, '" cron job API']]
+      AuthParameters:
+        ApiKeyAuthParameters:
+          ApiKeyName: !Ref ApiKeyName
+          ApiKeyValue: !Ref ApiKeyValue
+  
+  ApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn: !GetAtt ApiConnection.Arn
+      Description: !Join [ '', ['API Destination for "', !Ref Description, '"']]
+      HttpMethod: POST
+      InvocationEndpoint: !Ref Endpoint
+  
+  IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowAssumeRole
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: events.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: InvokeApiDestination
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: events:InvokeApiDestination
+                Resource:
+                  - !GetAtt ApiDestination.Arn
+
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Join [ '', ['Event Rule for "', !Ref Description, '"']]
+      RoleArn: !GetAtt IamRole.Arn
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ApiDestination.Arn
+          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          RoleArn: !GetAtt IamRole.Arn

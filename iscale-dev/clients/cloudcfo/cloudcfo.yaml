@@ -32,6 +32,7 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
+          - CronApiKeyValue
 
     ParameterLabels:
       Name:
@@ -40,6 +41,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      CronApiKeyValue:
+        default: API Secret for the cron access key
       InstanceAMI:
         default: Instance AMI ID
       InstanceKeyName:
@@ -90,6 +93,10 @@ Parameters:
     AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
     Default: cloudcfo.co
     MinLength: 1
+  CronApiKeyValue:
+    Description: Secret key value for cron process
+    Type: String
+    Default: ''
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
@@ -435,342 +442,224 @@ Resources:
 # Periodic Cron Job
 ###
 
-  CronJobAPIConnection:
-    Type: AWS::Events::Connection
-    Condition: IsNotProd
+  CronAboutToDueStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      AuthorizationType: API_KEY
-      Description: Connection to Cron Job API
-      AuthParameters:
-        ApiKeyAuthParameters:
-          ApiKeyName: app-id
-          ApiKeyValue: EVdqi7Nv2REPNB248i1Y2NZziNNWShLUPyDggg1gkKF1
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/cron.yaml
+      Parameters:
+        Name: abttodue
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ApiKeyValue: !Ref CronApiKeyValue
+        Description: About To Due
+        Endpoint: !If
+            - IsNotProd
+            - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskAboutToDue']]
+            - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskAboutToDue']]
+        Schedule: 'cron(0 18 * * ? *)' # daily 6PM UTC
 
-  CronAboutToDueApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
+  CronGenerateRecurringInstanceStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination to send events to cron job
-      #Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name ]]      
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskAboutToDue']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskAboutToDue']]
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/cron.yaml
+      Parameters:
+        Name: genrecis
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ApiKeyValue: !Ref CronApiKeyValue
+        Description: Generate Recurring Instance
+        Endpoint: !If
+          - IsNotProd
+          - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/generateRecurringInstance']]
+          - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/generateRecurringInstance']]
+        Schedule: 'cron(15 18 * * ? *)' # daily 6:15PM UTC
 
-  CronGenerateRecurringInstanceApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
+  CronCleanTrashStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination for generateRecurringInstance
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/generateRecurringInstance']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/generateRecurringInstance']]
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/cron.yaml
+      Parameters:
+        Name: cltrash
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ApiKeyValue: !Ref CronApiKeyValue
+        Description: Clean Trash
+        Endpoint: !If
+          - IsNotProd
+          - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/cleanTrash']]
+          - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/cleanTrash']]
+        Schedule: 'cron(30 18 * * ? *)' # daily 6:30PM UTC
 
-  CronCleanTrashApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
+  CronExpiredActivationStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination for cleanTrash
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/cleanTrash']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/cleanTrash']]
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/cron.yaml
+      Parameters:
+        Name: expact
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ApiKeyValue: !Ref CronApiKeyValue
+        Description: Expired Activation
+        Endpoint: !If
+          - IsNotProd
+          - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/expiredActivation']]
+          - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/expiredActivation']]
+        Schedule: 'cron(45 18 * * ? *)' # daily 6:45PM UTC
 
-  CronExpiredActivationApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
+  CronTaskCompletedTeamStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination for expiredActivation
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/expiredActivation']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/expiredActivation']]
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/cron.yaml
+      Parameters:
+        Name: taskteam
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ApiKeyValue: !Ref CronApiKeyValue
+        Description: Task Completed Team
+        Endpoint: !If
+          - IsNotProd
+          - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskCompletedNotificationTeam']]
+          - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskCompletedNotificationTeam']]
+        Schedule: 'cron(0 19 * * ? *)' # daily 7:00PM UTC
 
-  CronTaskTeamApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
+  CronTaskCompletedFollowedStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination for taskCompletedNotificationTeam
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskCompletedNotificationTeam']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskCompletedNotificationTeam']]
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/cron.yaml
+      Parameters:
+        Name: taskfol
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ApiKeyValue: !Ref CronApiKeyValue
+        Description: Task Completed Followed
+        Endpoint: !If
+          - IsNotProd
+          - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskCompletedNotificationFollowed']]
+          - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskCompletedNotificationFollowed']]
+        Schedule: 'cron(15 19 * * ? *)' # daily 7:15PM UTC
 
-  CronTaskFollowersApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
+  CronMissedDeadlineStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination for taskCompletedNotificationFollowed
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskCompletedNotificationFollowed']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskCompletedNotificationFollowed']]
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/cron.yaml
+      Parameters:
+        Name: missdead
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ApiKeyValue: !Ref CronApiKeyValue
+        Description: Task Missed Deadline
+        Endpoint: !If
+          - IsNotProd
+          - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskMissedDeadline']]
+          - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskMissedDeadline']]
+        Schedule: 'cron(30 19 * * ? *)' # daily 7:15PM UTC
 
-  CronMissedDeadlineApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
+  CronMissedDeadlineFollowedStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination for taskMissedDeadline
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskMissedDeadline']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskMissedDeadline']]
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/cron.yaml
+      Parameters:
+        Name: missfol
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ApiKeyValue: !Ref CronApiKeyValue
+        Description: Task Followed Missed Deadline
+        Endpoint: !If
+          - IsNotProd
+          - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskFollowedMissedDeadline']]
+          - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskFollowedMissedDeadline']]
+        Schedule: 'cron(30 19 * * ? *)' # daily 7:30PM UTC
 
-  CronMissedDeadlineFollowedApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
+  CronTeamMissedDeadlineStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination for taskFollowedMissedDeadline
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/taskFollowedMissedDeadline']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/taskFollowedMissedDeadline']]
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/cron.yaml
+      Parameters:
+        Name: teammiss
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ApiKeyValue: !Ref CronApiKeyValue
+        Description: Team Member Missed Deadline
+        Endpoint: !If
+          - IsNotProd
+          - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/teamMemberMissedDeadline']]
+          - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/teamMemberMissedDeadline']]
+        Schedule: 'cron(45 19 * * ? *)' # daily 7:45PM UTC
 
-  CronTeamMissedDeadlineApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
-    Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination for teamMemberMissedDeadline
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/teamMemberMissedDeadline']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/teamMemberMissedDeadline']]
+  # CronEsUsersTimelogApiDestination:
+  #   Type: AWS::Events::ApiDestination
+  #   Condition: IsNotProd
+  #   Properties:
+  #     ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+  #     Description: API Destination Elastic/Open Search
+  #     HttpMethod: POST
+  #     InvocationEndpoint: !If
+  #       - IsNotProd
+  #       - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/ES_usersTimelog']]
+  #       - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/ES_usersTimelog']]
 
-  CronEsUsersTimelogApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
-    Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination Elastic/Open Search
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/ES_usersTimelog']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/ES_usersTimelog']]
+  # CronEsTaskReportApiDestination:
+  #   Type: AWS::Events::ApiDestination
+  #   Condition: IsNotProd
+  #   Properties:
+  #     ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+  #     Description: API Destination Elastic/Open Search
+  #     HttpMethod: POST
+  #     InvocationEndpoint: !If
+  #       - IsNotProd
+  #       - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/ES_taskReport']]
+  #       - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/ES_taskReport']]
 
-  CronEsTaskReportApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
-    Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination Elastic/Open Search
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/ES_taskReport']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/ES_taskReport']]
-
-  CronExtractEmailsApiDestination:
-    Type: AWS::Events::ApiDestination
-    Condition: IsNotProd
-    Properties:
-      ConnectionArn: !GetAtt CronJobAPIConnection.Arn
-      Description: API Destination for extract_emails
-      HttpMethod: POST
-      InvocationEndpoint: !If
-        - IsNotProd
-        - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/extract_emails']]
-        - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/extract_emails']]        
-
-  CronJobIamRole:
-    Type: AWS::IAM::Role
-    Condition: IsNotProd
-    Properties:
-      Path: /
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Sid: 1
-            Effect: Allow
-            Action: sts:AssumeRole
-            Principal:
-              Service: events.amazonaws.com
-      Path: /
-      Policies:
-        - PolicyName: InvokeApiDestination
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action: events:InvokeApiDestination
-                Resource: 
-                  - !GetAtt CronAboutToDueApiDestination.Arn
+  # CronExtractEmailsApiDestination:
+  #   Type: AWS::Events::ApiDestination
+  #   Condition: IsNotProd
+  #   Properties:
+  #     ConnectionArn: !GetAtt CronJobAPIConnection.Arn
+  #     Description: API Destination for extract_emails
+  #     HttpMethod: POST
+  #     InvocationEndpoint: !If
+  #       - IsNotProd
+  #       - !Join ['', ['https://', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName, '/cron/extract_emails']]
+  #       - !Join ['', ['https://', !Ref LoadBalancerHostName, '.', !Ref ClientDomainName, '.', '/cron/extract_emails']]        
   
-  CronAboutToDueEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for aboutToDue
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      # ScheduleExpression: 'cron(0 */5 * * ? *)' #every 5 hours
-      ScheduleExpression: 'cron(0 18 * * ? *)' # daily 6PM UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronAboutToDueApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, aboutToDue]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
+  # CronEsUsersTimelogEventRule:
+  #   Type: AWS::Events::Rule
+  #   Condition: IsNotProd
+  #   Properties:
+  #     Description: Cron job for Elastic/Open Search UsersTimelog
+  #     RoleArn: !GetAtt CronJobIamRole.Arn
+  #     ScheduleExpression: 'cron(30 17 * * ? *)' # daily 9:30 UTC
+  #     State: ENABLED
+  #     Targets: 
+  #       - Arn: !GetAtt CronEsUsersTimelogApiDestination.Arn
+  #         Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, esUsersTimelog]]
+  #         RoleArn: !GetAtt CronJobIamRole.Arn
 
-  CronGenerateRecurringInstanceEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for generateRecurringInstance
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(15 18 * * ? *)' # daily 6:15PM UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronGenerateRecurringInstanceApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, generateRecurringInstance]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
+  # CronEsTaskReportEventRule:
+  #   Type: AWS::Events::Rule
+  #   Condition: IsNotProd
+  #   Properties:
+  #     Description: Cron job for Elastic/Open Search TaskReport
+  #     RoleArn: !GetAtt CronJobIamRole.Arn
+  #     ScheduleExpression: 'cron(45 17 * * ? *)' # daily 9:45 UTC
+  #     State: ENABLED
+  #     Targets: 
+  #       - Arn: !GetAtt CronEsTaskReportApiDestination.Arn
+  #         Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, esTaskReport]]
+  #         RoleArn: !GetAtt CronJobIamRole.Arn
 
-  CronCleanTrashEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for cleanTrash
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(30 18 * * ? *)' # daily 6:30PM UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronCleanTrashApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cleanTrash]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
-
-  CronExpiredActivationEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for ExpiredActivation
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(45 18 * * ? *)' # daily 6:45PM UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronExpiredActivationApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, expiredActivation]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
-
-  CronTaskTeamEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for TaskTeam
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(0 19 * * ? *)' # daily 7:00PM UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronTaskTeamApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, taskTeam]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
-
-  CronTaskFollowersEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for TaskFollowers
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(15 19 * * ? *)' # daily 7:15PM UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronTaskFollowersApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, taskFollowers]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
-
-  CronMissedDeadlineEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for MissedDeadline
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(30 19 * * ? *)' # daily 7:30PM UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronMissedDeadlineApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, missedDeadline]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
-
-  CronMissedDeadlineFollowedEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for MissedDeadline
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(30 19 * * ? *)' # daily 7:30PM UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronMissedDeadlineFollowedApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, missedDeadlineFollowed]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
-
-  CronTeamMissedDeadlineEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for TeamMissedDeadline
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(45 19 * * ? *)' # daily 7:45PM UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronTeamMissedDeadlineApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, teamMissedDeadline]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
-
-  CronEsUsersTimelogEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for Elastic/Open Search UsersTimelog
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(30 17 * * ? *)' # daily 9:30 UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronEsUsersTimelogApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, esUsersTimelog]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
-
-  CronEsTaskReportEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for Elastic/Open Search TaskReport
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(45 17 * * ? *)' # daily 9:45 UTC
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronEsTaskReportApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, esTaskReport]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
-
-  CronExtractEmailsEventRule:
-    Type: AWS::Events::Rule
-    Condition: IsNotProd
-    Properties:
-      Description: Cron job for extract_emails
-      RoleArn: !GetAtt CronJobIamRole.Arn
-      ScheduleExpression: 'cron(* * * * ? *)' # every minute
-      State: ENABLED
-      Targets: 
-        - Arn: !GetAtt CronExtractEmailsApiDestination.Arn
-          Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, extract_emails]]
-          RoleArn: !GetAtt CronJobIamRole.Arn
+  # CronExtractEmailsEventRule:
+  #   Type: AWS::Events::Rule
+  #   Condition: IsNotProd
+  #   Properties:
+  #     Description: Cron job for extract_emails
+  #     RoleArn: !GetAtt CronJobIamRole.Arn
+  #     ScheduleExpression: 'cron(* * * * ? *)' # every minute
+  #     State: ENABLED
+  #     Targets: 
+  #       - Arn: !GetAtt CronExtractEmailsApiDestination.Arn
+  #         Id: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, extract_emails]]
+  #         RoleArn: !GetAtt CronJobIamRole.Arn
 
 ###
 # Dev S3 bucket and associated account
