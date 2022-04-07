@@ -1,0 +1,393 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Receive Email System
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Cron Configuration
+        Parameters:
+          - Description
+          - Endpoint
+          - Schedule
+          - RuleSetName
+          - ReceiptRuleName
+          - ReceiptDomain
+          - MyDeadLetterQueueName
+          - AttachmentBucket
+          - AttachmentBucketARN
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      Description:
+        default: Description
+      Endpoint:
+        default: Destination Endpoint
+      Schedule:
+        default: Cron Schedule Expression
+      RuleSetName:
+        default: Cron Schedule Expression
+      ReceiptRuleName:
+        default: Cron Schedule Expression
+      ReceiptDomain:
+        default: Cron Schedule Expression        
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  RuleSetName:
+    Type: String
+  ReceiptRuleName:
+    Type: String
+  ReceiptDomain:
+    Type: String
+  MyDeadLetterQueueName:
+    Type: String
+    Description: Standard Queue Name
+  AttachmentBucket:
+    Type: String
+    Description: Destination bucket to upload email attachments
+  AttachmentBucketARN:
+    Type: String
+    Description: Destination bucket ARN to upload email attachments
+  Endpoint:
+    Description: Destination endpoint of SNS 2 (URL format)
+    Type: String
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+# s3 
+  EmailReceiveBucket:
+    Type: AWS::S3::Bucket
+    # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
+    # Recommend not specifying bucket name here for non-prod setups
+    DeletionPolicy: Retain
+#    Condition: UseInternalS3
+    Properties:
+      BucketName:
+        Fn::If:
+          - IsProd
+          - Fn::Join: 
+            - '-'
+            - - Ref: OrgName
+              - Fn::FindInMap: 
+                - EnvShort
+                - Ref: EnvName
+                - Name
+              - Fn::FindInMap:
+                - RegionShort
+                - Ref: 'AWS::Region'
+                - Name 
+              - Ref: Name
+          - Ref: 'AWS::NoValue' #let the system choose a bucket name
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: 
+            Fn::Join: 
+              - '-'
+              - - Ref: OrgName
+                - Fn::FindInMap: 
+                  - EnvShort
+                  - Ref: EnvName
+                  - Name
+                - Fn::FindInMap:
+                  - RegionShort
+                  - Ref: 'AWS::Region'
+                  - Name
+                - Ref: Name
+        - Key: Environment
+          Value: 
+            Ref: EnvName
+        - Key: Organization
+          Value: 
+            Ref: OrgName
+
+  EmailReceiveBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref EmailReceiveBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowSESPut
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: 
+              - 's3:PutObject'
+            Resource: 
+              - !Sub "arn:aws:s3:::${EmailReceiveBucket}/*"
+
+# Lambda
+  EmailReceiveLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: extract_attachment.handler
+      Role: !GetAtt EmailReceiveLambdaExecutionRole.Arn
+      Runtime: nodejs14.x
+      Timeout: 300
+      Environment:
+        Variables:
+          S3_EMAIL: !Ref EmailReceiveBucket
+          S3_UPLOAD: !Ref AttachmentBucket
+          TOPIC_ARN: !Ref SNSEmailReceive
+      Code:
+        ZipFile: |
+
+          exports.handler = async (event) => {
+              // TODO implement
+              const response = {
+                  statusCode: 200,
+                  body: JSON.stringify('Hello from Lambda!'),
+              };
+              return response;
+          };
+
+
+  EmailReceiveLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EmailReceiveLambdaFunctionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow 
+                Action: 
+                  - logs:CreateLogGroup
+                Resource: arn:aws:logs:us-west-2:880804344419:*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:us-west-2:880804344419:*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !GetAtt EmailReceiveBucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Ref AttachmentBucketARN
+              - Effect: Allow
+                Action: 
+                  - sns:Publish
+                  - sns:Subscribe
+                Resource:
+ #                 - !Ref SNSEmailReceive  <-- cannot use SNS ARN as ref
+                  - arn:aws:sns:us-west-2:880804344419:*           
+## ses
+  ReceiptRuleSet:
+    Type: AWS::SES::ReceiptRule
+    Properties:
+      RuleSetName: !Ref RuleSetName
+      Rule:
+        Name: !Ref ReceiptRuleName
+        Enabled: true
+        ScanEnabled: true
+        Recipients: 
+          - !Ref ReceiptDomain
+        Actions:
+          - S3Action:
+              BucketName: !Ref EmailReceiveBucket
+              TopicArn: !Ref SNSEmailReceive
+  
+## sns 1 trigger lambda
+  SNSEmailReceive:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], emailreceive-topic]]
+
+  SNSEmailReceiveTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: AllowServices
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SNSEmailReceive
+      Topics:
+          - Ref: SNSEmailReceive
+
+  EmailReceiveSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SNSEmailReceive
+      Protocol: lambda
+      Endpoint: !GetAtt EmailReceiveLambda.Arn
+      RedrivePolicy: 
+        deadLetterTargetArn : !GetAtt MyDeadLetterQueue.Arn
+      
+  MyDeadLetterQueue: 
+    Type: AWS::SQS::Queue
+    Properties: 
+      QueueName: !Ref MyDeadLetterQueueName
+
+  MyDeadLetterQueuePolicy: 
+    Type: AWS::SQS::QueuePolicy
+    Properties: 
+      Queues: 
+        - !Ref MyDeadLetterQueue
+      PolicyDocument: 
+        Statement: 
+          - Action: 
+              - "SQS:SendMessage" 
+              - "SQS:ReceiveMessage"
+            Effect: "Allow"
+            Resource: !GetAtt MyDeadLetterQueue.Arn
+            Principal:  
+              AWS: "*"
+
+# SNS 2 after lambda going to cloudcfo app
+  SNSEmailProcess:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], emailprocess-topic]]  
+    
+  SNSEmailProcessTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: AllowServices
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SNSEmailProcess
+      Topics:
+          - Ref: SNSEmailProcess
+          
+  EmailProcessSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SNSEmailProcess
+      Protocol: https
+      Endpoint: !Ref Endpoint
+
+
+# Cloudwatch
+  MyDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 300  # 5 minutes
+      DelaySeconds: 60 #for alarms
+
+  DLQthresholdAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm dlq messages when we have 1 or more messages in 1 minute"
+      Namespace: AWS/SQS
+      MetricName: NumberOfMessagesReceived
+      Dimensions:
+        - Name: "QueueName"
+          Value:
+            Fn::GetAtt:
+              - "MyDeadLetterQueue"
+              - "QueueName"
+      Statistic: Minimum
+      Period: 60  
+      DatapointsToAlarm: 1
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      AlarmActions: 
+        - !Ref SNSDLQAlarm
+
+# Sns for cloudwatch
+
+  SNSDLQAlarm:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], dlqalarm-topic]]  
+    
+  SNSDLQAlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: AllowServices
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+            - SNS:Publish
+            Resource: !Ref SNSDLQAlarm
+      Topics:
+          - Ref: SNSDLQAlarm
+
+  SNSDLQAlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SNSDLQAlarm
+      Protocol: email
+      Endpoint: ronald@iscale-solutions.com # Dev Email for them to troubleshoot
