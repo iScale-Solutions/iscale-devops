@@ -19,7 +19,7 @@ Metadata:
           - RuleSetName
           - ReceiptRuleName
           - ReceiptDomain
-          - MyDeadLetterQueueName
+          #- MyDeadLetterQueueName
           - AttachmentBucket
           - AttachmentBucketARN
 
@@ -70,9 +70,9 @@ Parameters:
     Type: String
   ReceiptDomain:
     Type: String
-  MyDeadLetterQueueName:
-    Type: String
-    Description: Standard Queue Name
+  #MyDeadLetterQueueName:
+  #  Type: String
+  #  Description: Standard Queue Name
   AttachmentBucket:
     Type: String
     Description: Destination bucket to upload email attachments
@@ -97,13 +97,12 @@ Conditions:
 
 Resources:
 
-# s3 
+# S3 Bucket for receiving emails
   EmailReceiveBucket:
     Type: AWS::S3::Bucket
     # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
     # Recommend not specifying bucket name here for non-prod setups
     DeletionPolicy: Retain
-#    Condition: UseInternalS3
     Properties:
       BucketName:
         Fn::If:
@@ -123,20 +122,23 @@ Resources:
           - Ref: 'AWS::NoValue' #let the system choose a bucket name
       VersioningConfiguration:
         Status: Enabled
+      # disable this
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      # disable this
       LifecycleConfiguration:
         Rules:
         - AbortIncompleteMultipartUpload:
             DaysAfterInitiation: 3
-          Status: Enabled
+          Status: Disabled
+      # all false since we have a custom bucket policy
       PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
       Tags:
         - Key: Name
           Value: 
@@ -173,6 +175,24 @@ Resources:
               - 's3:PutObject'
             Resource: 
               - !Sub "arn:aws:s3:::${EmailReceiveBucket}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: '880804344419' 
+              StringLike:
+                AWS:SourceArn: "arn:aws:ses:*"
+          - Sid: AllowLambdaGet
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - 's3:GetObject'
+            Resource: 
+              - !Sub "arn:aws:s3:::${EmailReceiveBucket}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: '880804344419'
+              StringLike:
+                AWS:SourceArn: "arn:aws:lambda:*"
 
 # Lambda
   EmailReceiveLambda:
@@ -181,19 +201,20 @@ Resources:
       Handler: extract_attachment.handler
       Role: !GetAtt EmailReceiveLambdaExecutionRole.Arn
       Runtime: nodejs14.x
+      MemorySize: 1028
       Timeout: 300
       Environment:
         Variables:
           S3_EMAIL: !Ref EmailReceiveBucket
           S3_UPLOAD: !Ref AttachmentBucket
-          TOPIC_ARN: !Ref SNSEmailReceive
+          TOPIC_ARN: !Ref SNSEmailProcess
           EXCLUDE_FILES: cloudcfo-logo.png
           VALID_FILES: .jpeg,.jpg,.png,.gif,.pdf,.doc,.docx,.xlsx,.pptx,.ppt,.xls,.csv,.zip,.dat,.rar
       Code:
         ZipFile: |
 
           exports.handler = async (event) => {
-              // TODO implement
+              // sample hello world, replace this by uploading new code via AWS console
               const response = {
                   statusCode: 200,
                   body: JSON.stringify('Hello from Lambda!'),
@@ -232,35 +253,37 @@ Resources:
             Action:
               - sts:AssumeRole
       Policies:
-        - PolicyName: EmailReceiveLambdaFunctionPolicy
+        - PolicyName: EmailReceiveLambdaFunction-LogPolicy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - Effect: Allow 
                 Action: 
                   - logs:CreateLogGroup
-                Resource: arn:aws:logs:us-west-2:880804344419:*
-              - Effect: Allow
-                Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: arn:aws:logs:us-west-2:880804344419:*
+        - PolicyName: EmailReceiveLambdaFunction-S3Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
               - Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: !GetAtt EmailReceiveBucket.Arn
-              - Effect: Allow
-                Action:
                   - s3:PutObject
-                Resource: !Ref AttachmentBucketARN
+                Resource: "arn:aws:s3:::*"
+        - PolicyName: EmailReceiveLambdaFunction-SNSPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
               - Effect: Allow
                 Action: 
                   - sns:Publish
                   - sns:Subscribe
                 Resource:
- #                 - !Ref SNSEmailReceive  <-- cannot use SNS ARN as ref
-                  - arn:aws:sns:us-west-2:880804344419:*           
-## ses
+                  - arn:aws:sns:us-west-2:880804344419:*   
+ 
+# SES
   ReceiptRuleSet:
     Type: AWS::SES::ReceiptRule
     Properties:
@@ -276,7 +299,7 @@ Resources:
               BucketName: !Ref EmailReceiveBucket
               TopicArn: !Ref SNSEmailReceive
   
-## sns 1 trigger lambda
+# SNS 1  - trigger lambda
   SNSEmailReceive:
     Type: AWS::SNS::Topic
     Properties:
@@ -304,11 +327,13 @@ Resources:
       Endpoint: !GetAtt EmailReceiveLambda.Arn
       RedrivePolicy: 
         deadLetterTargetArn : !GetAtt MyDeadLetterQueue.Arn
-      
+  
+  # Dead Letter Queue of SNS 1
   MyDeadLetterQueue: 
     Type: AWS::SQS::Queue
     Properties: 
-      QueueName: !Ref MyDeadLetterQueueName
+      #QueueName: !Ref MyDeadLetterQueueName
+      QueueName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], email-receive-DLQ]]
       MessageRetentionPeriod: 300  # 5 minutes
       DelaySeconds: 60 #for alarms      
 
@@ -327,7 +352,7 @@ Resources:
             Principal:  
               AWS: "*"
 
-# SNS 2 after lambda going to cloudcfo app
+# SNS 2 - after lambda going to CloudCFO app endpoint
   SNSEmailProcess:
     Type: AWS::SNS::Topic
     Properties:
@@ -354,7 +379,6 @@ Resources:
       Protocol: https
       Endpoint: !Ref Endpoint
 
-
 # Cloudwatch
   DLQthresholdAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -377,8 +401,7 @@ Resources:
       AlarmActions: 
         - !Ref SNSDLQAlarm
 
-# Sns for cloudwatch
-
+# SNS 3 - for cloudwatch
   SNSDLQAlarm:
     Type: AWS::SNS::Topic
     Properties:
