@@ -4,7 +4,7 @@ while read p; do
     sed "s,XXX,${p}," bank_template.yaml >> sqs.yaml
     sed "s,XXX,${p}," notification_template.yaml >> notification.yaml
     sed "s,XXX,${p}," output_template.yaml >> output.yaml
-done <bank_list.txt
+done <bank_list_115.txt
 sed "s,#NotificationConfiguration:,      NotificationConfiguration:," cics_template.yaml > cics_template2.yaml
 sed "s,#QueueConfigurations:,        QueueConfigurations:," cics_template2.yaml > cics_template3.yaml
 

@@ -1296,7 +1296,14 @@ Resources:
             Status: Enabled
 # NotificationConfiguration:
 # QueueConfigurations:
-#XXX     _NOTIFICATION_CONFIG
+#XXX_NOTIFICATION_CONFIG
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: Prefix
+                    Value: FromServer/BANK115PBM001
+            Queue: !GetAtt 115001Queue.Arn
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -1371,7 +1378,62 @@ Resources:
 # SQS Queues
 ###
 
-#XXX     _INSERT_SQS_XXX
+#XXX_INSERT_SQS_XXX
+
+  115001User:
+    Type: AWS::IAM::User
+    Properties:
+      Groups:
+        - !Ref BankGroup
+      UserName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BANK115PBM001]]
+
+  115001UserKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref 115001User
+
+  115001Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 115PBM001, queue]]
+      MessageRetentionPeriod: 1209600 #14 days
+
+  115001QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref 115001Queue
+      PolicyDocument:
+        Statement:
+          - Action:
+              - SQS:SendMessage
+            Effect: Allow
+            Resource:
+              - !GetAtt 115001Queue.Arn
+            Principal:
+              AWS: '*'
+
+  115001QueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm if queue depth increases to more than 10 messages
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt [115001Queue, QueueName]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      InsufficientDataActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+
 
 
 
@@ -1672,4 +1734,7 @@ Outputs:
       - - !Join ['', ['||', Username, ',']]
         - !Join ['', ['AccessKey', ',']]
         - SecretKey
-#XXX    _INSERT_OUTPUT
+#XXX_INSERT_OUTPUT
+        - !Join ['', ['||', !Ref 115001User, ',']]
+        - !Join ['', [!Ref 115001UserKey, ',']]
+        - !GetAtt 115001UserKey.SecretAccessKey
