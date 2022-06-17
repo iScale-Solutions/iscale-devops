@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: VPC Peering Setup
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - NetworkStackName
+          - VpcCidrBlock
+          - CidrCount
+          - MaskSize
+          - RequesterVpcId
+          - TargetVpcId
+          - TargetCidr
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+Parameters: 
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: network
+    MinLength: 3
+    MaxLength: 13
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 12
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  
+  ClientVPNEndpoint:
+    Description: Client VPN Endpoint Name (optional)
+    Type: String
+    Default: ''
+  RequesterPublicRouteTable:
+    Description: Public route table
+    Type: String
+    Default: ''
+  RequesterPrivateRouteTable1:
+    Description: Private route table (az1)
+    Type: String
+    Default: ''
+  RequesterPrivateRouteTable2:
+    Description: Private route table (az2)
+    Type: String
+    Default: ''
+  RequesterPrivateRouteTable3:
+    Description: Private route table (az3)
+    Type: String
+    Default: ''
+  RequesterCidr:
+    Description: CIDR of the requester VPC
+    Type: String
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+  RequesterVpcId:
+    Description: The name of the requester VPC
+    Type: AWS::EC2::VPC::Id
+  TargetPublicRouteTable:
+    Description: Target public route table
+    Type: String
+    Default: ''
+  TargetPrivateRouteTable1:
+    Description: Target private route table (az1)
+    Type: String
+    Default: ''
+  TargetPrivateRouteTable2:
+    Description: Target private route table (az2)
+    Type: String
+    Default: ''
+  TargetPrivateRouteTable3:
+    Description: Target private route table (az3)
+    Type: String
+    Default: ''
+  TargetCidr:
+    Description: CIDR of the target VPC
+    Type: String
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+  TargetVpcId:
+    Description: The name of the target VPC
+    Type: AWS::EC2::VPC::Id
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasClientVPNEndpoint: !Not [!Equals [!Ref ClientVPNEndpoint, '']]
+  HasRequesterPublicRouteTable: !Not [!Equals [!Ref RequesterPublicRouteTable, '']]
+  HasRequesterPrivateRouteTable1: !Not [!Equals [!Ref RequesterPrivateRouteTable1, '']]
+  HasRequesterPrivateRouteTable2: !Not [!Equals [!Ref RequesterPrivateRouteTable2, '']]
+  HasRequesterPrivateRouteTable3: !Not [!Equals [!Ref RequesterPrivateRouteTable3, '']]
+  HasTargetPublicRouteTable: !Not [!Equals [!Ref TargetPublicRouteTable, '']]
+  HasTargetPrivateRouteTable1: !Not [!Equals [!Ref TargetPrivateRouteTable1, '']]
+  HasTargetPrivateRouteTable2: !Not [!Equals [!Ref TargetPrivateRouteTable2, '']]
+  HasTargetPrivateRouteTable3: !Not [!Equals [!Ref TargetPrivateRouteTable3, '']]
+
+Resources:
+
+###
+# VPC Peering to Target VPC
+###
+
+  PeeringToTargetVPC:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties: 
+      PeerOwnerId: !Ref AWS::AccountId
+      PeerRegion: !Ref AWS::Region
+      PeerVpcId: !Ref TargetVpcId
+      VpcId: !Ref RequesterVpcId
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, peering]]
+
+###
+# Routes from requester to target
+###
+
+  RequesterPublicRoute:
+    Condition: HasRequesterPublicRouteTable
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RequesterPublicRouteTable
+      DestinationCidrBlock: !Ref TargetCidr
+      VpcPeeringConnectionId: !Ref PeeringToTargetVPC
+
+  RequesterPrivateRoute1:
+    Condition: HasRequesterPrivateRouteTable1
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RequesterPrivateRouteTable1
+      DestinationCidrBlock: !Ref TargetCidr
+      VpcPeeringConnectionId: !Ref PeeringToTargetVPC
+
+  RequesterPrivateRoute2:
+    Condition: HasRequesterPrivateRouteTable2
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RequesterPrivateRouteTable2
+      DestinationCidrBlock: !Ref TargetCidr
+      VpcPeeringConnectionId: !Ref PeeringToTargetVPC
+
+  RequesterPrivateRoute3:
+    Condition: HasRequesterPrivateRouteTable3
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RequesterPrivateRouteTable3
+      DestinationCidrBlock: !Ref TargetCidr
+      VpcPeeringConnectionId: !Ref PeeringToTargetVPC
+
+###
+# Routes from target to requester
+###
+
+  TargetPublicRoute:
+    Condition: HasTargetPublicRouteTable
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref TargetPublicRouteTable
+      DestinationCidrBlock: !Ref RequesterCidr
+      VpcPeeringConnectionId: !Ref PeeringToTargetVPC
+
+  TargetPrivateRoute1:
+    Condition: HasTargetPrivateRouteTable1
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref TargetPrivateRouteTable1
+      DestinationCidrBlock: !Ref RequesterCidr
+      VpcPeeringConnectionId: !Ref PeeringToTargetVPC
+
+  TargetPrivateRoute2:
+    Condition: HasTargetPrivateRouteTable2
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref TargetPrivateRouteTable2
+      DestinationCidrBlock: !Ref RequesterCidr
+      VpcPeeringConnectionId: !Ref PeeringToTargetVPC
+
+  TargetPrivateRoute3:
+    Condition: HasTargetPrivateRouteTable3
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref TargetPrivateRouteTable3
+      DestinationCidrBlock: !Ref RequesterCidr
+      VpcPeeringConnectionId: !Ref PeeringToTargetVPC
+
+###
+# Client Endpoint
+###
+
+  AccessToTargetVPC:
+    Condition: HasClientVPNEndpoint
+    Type: AWS::EC2::ClientVpnAuthorizationRule
+    Properties:
+      AuthorizeAllGroups: true
+      ClientVpnEndpointId: !Ref ClientVPNEndpoint
+      Description: !Join
+        - ' '
+        - - Access to
+          - !Ref TargetVpcId
+      TargetNetworkCidr: !Ref TargetCidr

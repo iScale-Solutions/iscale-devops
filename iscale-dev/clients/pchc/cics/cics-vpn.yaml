@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CICS VPN Setup
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: VPN Configuration
+        Parameters:
+          - VpcCidrBlock
+          - CidrCount
+          - MaskSize
+          - NetworkStackName
+          - VPNServerCert
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      CidrCount:
+        default: CIDR count
+      MaskSize:
+        default: Network mask size
+      NetworkStackName:
+        default: Network stack name
+      VPNServerCert:
+        default: VPN Server certificate
+
+Parameters: 
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: cics-vpn
+    MinLength: 3
+    MaxLength: 13
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 12
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  VPNClientRootCertificateChainArn:
+    Description: The VPN Server certificate
+    Type: String
+    Default: arn:aws:acm:ap-southeast-1:470455329885:certificate/6f81d95c-a1a5-4cf4-8069-4daf080dd821
+  VpcCidrBlock:
+    Description: The CIDR block for the VPN (e.g. 10.0.0.0/23)
+    Type: String
+    Default: '10.0.4.0/25'
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+  VPNServerCert:
+    Description: The VPN Server certificate
+    Type: String
+    Default: arn:aws:acm:ap-southeast-1:470455329885:certificate/6d76a5e4-2d8f-44c7-9088-6e54764cb0a3
+  CidrCount:
+    Description: The number of CIDR to generate from the VPC CIDR Block
+    Type: Number
+    Default: 4
+    MinValue: 1
+    MaxValue: 256
+  MaskSize:
+    Description: The number of subnet bits for the CIDR (e.g. /32-XXX, specifying a value "8" creates a CIDR with a mask of "/24", 32-8)
+    Type: Number
+    Default: 5
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: pchc-prd-ase1-cics-network
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Ne Section
+####
+
+  VPNStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpn.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CidrCount: !Ref CidrCount
+        ClientRootCertificateChainArn: !Ref VPNClientRootCertificateChainArn
+        ServerCertificateArn: !Ref VPNServerCert
+        MaskSize: !Ref MaskSize
+        VpcCidrBlock: !Ref VpcCidrBlock
+
+  VPNPeeringToCICSNetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClientVPNEndpoint: !GetAtt [VPNStack, Outputs.ClientVPNEndpoint] 
+        RequesterCidr: !GetAtt [VPNStack, Outputs.VpcCidrBlock]
+        RequesterPublicRouteTable: !GetAtt [VPNStack, Outputs.PublicRouteTable]
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${NetworkStackName}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${NetworkStackName}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${NetworkStackName}-PrivateRouteTable2'
+        TargetPrivateRouteTable3: !ImportValue
+          'Fn::Sub': '${NetworkStackName}-PrivateRouteTable3'
+        RequesterVpcId: !GetAtt [VPNStack, Outputs.VpcId]
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${NetworkStackName}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${NetworkStackName}-VpcCidrBlock'

@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions IAM resources
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: Resource Configuration
+        Parameters:
+          - OrgName
+          - EnvName
+
+    ParameterLabels:
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: fishingkaki
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# IAM
+####
+
+  ClassifiedsDeveloperGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: ClassifiedsDeveloper
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      Policies:
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: TerminateSSM
+                Effect: Allow
+                Action:
+                  - ssm:ResumeSession
+                  - ssm:TerminateSession
+                Resource:
+                  - arn:aws:ssm:*:*:session/${aws:username}-*
+              - Sid: AllowSSMinEC2
+                Effect: Allow
+                Action:
+                  - ssm:StartSession
+                Resource: 'arn:aws:ec2:*:*:instance/*'
+
+  JeremiahIAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      LoginProfile:
+        Password: jeremiah123!
+        PasswordResetRequired: true
+      UserName: jeremiah@fishingkaki.com
+      Groups:
+        - Developers #Legacy
+
+  MartinIAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      LoginProfile:
+        Password: martin123!
+        PasswordResetRequired: true
+      UserName: martin@fishingkaki.com
+      Groups:
+        - !Ref ClassifiedsDeveloperGroup
+        - Landing_Operations #Legacy
+        - Classifieds_Operations #Legacy
+        #- Forum_Operations #Legacy
+        - Production_Deployment #Legacy
+        - PRODUCTION_BUCKET #Legacy
+        #- MaintenanceBucketGroup #Legacy
+        - fishingkaki-stg-uw2-classifie-UserPermissionsGroup-QZFZ6BHW4O1P #Legacy
+        - fishingkaki-stg-uw2-classifie-UserPermissionsGroup-1T4SFXAK1WV7L #Legacy
+        - fishingkaki-stg-uw2-classifie-UserPermissionsGroup-7KJOD8F3ZKPF #Legacy
+
+  OpsidianRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              AWS: arn:aws:iam::326365640391:root
+            Condition:
+              StringEquals: 
+                sts:ExternalId: fishingkakiv2
+
+Outputs:
+
+  OpsidianArn: 
+    Description: The ARN of the Opsidian Role
+    Value: !GetAtt OpsidianRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-OpsidianArn"
