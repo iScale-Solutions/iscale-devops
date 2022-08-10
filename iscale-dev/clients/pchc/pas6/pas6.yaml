@@ -216,22 +216,6 @@ Resources:
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
-  DBResizer:
-    Condition: IsProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-resizer.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        DatabaseInstanceName: 
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceName
-        PeakSize: db.t3.xlarge
-        RegularSize: db.t3.micro
-
   DBSchedulerStack:
     DependsOn:
       - DBStack
@@ -251,12 +235,12 @@ Resources:
             - DBStack
             - Outputs.DBInstanceName
 
-  DeployStack:
+  AppDeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
       Parameters:
-        Name: !Ref Name
+        Name: !Join ['-', [!Ref Name, app]]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
@@ -280,15 +264,15 @@ Resources:
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: TRUE
 
-  ServerStack:
+  AppServerStack:
     DependsOn:
       - DBStack
-      - DeployStack
+      - AppDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
       Parameters:
-        Name: !Ref Name
+        Name: !Join ['-', [!Ref Name, app]]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         CacheEndpoint:
@@ -332,10 +316,10 @@ Resources:
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
 
-  SchedulerStack:
+  AppSchedulerStack:
     DependsOn:
       - DBStack
-      - ServerStack
+      - AppServerStack
     Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -349,11 +333,11 @@ Resources:
         UseFriendlyNames: FALSE
         CodeDeployApplicationName:
           Fn::GetAtt:
-            - DeployStack
+            - AppDeployStack
             - Outputs.CodeDeployApplicationName
         CodeDeployDeploymentGroupName:
           Fn::GetAtt:
-            - DeployStack
+            - AppDeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
   AllowJumpHostIntoServer:
@@ -363,7 +347,7 @@ Resources:
       IpProtocol: TCP
       GroupId:
         Fn::GetAtt:
-            - ServerStack
+            - AppServerStack
             - Outputs.AppServerSecurityGroup
       FromPort: 22
       ToPort: 22
@@ -392,11 +376,105 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
+###
+# Sidekiq Stacks
+###
+
+  SidekiqDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, sidekiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        RootStackID: !Ref 'AWS::StackId'
+        BlueGreenTimeStamp: !Ref BlueGreenTimeStamp
+
+  SidekiqServerStack:
+    DependsOn:
+      - DBStack
+      - SidekiqDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, sidekiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+        InstancePort: 80
+        InstanceSubnet: Private
+        InstanceType: !Ref InstanceType
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: 105
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+
+  SidekiqSchedulerStack:
+    DependsOn:
+      - DBStack
+      - SidekiqServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, sidekiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - SidekiqDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - SidekiqDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+
   BackupStack:
     Condition: IsProd
     DependsOn:
       - DBStack
-      - ServerStack
+      - AppServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -410,7 +488,7 @@ Resources:
               - DBStack
               - Outputs.DBInstanceARN
             - Fn::GetAtt:
-              - ServerStack
+              - AppServerStack
               - Outputs.AppServerEFSArn
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
         DailyExpiration: 10 #5 days requirement only
@@ -614,17 +692,17 @@ Resources:
             DB_LOW_CPU_CREDIT: !GetAtt [DBStack, Outputs.CPUCreditBalanceAlarm]
             DB_ERRORS: !GetAtt [DBStack, Outputs.DBErrorsAlarm]
             DB_ERROR_DENIED: !GetAtt [DBStack, Outputs.DBErrorDeniedAlarm]
-            TG_SLOW: !GetAtt [ServerStack, Outputs.AppServerSlowTargetGroupAlarm]
-            TG_UNHEALTHY: !GetAtt [ServerStack, Outputs.UnhealthyTargetGroupAlarm]
+            TG_SLOW: !GetAtt [AppServerStack, Outputs.AppServerSlowTargetGroupAlarm]
+            TG_UNHEALTHY: !GetAtt [AppServerStack, Outputs.UnhealthyTargetGroupAlarm]
             DB_INSTANCE_ID: !GetAtt [DBStack, Outputs.DBInstanceName]
             CACHE_INSTANCE_ID: !Join ['-', [!GetAtt [CacheStack, Outputs.ElasticacheReplicationGroup], '001']]
             REGION: !Ref 'AWS::Region'
             ELB_FULL_NAME: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
-            ASG_GROUP_NAME: !GetAtt [DeployStack, Outputs.BlueGreenAutoScalingGroupName] #First time, it will be emptu, that's OK
+            ASG_GROUP_NAME: !GetAtt [AppDeployStack, Outputs.BlueGreenAutoScalingGroupName] #First time, it will be emptu, that's OK
             APP_SERVER_AMI: !Ref InstanceAMI
             APP_SERVER_ID: i-0d6e53ff58d0902e6 #Hardcoded for now
             APP_SERVER_TYPE: !Ref InstanceType
-            EFS_ID: !GetAtt [ServerStack, Outputs.AppServerEFS]
+            EFS_ID: !GetAtt [AppServerStack, Outputs.AppServerEFS]
 
 Outputs:
 
@@ -632,5 +710,5 @@ Outputs:
     Description: Add the BitBucket user into this group
     Value:
       Fn::GetAtt:
-        - DeployStack
+        - AppDeployStack
         - Outputs.DeploymentUserGroup

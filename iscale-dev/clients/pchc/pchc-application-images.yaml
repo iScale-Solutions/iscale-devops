@@ -263,6 +263,53 @@ Resources:
                   commands:
                     - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/pesonet-cloudwatch.json
 
+  PAS6LogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PAS6_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Setup PAS6 logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: PDDTSLogs - InlineData
+        description: Setup PAS6 logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/pas6-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/pas6/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/pas6/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/pas6/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/pas6/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/pas6-cloudwatch.json
+
   PDDTSLogComponent:
     Type: AWS::ImageBuilder::Component
     Properties:
@@ -392,6 +439,30 @@ Resources:
                     - gem install rails -v 4.2.8
                     - rvm docs generate all
 
+  PAS6ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'pas6']]
+      Version: 1.0.0
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'pas6']]
+      Components: #Max 20
+        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+        - ComponentArn: !Ref PAS6LogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
   PayGateImageRecipe:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
@@ -501,6 +572,19 @@ Resources:
         ShareImage: !Ref ShareImage
         SNSStackName: !Ref SNSStackName
   
+  PAS6Builder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: pas6
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref PAS6ImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
+
   PDDTSBuilder:
     Type: AWS::CloudFormation::Stack
     Properties:
