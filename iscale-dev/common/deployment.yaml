@@ -20,7 +20,6 @@ Metadata:
         Parameters:
           - NetworkStackName
           - SNSStackName
-          - RootStackID
 
     ParameterLabels:
       OrgName:
@@ -33,10 +32,6 @@ Metadata:
         default: Create a Code Pipeline ?
       PipelineS3Object:
         default: Pipeline S3 object to monitor
-      BlueGreenTimeStamp:
-        default: Blue Green Timestamp
-      RootStackID:
-        default: Root Stack ID
 
 Parameters:
   OrgName:
@@ -108,8 +103,7 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasCodePipeline: !Equals [!Ref CreateCodePipeline, TRUE]
   HasCreateDeployUser: !Equals [!Ref CreateDeployUser, TRUE]
-  HasRootStackID: !Not [!Equals [!Ref RootStackID, '']]
-
+  
 Resources:
 
   CodeDeployApplication:
@@ -221,7 +215,7 @@ Resources:
       FunctionName: !Ref NotifyReadyFunction
       Principal: sns.amazonaws.com   
 
-  NotifyReadyTopicPolicy:
+  NotifyReadyTopicAccessPolicy:
     Type: AWS::SNS::TopicPolicy
     Properties:
       Topics:
@@ -238,10 +232,27 @@ Resources:
               ArnLike:
                 AWS:SourceArn: !Sub 'arn:aws:*:*:${AWS::AccountId}:*'
 
-  BlueGreenDeploySuccessTopic:
+  CodeDeployStatusTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, bluegreen-deploy-OK]]
+      TopicName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, codedeploy-status]]
+
+  CodeDeployStatusTopicAccessPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref CodeDeployStatusTopic
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sns:Publish
+            Resource: !Ref CodeDeployStatusTopic
+            Principal:
+              AWS: '*'
+            Condition:
+              ArnLike:
+                AWS:SourceArn: !Sub 'arn:aws:*:*:${AWS::AccountId}:*'
 
   CodeDeployDeploymentGroup:
     Type: AWS::CodeDeploy::DeploymentGroup
@@ -259,8 +270,9 @@ Resources:
               !Sub "${SNSStackName}-TopicArn"
         - TriggerEvents:
             - DeploymentSuccess
-          TriggerName: BlueGreenDeploySuccess
-          TriggerTargetArn: !Ref BlueGreenDeploySuccessTopic
+            - DeploymentFailure
+          TriggerName: Deployment
+          TriggerTargetArn: !Ref CodeDeployStatusTopic
         - TriggerEvents:
             - InstanceReady
           TriggerName: InstanceReady
@@ -508,259 +520,195 @@ Resources:
     Condition: HasCreateDeployUser
     Type: AWS::IAM::AccessKey
     Properties:
-      UserName: !Ref DeploymentUser
+      UserName: !Ref DeploymentUser  
 
 ###
-# Blue Green Section
+# Alarm management for Auto Scaling Group
 ###
-
-# 1. When deployment succeeds, notify a topic
-# 2. Lambda subscribes to topic
-# 3. lambda looks at latest ASG name for app / dep group
-# 4. lambda invoke top stack Id with new timestamp to refresh everything
-# Need Top stack ID to be passed
-# Need AutoScaling Group name to be an output
-
-  LambdaGetBlueGreenASGNameFunctionExecutionRole:
-    Condition: HasRootStackID
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Effect: Allow
-          Principal: {Service: [lambda.amazonaws.com]}
-          Action: ['sts:AssumeRole']
-      Path: "/"
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-        - arn:aws:iam::aws:policy/AutoScalingReadOnlyAccess
-      Policies:
-        - PolicyName: AccessDeploymentGroup
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - codedeploy:GetDeploymentGroup
-                Resource: !Join [':', ['arn:aws:codedeploy', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'deploymentgroup', !Join ['/', [!Ref CodeDeployApplication, !Ref CodeDeployDeploymentGroup]]]]
-
-  LambdaGetBlueGreenASGNameFunction:
-    Condition: HasRootStackID
-    Type: AWS::Lambda::Function
-    Properties:
-      Handler: index.lambda_handler
-      Role: !GetAtt LambdaGetBlueGreenASGNameFunctionExecutionRole.Arn
-      Runtime: python3.9
-      Code:
-        ZipFile: |
-          import cfnresponse
-          import json
-          import logging
-          import time
-          import base64
-          import string
-          import random
-          import boto3
-
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-
-          def get_asg_instance_ids(AutoScalingGroupName):
-              instance_ids=[];
-              asg = boto3.client('autoscaling');
-              instances = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[AutoScalingGroupName])['AutoScalingGroups'][0]['Instances'];
-              for inst in instances:
-                instance_ids.append(inst['InstanceId']);
-              return instance_ids;
-              
-          def lambda_handler(event, context):
-
-              responseData={}
-              physicalResourceId={}
-              request_type = event['RequestType']
-              
-              try:
-                logger.info('EVENT BODY:' + json.dumps(event))
-              
-                if request_type in ['Create', 'Update']:
-                  client = boto3.client('codedeploy');
-                  appname = event["ResourceProperties"]["ApplicationName"]
-                  grpname = event["ResourceProperties"]["DeployGroupName"]
-                  groupdef = client.get_deployment_group(applicationName=appname, deploymentGroupName=grpname)
-                  if groupdef["deploymentGroupInfo"]["deploymentStyle"]["deploymentType"] == 'BLUE_GREEN':
-                    asgname = groupdef["deploymentGroupInfo"]["autoScalingGroups"][0]["name"]
-                    instances = get_asg_instance_ids(asgname)
-                    responseData['BlueGreenAutoScalingGroupName'] = asgname
-                    responseData['BlueGreenAutoScalingInstances'] = instances
-                  else:
-                    responseData['BlueGreenAutoScalingGroupName'] = ''
-                    responseData['BlueGreenAutoScalingInstances'] = ''
-                
-                logger.info('RESPONSE BODY:' + json.dumps(responseData))
-                send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
-                return
-              
-                send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
-                return
-              
-              except Exception:
-              
-                logger.exception('Error Encountered')
-                send(event, context, cfnresponse.FAILED, responseData, physicalResourceId)
-                return
-
-          def send(event, context, responseStatus, responseData, physicalResourceId=None):
-              resourceId = physicalResourceId or context.log_stream_name
-              responseBody = {'Status': responseStatus,
-                              'Reason': 'See the details in CloudWatch Log Stream: ' + context.log_stream_name,
-                              'PhysicalResourceId': resourceId,
-                              'StackId': event['StackId'],
-                              'RequestId': event['RequestId'],
-                              'LogicalResourceId': event['LogicalResourceId'],
-                              'Data': responseData}
-              
-              logger.info('RESPONSE BODY:' + json.dumps(responseBody))
-              cfnresponse.send(event, context, responseStatus, responseData, resourceId)
   
-  LambdaUpdateRootStackFunctionExecutionRole:
-    Condition: HasRootStackID
-    Type: AWS::IAM::Role
+  CPUUtilizationCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
     Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Effect: Allow
-          Principal: {Service: [lambda.amazonaws.com]}
-          Action: ['sts:AssumeRole']
-      Path: "/"
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: AccessRootStack
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - cloudformation:DescribeStacks
-                  - cloudformation:UpdateStack
-                Resource: !Ref RootStackID
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
 
-  LambdaUpdateRootStackFunction:
-    Condition: HasRootStackID
+  StatusChecksCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, status, check]]
+      MetricName: StatusCheckFailed
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Minimum
+      Threshold: 1
+      AlarmActions:
+        - Fn::ImportValue: 
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+
+  CPUCreditBalanceCloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cpu, credit]]
+      MetricName: CPUCreditBalance
+      Namespace: AWS/EC2
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Minimum
+      Threshold: 24
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+
+  UpdateAlarmLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, update, alarm]]
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaUpdateRootStackFunctionExecutionRole.Arn
+      Role: !GetAtt LambdaUpdateAlarmExecutionRole.Arn
       Runtime: python3.9
+      Timeout: 900
       Environment:
         Variables:
-          ROOT_STACK_ID: !Ref RootStackID
+          ALARMS: !Join [',',[!Ref CPUUtilizationCloudWatchAlarm, !Ref StatusChecksCloudWatchAlarm, !Ref CPUCreditBalanceCloudWatchAlarm]]
       Code:
         ZipFile: |
-          import cfnresponse
-          import json
-          import logging
-          import time
-          import base64
-          import string
-          import os
-          import random
+
           import boto3
+          import os
+          import json
+          import time
 
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-
-          def get_stack_params(stackname):
-            resultparams=[];
-            cf = boto3.client('cloudformation');
-            logger.info('Requesting param for: ' + stackname)
-            stacks = cf.describe_stacks(StackName=stackname)
-            stack = stacks['Stacks'][0]
-            params = stack["Parameters"]
-            for param in params:
-              resultparams.append(param['ParameterKey']);
-            return resultparams;
-
-          def refresh_stack(stackid, sameparams, timestamp):
-            cf = boto3.client('cloudformation');
-            logger.info('Updating params for: ' + stackid)
-            
-            stacks = cf.describe_stacks(StackName=stackid)
-            updatedparams = []
-            for sameparam in sameparams:
-              if sameparam == 'BlueGreenTimeStamp':
-                updatedparams.append({'ParameterKey': 'TimeStamp', 'ParameterValue': timestamp});
-              else:
-                updatedparams.append({'ParameterKey': sameparam, 'UsePreviousValue': True});
-            
-            logger.info('Updating params: ' + json.dumps(updatedparams))
-            # cf.update_stacK(
-            #   StackName=stackid,
-            #   UsePreviousTemplate=True,
-            #   Parameters=updatedparams,
-            #   Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
-            # )
-              
           def lambda_handler(event, context):
-            try:
-              logger.info('EVENT BODY:' + json.dumps(event))
 
-              responseData={}
-              physicalResourceId={}
-              request_type = event['RequestType']
-              stackid = os.environ['ROOT_STACK_ID']
-              params = get_stack_params(stackid)
-              logger.info('Stack Params:' + json.dumps(params))
-              randomparam=''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
-              logger.info('Updating stack with timestamp:' + randomparam)
-              
-              refresh_stack(stackid, params, randomparam)
-              
-              responseData["BlueGreenTimeStamp"] = randomparam
-              logger.info('RESPONSE BODY:' + json.dumps(responseData))
-              send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
-              return
-            
-              send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
-              return
-            
-            except Exception:
-            
-              logger.exception('Error Encountered')
-              send(event, context, cfnresponse.FAILED, responseData, physicalResourceId)
-              return
+              cd = boto3.client('codedeploy')
+              cw = boto3.client('cloudwatch')
+              cloudwatch = boto3.resource('cloudwatch')
+              ec2 = boto3.client('autoscaling')
 
-          def send(event, context, responseStatus, responseData, physicalResourceId=None):
-            resourceId = physicalResourceId or context.log_stream_name
-            responseBody = {'Status': responseStatus,
-                            'Reason': 'See the details in CloudWatch Log Stream: ' + context.log_stream_name,
-                            'PhysicalResourceId': resourceId,
-                            'StackId': event['StackId'],
-                            'RequestId': event['RequestId'],
-                            'LogicalResourceId': event['LogicalResourceId'],
-                            'Data': responseData}
-            
-            logger.info('RESPONSE BODY:' + json.dumps(responseBody))
-            cfnresponse.send(event, context, responseStatus, responseData, resourceId)
+              print('Event:' + json.dumps(event))
 
-  BlueGreenDeploymentSuccessSubscription:
-    Condition: HasRootStackID
+              SNS_MSG=event['Records'][0]['Sns']['Message']
+              MSG=json.loads(SNS_MSG)
+
+              STATUS=MSG['status']
+              DEPLOYMENT_ID=MSG['deploymentId']
+              # Get the new asg from the last successful deployment
+              response=cd.get_deployment(deploymentId=DEPLOYMENT_ID)
+              ASG=response['deploymentInfo']['targetInstances']['autoScalingGroups'][0]
+              print("SNS Message:= " + SNS_MSG)
+              print("Deployment Status:= " + STATUS)
+              print("Deployment ID:= " + DEPLOYMENT_ID)
+              print("AutoScaling Group:= " + ASG)
+
+              if STATUS == 'SUCCEEDED':
+
+                print("Updating cloudwatch alarms")
+                # Update cloudwatch alarm with the new ASG
+                for ALARM in os.environ['ALARMS'].split(","):
+                    # Get the existing parameters
+                    # This will be used to update the new alarm
+                    params = cw.describe_alarms(AlarmNames=[ALARM])
+
+                    # Update the alarm with dimensions
+                    metric = cloudwatch.Metric(params['MetricAlarms'][0]['Namespace'],
+                                              params['MetricAlarms'][0]['MetricName'])
+                    metric.put_alarm(
+                        AlarmName=params['MetricAlarms'][0]['AlarmName'],
+                        MetricName=params['MetricAlarms'][0]['MetricName'],
+                        Namespace=params['MetricAlarms'][0]['Namespace'],
+                        ComparisonOperator=params['MetricAlarms'][0]['ComparisonOperator'],
+                        EvaluationPeriods=params['MetricAlarms'][0]['EvaluationPeriods'],
+                        Period=params['MetricAlarms'][0]['Period'],
+                        Statistic=params['MetricAlarms'][0]['Statistic'],
+                        Threshold=params['MetricAlarms'][0]['Threshold'],
+                        AlarmActions=params['MetricAlarms'][0]['AlarmActions'],
+                        OKActions=params['MetricAlarms'][0]['OKActions'],
+                        Dimensions=[
+                            {
+                                'Name': 'AutoScalingGroupName',
+                                'Value': ASG
+                            },]
+                        )
+
+              elif STATUS == 'FAILED':
+
+                # wait for 10 minutes before actually deleting the asg
+                time.sleep(600)
+                print("deleting autoscaling group:= " + ASG)
+                # Remove ASG after deployment
+                ec2.delete_auto_scaling_group(AutoScalingGroupName=ASG,ForceDelete=True)
+
+  UpdateAlarmLambdaFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UpdateAlarmLambdaFunction
+      Principal: sns.amazonaws.com   
+
+  LambdaUpdateAlarmExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: '/'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DescribeAlarms
+                Resource: '*'
+              - Effect: Allow
+                Action: 
+                  - codedeploy:GetDeploymentGroup
+                  - codedeploy:UpdateDeploymentGroup
+                  - codedeploy:GetDeployment
+                  - autoscaling:DeleteAutoScalingGroup
+                Resource: '*'
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  UpdateAlarmSubscriptionToCodeDeployStatusTopic:
     Type: AWS::SNS::Subscription
     Properties:
+      Endpoint: !GetAtt UpdateAlarmLambdaFunction.Arn
       Protocol: lambda
-      Endpoint: !GetAtt LambdaUpdateRootStackFunction.Arn
-      TopicArn: !Ref BlueGreenDeploySuccessTopic
-
-  # BlueGreenDeployment: #Enable only once Lambda is working / tested
-  #   Condition: HasRootStackID
-  #   Type: Custom::BlueGreenDeployment
-  #   Properties:
-  #     ServiceToken: !GetAtt LambdaGetBlueGreenASGNameFunction.Arn
-  #     ApplicationName: !Ref CodeDeployApplication
-  #     DeployGroupName: !Ref CodeDeployDeploymentGroup
-  #     TimeStamp: !Ref BlueGreenTimeStamp
+      TopicArn: !Ref CodeDeployStatusTopic
 
 Outputs:
 
@@ -794,18 +742,12 @@ Outputs:
     Description: The Arn of the deployment group for the stack
     Value: !Ref CodeDeployDeploymentGroup
 
-  BlueGreenDeploySuccessTopic:
-    Description: The topic for Blue Green deployment notifications
-    Value: !Ref BlueGreenDeploySuccessTopic
-
   BlueGreenAutoScalingGroupName:
-#   Condition: HasRootStackID
     Description: The Arn of the deployment group for the stack
     # Value: !GetAtt BlueGreenDeployment.BlueGreenAutoScalingGroupName
     Value: pchc-prd-ase1-pddts-ServerStack-YRIBSHH01XCQ-AppServerAutoScalingGroup-1RUFDPX2A4SZ6
 
   BlueGreenAutoScalingInstances:
-#   Condition: HasRootStackID
     Description: The Arn of the deployment group for the stack
     # Value: !GetAtt BlueGreenDeployment.BlueGreenAutoScalingInstances
     Value: ""
