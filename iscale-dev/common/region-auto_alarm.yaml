@@ -1,6 +1,45 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: Automatically Create Alarms for EC2 instances
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
 Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: autoalarm
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: anchanto
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
   Memory:
     Description: Memory to allocate to Lambda function
     Type: Number
@@ -24,8 +63,19 @@ Parameters:
     Type: String
     Default: ''
 
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
 Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   ConfigureAlarmNotifications: !Not [!Equals ['', !Ref AlarmNotificationARN]]
+  HasS3Bucket: !Not [!Equals ['', !Ref S3DeploymentBucket]]
 
 Resources:
   LambdaFunction:
@@ -38,7 +88,7 @@ Resources:
       MemorySize: !Ref Memory
       Timeout: 600
       Code:
-        S3Bucket: !Ref S3DeploymentBucket
+        S3Bucket: !If [HasS3Bucket, !Ref S3DeploymentBucket,  !Join [ '-', [!Ref OrgName , !FindInMap [RegionShort, !Ref 'AWS::Region', Name], lambda]]]
         S3Key: !Ref S3DeploymentKey
       Environment:
         Variables:
@@ -57,6 +107,7 @@ Resources:
   CloudWatchAutoAlarmLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Join [ '-', [!Ref OrgName, !FindInMap [RegionShort, !Ref 'AWS::Region', Name], lambda, autoalarm, role]]
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
