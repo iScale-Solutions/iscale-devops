@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for Legalization
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - DomainName
+          - OrgName
+          - EnvName
+          - DNSSECKey
+    
+    ParameterLabels:
+      DomainName:
+        default: Domain Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DNSSECKey:
+        default: Key for DNSSEC (optional if no DNSSEC)
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: legalization
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DomainName:
+    Description: The domain name for the DNS
+    Type: String
+    Default: legalization.ph
+  DNSSECKey:
+    Description: Enter the KMS key (from us-east-1) for DNSSSec (optional)
+    Type: String
+    Default: arn:aws:kms:us-east-1:383761724374:key/cdcd5739-9c6f-41e1-b8f6-010e2ab3182d
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasDNSSEC: !Not [!Equals [!Ref DNSSECKey, ""]]
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone: 
+    Type: AWS::Route53::HostedZone
+    Properties: 
+      HostedZoneConfig: 
+        Comment: !Join [' ',[Hosted Zone for, !Ref DomainName]]
+      Name: !Ref DomainName
+      HostedZoneTags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], iscale-solutions]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  ACMValidation:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[_4da5b053b1ceb7b0105671111f51496e, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - _26c2bf64984ab176db8261c4c0d38ce2.xgxxrgwpcb.acm-validations.aws.
+
+  DMARCRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: DMARC record
+      Name: !Join ['.', [_dmarc, !Ref DomainName]]
+      Type: TXT
+      TTL: 14400
+      ResourceRecords:
+        - !Join ['', ["\"v=DMARC1;p=quarantine; pct=100; rua=mailto:dmarc@", !Ref DomainName, "\""]]
+
+  GoogleWorkspaceMXRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: Google Workspace MX Records
+      Name: !Ref DomainName
+      Type: MX
+      TTL: 14400
+      ResourceRecords:
+        - 1 ASPMX.L.GOOGLE.COM
+        - 5 ALT1.ASPMX.L.GOOGLE.COM.
+        - 5 ALT2.ASPMX.L.GOOGLE.COM.
+        - 10 ALT3.ASPMX.L.GOOGLE.COM.
+        - 10 ALT4.ASPMX.L.GOOGLE.COM.
+
+  SESDKIMSGRecord1:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[fszzuvfifewznqq2ranu5ap5mn7wgyrh._domainkey, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - fszzuvfifewznqq2ranu5ap5mn7wgyrh.dkim.amazonses.com
+
+  SESDKIMSGRecord2:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[y2wlwgchotemjmuaugfudkqleyvd3nyl._domainkey, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - y2wlwgchotemjmuaugfudkqleyvd3nyl.dkim.amazonses.com
+
+  SESDKIMSGRecord3:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[amqj3pyve35l7dedqgt3gntcuwmtddpy._domainkey, !Ref DomainName]]
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - amqj3pyve35l7dedqgt3gntcuwmtddpy.dkim.amazonses.com
+
+  TXTDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      ResourceRecords:
+        - '"google-site-verification=58bH_t_6vVNMU6spndX_ZQkiEDf0_AX2nMf9JLF0YIQ"'
+        # - '"v=spf1 include:transmail.net include:one.zoho.com include:_spf.google.com include:amazonses.com -all"'
+      TTL: 14400
+      Comment: Domain TXT verification record
+      Type: TXT
+  
+  ###
+  # DNSSEC
+  ###
+
+  HostedZoneDNSSECSigningKey:
+    Condition: HasDNSSEC
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: !Ref DNSSECKey
+      Name: key_signing_key
+      Status: ACTIVE
+
+  HostedZoneDNSSEC:
+    Condition: HasDNSSEC
+    DependsOn: HostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref HostedZone
