@@ -42,7 +42,6 @@ Metadata:
           default: CloudWatch Configuration
         Parameters:
           - LogRetentionPeriod
-          - EnableCPUCreditAlarm #shoudl be removed
       - Label:
           default: Cloudformation Stack Configuration
         Parameters:
@@ -116,8 +115,6 @@ Metadata:
         default: Enable Enhanced Monitoring
       LogRetentionPeriod:
         default: Log Retention Period
-      EnableCPUCreditAlarm:
-        default: Enable CPU Credit Alarm
       NetworkStackName:
         default: Network Stack
       NetworkType:
@@ -293,13 +290,6 @@ Parameters:
     Type: Number
     Default: 7
     AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
-  EnableCPUCreditAlarm: #Should be removed. It is ignored
-    Description: Set to true if CPU credit alarm is enabled (Applicable only for t* instance types. E.g. t2.small, t3.small). Otherwise, disabled.
-    Type: String
-    Default: true
-    AllowedValues:
-      - true
-      - false
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
@@ -338,6 +328,8 @@ Conditions:
   IsAuroraPostgreSQL: !Equals [!Ref Engine, aurora-postgresql]
   IsAuroraMySQL: !Equals [!Ref Engine, aurora-mysql]
   IsSQLServer: !Or [!Equals [!Ref Engine, sqlserver-web], !Equals [!Ref Engine, sqlserver-se]]
+  IsNotSQLServer: !Not [Condition: IsSQLServer]
+  IsProdAndNotSQLServer: !And [Condition: IsProd, Condition: IsNotSQLServer]
   IsSQLServerWithDomain: !And [Condition: IsSQLServer, Condition: HasDomain]
   HasExports: !Equals [!Ref ExportStackValues, true]
   HasNoExports: !Not [Condition: HasExports]
@@ -930,7 +922,7 @@ Resources:
 
   CPUCreditBalanceCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
-    Condition: IsProd
+    Condition: IsProdAndNotSQLServer
     Properties:
       AlarmName: !Join ['-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], db-cpu-credit-balance]]
       MetricName: CPUCreditBalance
@@ -953,7 +945,7 @@ Resources:
 Outputs:
 
   CPUCreditBalanceAlarm:
-    Condition: IsProd
+    Condition: IsProdAndNotSQLServer
     Value: DB CPU Credit Balance Alarm
     Value: !GetAtt CPUCreditBalanceCloudWatchAlarm.Arn
 
