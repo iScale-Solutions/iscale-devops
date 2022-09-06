@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Amazon FSx for Windows File Server
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Other Resources Configuration
+        Parameters:
+          - NetworkStackName
+          - IWEBAPPSVRSecurityGroup
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 8
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: ''
+  IWEBAPPSVRSecurityGroup:
+    Description: Security group of web instances
+    Type: String
+    Default: ''
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+# NFS
+
+  WindowsFSX:
+    Type: AWS::FSx::FileSystem
+    Properties:
+      FileSystemType: OPENZFS
+      KmsKeyId: String
+      OpenZFSConfiguration: 
+          AutomaticBackupRetentionDays: 30
+          DailyAutomaticBackupStartTime: 23:00
+          DeploymentType: SINGLE_AZ_1
+          ThroughputCapacity: 1024
+
+      SecurityGroupIds: !GetAtt FSXSecurityGroup.GroupId
+      StorageCapacity: 100
+      StorageType: SSD
+      SubnetIds: 
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId1'
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, fsx]]
+
+  FSXSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  FSXSecurityGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt FSXSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 111
+      ToPort: 111
+      SourceSecurityGroupId: !Ref IWEBAPPSVRSecurityGroup
+
+  FSXSecurityGroupIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt FSXSecurityGroup.GroupId
+      IpProtocol: udp
+      FromPort: 111
+      ToPort: 111
+      SourceSecurityGroupId: !Ref IWEBAPPSVRSecurityGroup
+
+  FSXSecurityGroupIngress3:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt FSXSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref IWEBAPPSVRSecurityGroup
+
+  FSXSecurityGroupIngress4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt FSXSecurityGroup.GroupId
+      IpProtocol: udp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref IWEBAPPSVRSecurityGroup
+
+  FSXSecurityGroupIngress5:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt FSXSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 20001 - 20003
+      ToPort: 20001 - 20003
+      SourceSecurityGroupId: !Ref IWEBAPPSVRSecurityGroup
+
+  FSXSecurityGroupIngress6:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt FSXSecurityGroup.GroupId
+      IpProtocol: udp
+      FromPort: 20001 - 20003
+      ToPort: 20001 - 20003
+      SourceSecurityGroupId: !Ref IWEBAPPSVRSecurityGroup
+
+  FSXSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt FSXSecurityGroup.GroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcCidrBlock'
+
+Outputs:
+
+  WindowsFSX:
+    Description: NFS for windows (FSx OpenZFS)
+    Value: !Ref WindowsFSX
+  
+  
