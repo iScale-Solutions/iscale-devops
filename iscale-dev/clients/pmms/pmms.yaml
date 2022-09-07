@@ -1,0 +1,1023 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: PMMS resources stack
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - DeletionProtection
+          - RootStackID
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceAMI
+          - InstanceKeyName
+          - InstanceType
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      DeletionProtection:
+        default: Protect core items against deletion
+      RootStackID:
+        default: Root Stack ID
+      ClientDomainName:
+        default: Domain Name
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceType:
+        default: Instance Type
+      BlueGreenTimeStamp:
+        default: Blue Green Timestamp
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: pmms
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: iscale
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  BlueGreenTimeStamp:
+    Description: Blue Green Timestamp (don't update this by hand)
+    Type: String
+    Default: ''
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com)
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: iscale-software.com
+    MinLength: 1
+  DeletionProtection:
+    Description: Set to true to enable (valid only in Production mode)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-073adf464d20e09c8 # windows server 2019 base with preinstalled app (IIS, codedeploy, dotnet sdk, dotnet hosting, configured dns)
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: 'ceng-key | RSA'
+  InstanceType:
+    Description: Type of instance for app server
+    Type: String
+    Default: t3.small
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: iscale-dev-dev-uw2-tasaki-sns
+    MinLength: 1
+  RootStackID:
+    Description: ID of the parent (root) stack. Don't fill if no Blue Green updates are needed
+    Type: String
+    Default: ''
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 9 ? * MON-FRI *)
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
+  HasRootStackID: !Not [!Equals [!Ref RootStackID, '']]
+
+Resources:
+
+  ##
+  # PMMS Application Resources
+  ##
+
+# Secrets Manager
+  SecretsManager:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      SecretString: '{"username":"MasterUsername","password":"secret-password"}'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+## CodeDeploy ##
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, application]]
+      ComputePlatform: Server
+
+  NotifyReadyTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Protocol: lambda
+          Endpoint: !GetAtt  NotifyReadyFunction.Arn
+
+  NotifyReadyFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: AccessToDeploySetup
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codedeploy:GetDeployment
+                Resource: !Join [":", ["arn:aws:codedeploy", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "deploymentgroup:*"]]
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                Resource: '*'
+
+  NotifyReadyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Give the IP address of a ready EC2 instance in an AutoScaling group
+      Handler: index.lambda_handler
+      Role: !GetAtt  NotifyReadyFunctionRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Environment:
+        Variables:
+          ENV_NAME: !Ref EnvName
+          REGION: !Ref AWS::Region
+          SNS_TOPIC_ARN: 
+            Fn::ImportValue:
+              !Sub "${SNSStackName}-TopicArn"
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+          import json
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            logger.info(event)
+            logger.info(context)
+            
+            eventSubject=event[0]['Sns']['Subject']
+            eventSubject = eventSubject.split()
+            
+            deploymentId=eventSubject[3]
+            instanceId=eventSubject[8]
+            
+            logger.info(deploymentId)
+            logger.info(instanceId)
+            
+            codedeploy=boto3.client('codedeploy')
+            deployment_details=codedeploy.get_deployment(deploymentId=deploymentId)
+            application_name=deployment_details['deploymentInfo']['applicationName']
+
+            region=os.environ['REGION']
+            environment=os.environ['ENV_NAME']
+            client=boto3.client('ec2',region_name=region)
+            instance_details=client.describe_instances(InstanceIds=[instanceId])
+            publicIp=instance_details['Reservations'][0]['Instances'][0]['PublicIpAddress']
+            message='Deployment ID:' + deploymentId + '\nEC2 ready for '+ application_name + '(' + environment + '). \nInstance ' + instanceId + ' IP address:' +  publicIp
+            
+            sns = boto3.client('sns')
+            logger.info(message)
+            
+            topic=os.environ['SNS_TOPIC_ARN']
+            sns.publish(
+              TopicArn=topic,    
+              Message=message
+            )
+
+  NotifyReadyFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref NotifyReadyFunction
+      Principal: sns.amazonaws.com   
+
+  NotifyReadyTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref NotifyReadyTopic
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sns:Publish
+            Resource: !Ref NotifyReadyTopic
+            Principal:
+              AWS: '*'
+            Condition:
+              ArnLike:
+                AWS:SourceArn: !Sub 'arn:aws:*:*:${AWS::AccountId}:*'
+
+  BlueGreenDeploySuccessTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, bluegreen-deploy-OK]]
+
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentConfigName: CodeDeployDefault.OneAtATime
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      TriggerConfigurations:
+        - TriggerEvents:
+            - DeploymentSuccess
+            - DeploymentFailure
+          TriggerName: DeploymentState
+          TriggerTargetArn:
+            Fn::ImportValue:
+              !Sub "${SNSStackName}-TopicArn"
+        - TriggerEvents:
+            - DeploymentSuccess
+          TriggerName: BlueGreenDeploySuccess
+          TriggerTargetArn: !Ref BlueGreenDeploySuccessTopic
+        - TriggerEvents:
+            - InstanceReady
+          TriggerName: InstanceReady
+          TriggerTargetArn: !Ref NotifyReadyTopic
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+      Ec2TagFilters: #Iannis - Need to make this an auto-scaling group
+      - Key: Name
+        Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        Type: KEY_AND_VALUE
+
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Join [".", [codedeploy, !Ref 'AWS::Region', amazonaws, com]]
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+
+  DeploymentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, code-deploy]]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, code-deploy]]
+        - Key: Environment
+          Value: !Ref EnvName
+
+  DeploymentUserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      Policies:
+        - PolicyName: S3DeployBucketWriteAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Join ['',[!GetAtt DeploymentBucket.Arn, "/*"]]
+        - PolicyName: DeploymentAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetDeployment
+                  - codedeploy:ListDeploymentInstances
+                Resource: !Join [':', ['arn:aws:codedeploy', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'deploymentgroup', !Join ['/', [!Ref CodeDeployApplication, !Ref CodeDeployDeploymentGroup]]]]
+              - Effect: Allow
+                Action:
+                  - codedeploy:GetDeploymentConfig
+                Resource:
+                  - !Join [':', ['arn:aws:codedeploy', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'deploymentconfig', 'CodeDeployDefault.OneAtATime']]
+                  - !Join [':', ['arn:aws:codedeploy', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'deploymentconfig', 'CodeDeployDefault.AllAtOnce']]
+              - Effect: Allow
+                Action:
+                  - codedeploy:RegisterApplicationRevision
+                  - codedeploy:GetApplicationRevision
+                Resource: !Join [':', ['arn:aws:codedeploy', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'application', !Ref CodeDeployApplication]]
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                Resource: arn:aws:ec2:us-west-2:880804344419:*
+
+
+############
+###
+# Blue Green Section
+###
+
+# 1. When deployment succeeds, notify a topic
+# 2. Lambda subscribes to topic
+# 3. lambda looks at latest ASG name for app / dep group
+# 4. lambda invoke top stack Id with new timestamp to refresh everything
+# Need Top stack ID to be passed
+# Need AutoScaling Group name to be an output
+
+  LambdaGetBlueGreenASGNameFunctionExecutionRole:
+    Condition: HasRootStackID
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [lambda.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AutoScalingReadOnlyAccess
+      Policies:
+        - PolicyName: AccessDeploymentGroup
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codedeploy:GetDeploymentGroup
+                Resource: !Join [':', ['arn:aws:codedeploy', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'deploymentgroup', !Join ['/', [!Ref CodeDeployApplication, !Ref CodeDeployDeploymentGroup]]]]
+
+  LambdaGetBlueGreenASGNameFunction:
+    Condition: HasRootStackID
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaGetBlueGreenASGNameFunctionExecutionRole.Arn
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import json
+          import logging
+          import time
+          import base64
+          import string
+          import random
+          import boto3
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def get_asg_instance_ids(AutoScalingGroupName):
+              instance_ids=[];
+              asg = boto3.client('autoscaling');
+              instances = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[AutoScalingGroupName])['AutoScalingGroups'][0]['Instances'];
+              for inst in instances:
+                instance_ids.append(inst['InstanceId']);
+              return instance_ids;
+              
+          def lambda_handler(event, context):
+
+              responseData={}
+              physicalResourceId={}
+              request_type = event['RequestType']
+              
+              try:
+                logger.info('EVENT BODY:' + json.dumps(event))
+              
+                if request_type in ['Create', 'Update']:
+                  client = boto3.client('codedeploy');
+                  appname = event["ResourceProperties"]["ApplicationName"]
+                  grpname = event["ResourceProperties"]["DeployGroupName"]
+                  groupdef = client.get_deployment_group(applicationName=appname, deploymentGroupName=grpname)
+                  if groupdef["deploymentGroupInfo"]["deploymentStyle"]["deploymentType"] == 'BLUE_GREEN':
+                    asgname = groupdef["deploymentGroupInfo"]["autoScalingGroups"][0]["name"]
+                    instances = get_asg_instance_ids(asgname)
+                    responseData['BlueGreenAutoScalingGroupName'] = asgname
+                    responseData['BlueGreenAutoScalingInstances'] = instances
+                  else:
+                    responseData['BlueGreenAutoScalingGroupName'] = ''
+                    responseData['BlueGreenAutoScalingInstances'] = ''
+                
+                logger.info('RESPONSE BODY:' + json.dumps(responseData))
+                send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
+                return
+              
+                send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
+                return
+              
+              except Exception:
+              
+                logger.exception('Error Encountered')
+                send(event, context, cfnresponse.FAILED, responseData, physicalResourceId)
+                return
+
+          def send(event, context, responseStatus, responseData, physicalResourceId=None):
+              resourceId = physicalResourceId or context.log_stream_name
+              responseBody = {'Status': responseStatus,
+                              'Reason': 'See the details in CloudWatch Log Stream: ' + context.log_stream_name,
+                              'PhysicalResourceId': resourceId,
+                              'StackId': event['StackId'],
+                              'RequestId': event['RequestId'],
+                              'LogicalResourceId': event['LogicalResourceId'],
+                              'Data': responseData}
+              
+              logger.info('RESPONSE BODY:' + json.dumps(responseBody))
+              cfnresponse.send(event, context, responseStatus, responseData, resourceId)
+  
+  LambdaUpdateRootStackFunctionExecutionRole:
+    Condition: HasRootStackID
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [lambda.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AccessRootStack
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:UpdateStack
+                Resource: !Ref RootStackID
+
+  LambdaUpdateRootStackFunction:
+    Condition: HasRootStackID
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaUpdateRootStackFunctionExecutionRole.Arn
+      Runtime: python3.9
+      Environment:
+        Variables:
+          ROOT_STACK_ID: !Ref RootStackID
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import json
+          import logging
+          import time
+          import base64
+          import string
+          import os
+          import random
+          import boto3
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def get_stack_params(stackname):
+            resultparams=[];
+            cf = boto3.client('cloudformation');
+            logger.info('Requesting param for: ' + stackname)
+            stacks = cf.describe_stacks(StackName=stackname)
+            stack = stacks['Stacks'][0]
+            params = stack["Parameters"]
+            for param in params:
+              resultparams.append(param['ParameterKey']);
+            return resultparams;
+
+          def refresh_stack(stackid, sameparams, timestamp):
+            cf = boto3.client('cloudformation');
+            logger.info('Updating params for: ' + stackid)
+            
+            stacks = cf.describe_stacks(StackName=stackid)
+            updatedparams = []
+            for sameparam in sameparams:
+              if sameparam == 'BlueGreenTimeStamp':
+                updatedparams.append({'ParameterKey': 'TimeStamp', 'ParameterValue': timestamp});
+              else:
+                updatedparams.append({'ParameterKey': sameparam, 'UsePreviousValue': True});
+            
+            logger.info('Updating params: ' + json.dumps(updatedparams))
+            # cf.update_stacK(
+            #   StackName=stackid,
+            #   UsePreviousTemplate=True,
+            #   Parameters=updatedparams,
+            #   Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
+            # )
+              
+          def lambda_handler(event, context):
+            try:
+              logger.info('EVENT BODY:' + json.dumps(event))
+
+              responseData={}
+              physicalResourceId={}
+              request_type = event['RequestType']
+              stackid = os.environ['ROOT_STACK_ID']
+              params = get_stack_params(stackid)
+              logger.info('Stack Params:' + json.dumps(params))
+              randomparam=''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
+              logger.info('Updating stack with timestamp:' + randomparam)
+              
+              refresh_stack(stackid, params, randomparam)
+              
+              responseData["BlueGreenTimeStamp"] = randomparam
+              logger.info('RESPONSE BODY:' + json.dumps(responseData))
+              send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
+              return
+            
+              send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
+              return
+            
+            except Exception:
+            
+              logger.exception('Error Encountered')
+              send(event, context, cfnresponse.FAILED, responseData, physicalResourceId)
+              return
+
+          def send(event, context, responseStatus, responseData, physicalResourceId=None):
+            resourceId = physicalResourceId or context.log_stream_name
+            responseBody = {'Status': responseStatus,
+                            'Reason': 'See the details in CloudWatch Log Stream: ' + context.log_stream_name,
+                            'PhysicalResourceId': resourceId,
+                            'StackId': event['StackId'],
+                            'RequestId': event['RequestId'],
+                            'LogicalResourceId': event['LogicalResourceId'],
+                            'Data': responseData}
+            
+            logger.info('RESPONSE BODY:' + json.dumps(responseBody))
+            cfnresponse.send(event, context, responseStatus, responseData, resourceId)
+
+  BlueGreenDeploymentSuccessSubscription:
+    Condition: HasRootStackID
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      Endpoint: !GetAtt LambdaUpdateRootStackFunction.Arn
+      TopicArn: !Ref BlueGreenDeploySuccessTopic
+
+  AppServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
+      Protocol: HTTP
+      Port: 80
+      VpcId:  
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health.php
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+      Matcher:
+        HttpCode: 200,301,302,303 #can make this a param if required
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
+
+## EFS
+#  EFSSecurityGroup:
+#    Type: AWS::EC2::SecurityGroup
+#    Properties:
+#      #GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+#      GroupDescription:
+#        Fn::Join:
+#          - '-'
+#          - - Ref: OrgName
+#            - Fn::FindInMap:
+#              - EnvShort
+#              - Ref: EnvName
+#              - Name
+#            - Fn::FindInMap:
+#              - RegionShort
+#              - Ref: 'AWS::Region'
+#              - Name
+#            - Ref: Name
+#            - efs
+#      VpcId:
+#        Fn::ImportValue:
+#          Fn::Sub: '${NetworkStackName}-VpcId'
+#      Tags:
+#        - Key: Name
+#          Value:
+#            Fn::Join:
+#              - '-'
+#              - - Ref: OrgName
+#                - Fn::FindInMap:
+#                  - EnvShort
+#                  - Ref: EnvName
+#                  - Name
+#                - Fn::FindInMap:
+#                  - RegionShort
+#                  - Ref: 'AWS::Region'
+#                  - Name
+#                - Ref: Name
+#                - efs
+#        - Key: Environment
+#          Value:
+#            Ref: EnvName
+#        - Key: Organization
+#          Value:
+#            Ref: OrgName
+#  
+#  AllowEFSConnectionFromAppServer:
+#    Type: AWS::EC2::SecurityGroupIngress
+#    Properties:
+#      GroupId:
+#        Fn::GetAtt:
+#          - EFSSecurityGroup
+#          - GroupId
+#      IpProtocol: TCP
+#      FromPort: 2049
+#      ToPort: 2049
+#      SourceSecurityGroupId:
+#        Fn::GetAtt:
+#          - AppServerSecurityGroup
+#          - GroupId
+#  
+#  AppServerFileSystem:
+#    Type: AWS::EFS::FileSystem
+#    DeletionPolicy: Retain
+#    Properties:
+#      BackupPolicy:
+#        Status: 
+#          Fn::If:
+#            - IsProd
+#            - ENABLED
+#            - DISABLED
+#      Encrypted: true
+#      LifecyclePolicies:
+#        - TransitionToIA: AFTER_30_DAYS
+#      FileSystemTags:
+#        - Key: Name
+#          Value:
+#            Fn::Join:
+#              - '-'
+#              - - Ref: OrgName
+#                - Fn::FindInMap:
+#                  - EnvShort
+#                  - Ref: EnvName
+#                  - Name
+#                - Fn::FindInMap:
+#                  - RegionShort
+#                  - Ref: 'AWS::Region'
+#                  - Name
+#                - Ref: Name
+#                - efs
+#        - Key: Environment
+#          Value:
+#            Ref: EnvName
+#        - Key: Organization
+#          Value:
+#            Ref: OrgName
+#
+#  EFSMountTarget1:
+#    Type: AWS::EFS::MountTarget
+#    Properties:
+#      FileSystemId:
+#        Ref: AppServerFileSystem
+#      SubnetId:
+#        Fn::ImportValue:
+#          Fn::Sub: '${NetworkStackName}-InternalSubnetId1'
+#      SecurityGroups:
+#        - Ref: EFSSecurityGroup
+#
+#  EFSMountTarget2:
+#    Type: AWS::EFS::MountTarget
+#    Properties:
+#      FileSystemId:
+#        Ref: AppServerFileSystem
+#      SubnetId:
+#        Fn::ImportValue:
+#          Fn::Sub: '${NetworkStackName}-InternalSubnetId2'
+#      SecurityGroups:
+#        - Ref: EFSSecurityGroup
+
+## APP
+  AppServerIamProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: AppServerIamRole
+
+  AppServerIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AccessSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Join [ ':', [ "arn:aws:secretsmanager", !Ref AWS::Region, !Ref AWS::AccountId, secret, !Ref SecretsManager ] ]
+        - PolicyName: AccessCloudWatchMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                  - autoscaling:DescribeTags
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                Resource: '*'
+        - PolicyName: DeploymentResourcesAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObject*
+                Resource: #Assume naming convention since deployment bucket follows this. Else we would have to read it from the deployment stack
+                  Fn::Join:
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - Ref: OrgName
+                      - '-'
+                      - Fn::FindInMap:
+                        - EnvShort
+                        - Ref: EnvName
+                        - Name
+                      - '-'
+                      - Fn::FindInMap:
+                        - RegionShort
+                        - Ref: 'AWS::Region'
+                        - Name
+                      - '-'
+                      - Ref: Name
+                      - '-code-deploy/*'
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                Resource: '*'
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+
+  AppServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, SecurityGroup]]
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, appserver]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+  
+# RDP access
+  DefaultSecurityGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt AppServerSecurityGroup.GroupId
+      IpProtocol: "tcp"
+      FromPort: 3389
+      ToPort: 3389
+      CidrIp: "0.0.0.0/0"
+
+# Allow traffic from VPC
+  DefaultSecurityGroupIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt AppServerSecurityGroup.GroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: "10.0.0.0/16"
+  
+  DefaultSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt AppServerSecurityGroup.GroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: "0.0.0.0/0"
+
+
+  AppServerLaunchConfig: 
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      KeyName: !Ref InstanceKeyName
+      #!If [HasInstanceKey, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      ImageId: !Ref InstanceAMI
+      SecurityGroups: [!GetAtt AppServerSecurityGroup.GroupId]
+      InstanceType: !Ref InstanceType
+      #AssociatePublicIpAddress: !If [UsePrivateSubnet, false, true]
+      IamInstanceProfile: !GetAtt AppServerIamProfile.Arn
+      InstanceMonitoring: true
+
+  AppServerAutoScalingGroup:
+    # Iannis - make it conditional
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: true
+    Properties:
+      AutoScalingGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        #- UseFriendlyNames
+        #- !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        #- !Ref 'AWS::NoValue'
+      Cooldown: 60
+      MaxSize: 1
+      MinSize: 1
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+      DesiredCapacity: 1
+      VPCZoneIdentifier: #!If
+        #- UsePrivateSubnet
+        #- - Fn::ImportValue:
+        #      !Sub "${NetworkStackName}-InternalSubnetId1"
+        #  - Fn::ImportValue:
+        #      !Sub "${NetworkStackName}-InternalSubnetId2"
+        - Fn::ImportValue:
+            Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+        - Fn::ImportValue:
+            Fn::Sub: "${NetworkStackName}-PublicSubnetId2"
+      TargetGroupARNs:
+        - !Ref AppServerTargetGroup
+      LaunchConfigurationName: !Ref AppServerLaunchConfig
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          PropagateAtLaunch: True
+        - Key: Environment
+          Value: !Ref EnvName
+          PropagateAtLaunch: True
+        - Key: Organization
+          Value: !Ref OrgName
+          PropagateAtLaunch: True
+
+  SchedulerStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName: !Ref CodeDeployApplication
+        CodeDeployASGDesiredSize: 1
+        CodeDeployDeploymentGroupName: !Ref CodeDeployDeploymentGroup
+
+Outputs:
+
+  DeploymentUserGroup:
+    Description: Add the BitBucket user into this group
+    Value: !Ref DeploymentUserGroup
+    #  Fn::GetAtt:
+    #    - DeployStack
+    #    - Outputs.DeploymentUserGroup
+
+  DeploymentBucketArn:
+    Description: The Arn of the Deployment Bucket
+    Value: !GetAtt DeploymentBucket.Arn
+
+  DeploymentBucketName:
+    Description: The Name of the Deployment S3 Bucket
+    Value: !Ref DeploymentBucket
+
+  CodeDeployApplicationName:
+    Description: The name of the CodeDeploy application
+    Value: !Ref CodeDeployApplication
+
+  CodeDeployDeploymentGroupName:
+    Description: The Arn of the deployment group for the stack
+    Value: !Ref CodeDeployDeploymentGroup
