@@ -241,6 +241,32 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      Policies:
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: AccessCloudWatchMetrics
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                  - autoscaling:DescribeTags
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                Resource: '*'
 
   WebServerIamInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -333,11 +359,9 @@ Resources:
         - Name: fstype
           Value: xfs
         - Name: InstanceType
-          Value: t3.nano
+          Value: !Ref WebServerType
         - Name: device
           Value: nvme0n1p1
-        - Name: fstype
-          Value: xfs
 
   WebServerAZ1LowMemAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -431,11 +455,9 @@ Resources:
         - Name: fstype
           Value: xfs
         - Name: InstanceType
-          Value: t3.nano
+          Value: !Ref WebServerType
         - Name: device
           Value: nvme0n1p1
-        - Name: fstype
-          Value: xfs
 
   WebServerAZ2LowMemAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -521,7 +543,7 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       EvaluationPeriods: 1
       Period: 60
-      Statistic: Maximum
+      Statistic: Average
       Threshold: 1
       AlarmActions:
         - Fn::ImportValue:
@@ -531,12 +553,9 @@ Resources:
             !Sub '${SNSStackName}-TopicArn'
       Dimensions:
         - Name: LoadBalancer
-          Value: 
-            Fn::GetAtt:
-              - ELBStack
-              - Outputs.LoadBalancerFullName
+          Value: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
         - Name: TargetGroup
-          Value: !Ref WebServerTargetGroup
+          Value: !GetAtt [WebServerTargetGroup, TargetGroupFullName]
 
   WebServerListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
@@ -558,6 +577,25 @@ Resources:
 # Rest Server Tier
 ##
 
+  RestServerBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
   RestServerEC2Role:
     Type: AWS::IAM::Role
     Properties:
@@ -573,6 +611,49 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      Policies:
+        - PolicyName: S3BucketAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject*
+                  - s3:ListBucket
+                  - s3:PutObject*
+                  - s3:DeleteObject
+                Resource: 
+                  - !Join ['/', [!GetAtt RestServerBucket.Arn, '*']]
+              - Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                Resource: 'arn:aws:s3:::*'
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: AccessCloudWatchMetrics
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                  - autoscaling:DescribeTags
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                Resource: '*'
 
   RestServerIamInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -666,11 +747,9 @@ Resources:
         - Name: fstype
           Value: xfs
         - Name: InstanceType
-          Value: t3.nano
+          Value: !Ref RestServerType
         - Name: device
           Value: nvme0n1p1
-        - Name: fstype
-          Value: xfs
 
   RestServerAZ1LowMemAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -764,11 +843,9 @@ Resources:
         - Name: fstype
           Value: xfs
         - Name: InstanceType
-          Value: t3.nano
+          Value: !Ref RestServerType
         - Name: device
           Value: nvme0n1p1
-        - Name: fstype
-          Value: xfs
 
   RestServerAZ2LowMemAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -870,7 +947,7 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       EvaluationPeriods: 1
       Period: 60
-      Statistic: Maximum
+      Statistic: Average
       Threshold: 1
       AlarmActions:
         - Fn::ImportValue:
@@ -880,12 +957,9 @@ Resources:
             !Sub '${SNSStackName}-TopicArn'
       Dimensions:
         - Name: LoadBalancer
-          Value: 
-            Fn::GetAtt:
-              - ELBStack
-              - Outputs.LoadBalancerFullName
+          Value: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
         - Name: TargetGroup
-          Value: !Ref RestServerTargetGroup
+          Value: !GetAtt [RestServerTargetGroup, TargetGroupFullName]
 
   BackupStack:
     Condition: IsProd
@@ -911,3 +985,222 @@ Resources:
         DailyExpiration: 30 #30 days requirement only
         WeeklyExpiration: 180 #6 months
         MonthlyExpiration: 1825 # 5 years
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+        DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        DashboardBody: !Sub
+          - |
+            {
+              "widgets": [
+                {
+                  "height": 12,
+                  "width": 6,
+                  "y": 0,
+                  "x": 0,
+                  "type": "alarm",
+                  "properties": {
+                    "title": "Alarms",
+                    "alarms": [
+                      "${WebServerAZ1LowDiskSpaceAlarm}",
+                      "${WebServerAZ2LowDiskSpaceAlarm}",
+                      "${WebServerAZ1LowMemAlarm}",
+                      "${WebServerAZ2LowMemAlarm}",
+                      "${WebServerAZ1HighCPUAlarm}",
+                      "${WebServerAZ2HighCPUAlarm}",
+                      "${UnhealthyWebServerHostCountAlarm}",
+                      "${RestServerAZ1LowDiskSpaceAlarm}",
+                      "${RestServerAZ2LowDiskSpaceAlarm}",
+                      "${RestServerAZ1LowMemAlarm}",
+                      "${RestServerAZ2LowMemAlarm}",
+                      "${RestServerAZ1HighCPUAlarm}",
+                      "${RestServerAZ2HighCPUAlarm}",
+                      "${UnhealthyRestServerHostCountAlarm}"
+                    ]
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 6,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/EC2", "CPUUtilization", "InstanceId", "${REST_AZ1_INSTANCE_ID}", { "label": "Rest AZ1" } ],
+                      [ "...", "${REST_AZ2_INSTANCE_ID}", { "label": "Rest AZ2" } ],
+                      [ "...", "${WEB_AZ1_INSTANCE_ID}", { "label": "Web AZ1" } ],
+                      [ "...", "${WEB_AZ2_INSTANCE_ID}", { "label": "Web AZ2" } ],
+                      [ "AWS/RDS", ".", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "Database" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "CPU",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "label": "Utilization"
+                      },
+                      "right": {
+                        "label": "Time"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 6,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                        [ { "expression": "(m4/(1024*1000000))*100", "label": "RDS", "id": "e1", "region": "${REGION}" } ],
+                        [ "CWAgent", "mem_used_percent", "InstanceId", "${REST_AZ1_INSTANCE_ID}", "ImageId", "${REST_SERVER_AMI}", "InstanceType", "${REST_INSTANCE_TYPE}", { "label": "Rest AZ1", "id": "m1" } ],
+                        [ "...", "${REST_AZ2_INSTANCE_ID}", ".", ".", ".", ".", { "label": "Rest AZ2", "id": "m2" } ],
+                        [ "...", "${WEB_AZ1_INSTANCE_ID}", ".", "${WEB_SERVER_AMI}", ".", "${WEB_INSTANCE_TYPE}", { "label": "Web AZ1", "id": "m3" } ],
+                        [ "...", "${WEB_AZ2_INSTANCE_ID}", ".", ".", ".", ".", { "label": "Web AZ2", "id": "m4" } ],
+                        [ "AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m5", "visible": false } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "Memory",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                          "label": "Utilization"
+                      },
+                      "right": {
+                          "label": "Time"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 12,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
+                      [ "AWS/RDS", "ReadLatency", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" } ],
+                      [ ".", "WriteLatency", ".", ".", { "label": "RDS Write" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "Performance",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "showUnits": true,
+                        "label": "Time"
+                      },
+                      "right": {
+                        "label": "Duration"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 18,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                        [ "AWS/EC2", "NetworkIn", "InstanceId", "${REST_AZ1_INSTANCE_ID}", { "label": "Rest AZ1 (in)" } ],
+                        [ "...", "${REST_AZ2_INSTANCE_ID}", { "label": "Rest AZ2 (in)" } ],
+                        [ "...", "${WEB_AZ1_INSTANCE_ID}", { "label": "Web AZ1 (in)" } ],
+                        [ "...", "${WEB_AZ2_INSTANCE_ID}", { "label": "Web AZ2 (in)" } ],
+                        [ ".", "NetworkOut", "InstanceId", "${REST_AZ1_INSTANCE_ID}", { "label": "Rest AZ1 (out)" } ],
+                        [ "...", "${REST_AZ2_INSTANCE_ID}", { "label": "Rest AZ2 (out)" } ],
+                        [ "...", "${WEB_AZ1_INSTANCE_ID}", { "label": "Web AZ1 (out)" } ],
+                        [ "...", "${WEB_AZ2_INSTANCE_ID}", { "label": "Web AZ2 (out)" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "title": "Network",
+                    "region": "${REGION}",
+                    "period": 300,
+                    "stat": "Average"
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 12,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                        [ "CWAgent", "disk_used_percent", "path", "/", "InstanceId", "${REST_AZ1_INSTANCE_ID}", "ImageId", "${REST_SERVER_AMI}", "InstanceType", "${RestServerType}", "device", "nvme0n1p1", "fstype", "xfs", { "label": "Rest AZ1" } ],
+                        [ "...", "${REST_AZ2_INSTANCE_ID}", ".", ".", ".", ".", ".", ".", ".", ".", { "label": "Rest AZ2" } ],
+                        [ "...", "${WEB_AZ1_INSTANCE_ID}", ".", "${WEB_SERVER_AMI}", ".", "${WebServerType}", ".", ".", ".", ".", { "label": "Web AZ1" } ],
+                        [ "...", "${WEB_AZ2_INSTANCE_ID}", ".", ".", ".", ".", ".", ".", ".", ".", { "label": "Web AZ2" } ],
+                        [ { "expression": "100*(m1/(20*1024*1000000))", "label": "RDS", "id": "e2", "region": "${REGION}" } ],
+                        [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m1", "visible": false } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "Space",
+                    "stat": "Average"
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 18,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB HTTP 5XX_Count" } ],
+                      [ ".", "HTTPCode_ELB_4XX_Count", ".", ".", { "label": "ELB HTTP 4XX_Count" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "title": "Error Count",
+                    "period": 300,
+                    "stat": "Average"
+                  }
+                }
+              ]
+            }
+          - WebServerAZ1LowDiskSpaceAlarm: !GetAtt WebServerAZ1LowDiskSpaceAlarm.Arn
+            WebServerAZ2LowDiskSpaceAlarm: !GetAtt WebServerAZ2LowDiskSpaceAlarm.Arn
+            WebServerAZ1LowMemAlarm: !GetAtt WebServerAZ1LowMemAlarm.Arn 
+            WebServerAZ2LowMemAlarm: !GetAtt WebServerAZ2LowMemAlarm.Arn
+            WebServerAZ1HighCPUAlarm: !GetAtt WebServerAZ1HighCPUAlarm.Arn
+            WebServerAZ2HighCPUAlarm: !GetAtt WebServerAZ2HighCPUAlarm.Arn
+            UnhealthyWebServerHostCountAlarm: !GetAtt UnhealthyWebServerHostCountAlarm.Arn
+            RestServerAZ1LowDiskSpaceAlarm: !GetAtt RestServerAZ1LowDiskSpaceAlarm.Arn
+            RestServerAZ2LowDiskSpaceAlarm: !GetAtt RestServerAZ2LowDiskSpaceAlarm.Arn
+            RestServerAZ1LowMemAlarm: !GetAtt RestServerAZ1LowMemAlarm.Arn
+            RestServerAZ2LowMemAlarm: !GetAtt RestServerAZ2LowMemAlarm.Arn
+            RestServerAZ1HighCPUAlarm: !GetAtt RestServerAZ1HighCPUAlarm.Arn
+            RestServerAZ2HighCPUAlarm: !GetAtt RestServerAZ2HighCPUAlarm.Arn
+            UnhealthyRestServerHostCountAlarm: !GetAtt UnhealthyRestServerHostCountAlarm.Arn
+            REGION: !Ref 'AWS::Region'
+            ELB_FULL_NAME: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
+            DB_INSTANCE_ID: !GetAtt [DBStack, Outputs.DBInstanceName]
+            REST_AZ1_INSTANCE_ID: !Ref RestServerInstance1
+            REST_AZ2_INSTANCE_ID: !Ref RestServerInstance2
+            REST_INSTANCE_TYPE: !Ref RestServerType
+            REST_SERVER_AMI: !Ref RestServerAMI
+            WEB_AZ1_INSTANCE_ID: !Ref WebServerInstance1
+            WEB_AZ2_INSTANCE_ID: !Ref WebServerInstance2
+            WEB_INSTANCE_TYPE: !Ref WebServerType
+            WEB_SERVER_AMI: !Ref WebServerAMI
