@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Lazaki Image Builder
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Sharing Configuration
+        Parameters:
+          - ShareImage
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      ShareImage:
+        default: Share image with other account? If sharing, encryption will be disabled.
+      SNSStackName:
+        default: SNS Topic Stack Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (e.g. odoo-linux).
+    Type: String
+    Default: lazaki
+    AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: fishingkaki
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: fishingkaki-stg-uw2-network
+    MinLength: 1
+  ShareImage:
+    Description: Select true to not encrypt the image and share it with other accounts
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: fishingkaki-stg-uw2-sns
+    MinLength: 1
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml      
+  IsImageShared: !Equals [!Ref ShareImage, true]
+
+Resources:
+  
+  ConfigNginxStoppedComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: NginXStopped
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.1
+      Description: Turns off Nginx by default
+      ChangeDescription: Initial version
+      Data: |
+        name: NginxStopped  - InlineData
+        description: Turns off Nginx by default
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: ChkConfigOff
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - | 
+                      sudo chkconfig nginx off
+
+  LAMPPHP8Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PHP 8
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.1
+      Description: Installs PHP8
+      ChangeDescription: Initial version
+      Data: |
+        name:  PHP8 - InlineData
+        description: Installation PHP8
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallPHP8
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      sudo yum install -y amazon-linux-extras
+                      sudo amazon-linux-extras enable php8.0
+                      sudo yum clean metadata
+                      sudo yum install -y php php-common php-pear
+                      sudo yum install -y php-{cgi,curl,mbstring,gd,mysqlnd,gettext,json,xml,fpm,intl,zip}
+              - name: SetupPHP8INI
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      sed -i 's,; max_input_vars = 1000,max_input_vars = 10000,' /etc/php.ini
+
+  LazakiImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'lazaki']]
+      Version: 1.0.2
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.24']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', [!Ref OrgName, 'lazaki']]
+      Components: #Max 20
+        - ComponentArn: !Ref LAMPPHP8Component
+        - ComponentArn: !Ref ConfigNginxStoppedComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  LazakiImageBuilder: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters: 
+        Name: lazaki
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref LazakiImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
