@@ -27,6 +27,7 @@ Metadata:
         Parameters:
           - InstanceKeyName
           - InstanceAMI
+          - FEInstanceAMI
           - SIOSInstanceAMI
           - InstanceType
           - RDPPort
@@ -51,6 +52,8 @@ Metadata:
         default: Active Directory Password
       DeletionProtection:
         default: Protect core items against deletion
+      FEInstanceAMI:
+        default: FE Instance AMI ID
       InstanceAMI:
         default: Instance AMI ID
       SIOSInstanceAMI:
@@ -119,6 +122,10 @@ Parameters:
     AllowedValues:
       - true
       - false
+  FEInstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0526b9747c2c87a0b #Default Windows 2019 base server
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
@@ -212,6 +219,7 @@ Resources:
         CustomSubnet2: 
           Fn::ImportValue:
             !Sub '${NetworkStackName}-PublicSubnetId3'
+
 ###
 # CICSAPPSVR1
 ###
@@ -916,6 +924,353 @@ Resources:
         - Name: InstanceId
           Value: !Ref CICSWITSVRInstance
 
+##
+# CICSFEAPPSVR1
+##
+
+  CICSFEAPPSVREC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ClearingHousePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:DeleteMessage
+                  - sqs:ReceiveMessage
+                Resource:
+                  -  !Join [':', [arn, !Ref 'AWS::Partition', sqs, '*', !Ref 'AWS::AccountId', CICSQUEUE]]
+
+  CICSFEAPPSVRInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref CICSFEAPPSVREC2Role
+
+  CICSFEAPPSVRSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSFEAPPSVR, Security, Group]]
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcCidrBlock'
+          Description: Allow all traffic on on all ports from inside VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSFEAPPSVR, Security, Group]]
+
+  AllowJumpHostIntoCICSFEAPPSVR:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref CICSFEAPPSVRSecurityGroup
+      FromPort: 3389
+      ToPort: 3389
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  CICSFEAPPSVRInstance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref SIOSInstanceAMI
+      InstanceType: c5d.4xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref CICSFEAPPSVRInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 100
+            VolumeType: gp3
+        - DeviceName: xvdf
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            Iops: 16000
+            VolumeSize: 1000
+            VolumeType: gp3
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref CICSFEAPPSVRSecurityGroup
+          SecondaryPrivateIpAddressCount: 2
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSFEAPPSVR1]]
+
+  HighCPUCICSFEAPPSVR1Alarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSFEAPPSVR1, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref CICSFEAPPSVRInstance1
+
+###
+# CICSFEAPPSVR2
+###
+
+  CICSFEAPPSVRInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref SIOSInstanceAMI
+      InstanceType: c5d.4xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref CICSFEAPPSVRInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 100
+            VolumeType: gp3
+        - DeviceName: xvdf
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            Iops: 16000
+            VolumeSize: 1000
+            VolumeType: gp3
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref CICSFEAPPSVRSecurityGroup
+          SecondaryPrivateIpAddressCount: 2
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId3'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSFEAPPSVR2]]
+
+  HighCPUCICSFEAPPSVR2Alarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSFEAPPSVR2, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref CICSFEAPPSVRInstance2
+
+###
+# IWEBFEAPPSVR1
+###
+
+  IWEBFEAPPSVREC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  IWEBFEAPPSVRInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref IWEBFEAPPSVREC2Role
+
+  IWEBFEAPPSVRSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR, Security, Group]]
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcCidrBlock'
+          Description: Allow all connections on all ports from inside VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR, Security, Group]]
+
+  AllowJumpHostIntoIWEBFEAPPSVR:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref IWEBFEAPPSVRSecurityGroup
+      FromPort: 3389
+      ToPort: 3389
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  IWEBFEAPPSVRInstance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref FEInstanceAMI
+      InstanceType: c5.2xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref IWEBFEAPPSVRInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds:
+        - !Ref IWEBFEAPPSVRSecurityGroup
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR1]]
+
+  HighCPUIWEBFEAPPSVR1Alarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR1, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref IWEBFEAPPSVRInstance1
+
+###
+# IWEBFEAPPSVR2
+###
+
+  IWEBFEAPPSVRInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref FEInstanceAMI
+      InstanceType: c5.2xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref IWEBFEAPPSVRInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds:
+        - !Ref IWEBFEAPPSVRSecurityGroup
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId3'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR2]]
+
+  HighCPUIWEBFEAPPSVR2Alarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR2, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref IWEBFEAPPSVRInstance2
+
+  AllowELBIntoCIWEBFEAPPSVR:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from ELB
+      IpProtocol: TCP
+      GroupId: !Ref IWEBFEAPPSVRSecurityGroup
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt [ELBStack, Outputs.SecurityGroupId]
+
 ###
 # PCHJUMPSVR
 ###
@@ -1294,6 +1649,38 @@ Resources:
           Value: !Ref CICSTargetGroup
       TreatMissingData: notBreaching
 
+##
+# FrontEnd DB
+##
+
+  DBFEStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Join ['',[!Ref Name, fe]]
+        DatabaseName: !Join ['',[!Join ['',[!Ref Name, fe]], !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: 1000
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
+        Domain: !Ref ActiveDirectory
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: sqlserver-se
+        EngineVersion: 15.00.4073.23.v1
+        Family: sqlserver-se-15.0
+        InstanceType: db.m5.xlarge
+        MasterUser: admin
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        NetworkType: Private
+        OptionGroupName: !Ref SQLServerOptionGroup
+        Port: 1433
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
 ###
 # S3 Buckets
 ###
@@ -1437,6 +1824,8 @@ Resources:
             - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref IWEBAPPSVR2Instance]]]]
             - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSWITSVRInstance]]]]  
             - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref PCHJUMPSVRInstance]]]]  
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSFEAPPSVRInstance1]]]]  
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSFEAPPSVRInstance2]]]]
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
         DailyExpiration: 30 #30 days requirement only
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
@@ -1491,6 +1880,8 @@ Resources:
                     "${HIGH_CPU_GLBL_SCPSVR2}",
                     "${HIGH_CPU_IWEB_SVR1}",
                     "${HIGH_CPU_IWEB_SVR2}",
+                    "${HIGH_CPU_IWEBFE_SVR1}",
+                    "${HIGH_CPU_IWEBFE_SVR2}",
                     "${HIGH_CPU_WIT_SVR}",
                     "${HIGH_CPU_JUMP_SVR}"
                   ]
@@ -1507,10 +1898,14 @@ Resources:
                     [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS" } ],
                     [ "AWS/EC2", "CPUUtilization", "InstanceId", "${APP_SVR1_ID}", { "label": "App Server 1" } ],
                     [ "...", "${APP_SVR2_ID}", { "label": "App Server 2" }  ],
+                    [ "...", "${APPFE_SVR1_ID}", { "label": "FE App Server 1" }  ],
+                    [ "...", "${APPFE_SVR2_ID}", { "label": "FE App Server 2" }  ],
                     [ "...", "${GLB_LSCP_SVR1_ID}", { "label": "Backend 1" } ],
                     [ "...", "${GLB_LSCP_SVR2_ID}", { "label": "Backend 2" } ],
                     [ "...", "${IWEB_APP_SVR1_ID}", { "label": "Web Server 1" } ],
                     [ "...", "${IWEB_APP_SVR2_ID}", { "label": "Web Server 2" } ],
+                    [ "...", "${IWEBFE_APP_SVR1_ID}", { "label": "FE Web Server 1" } ],
+                    [ "...", "${IWEBFE_APP_SVR2_ID}", { "label": "FE Web Server 2" } ],
                     [ "...", "${WIT_SVR_ID}", { "label": "Witness Server" } ],
                     [ "...", "${JUMP_SVR_ID}", { "label": "Jump Server" } ]
                   ],
@@ -1592,10 +1987,14 @@ Resources:
                     [ ".", "NetworkTransmitThroughput", ".", ".", { "label": "RDS (Out)" }],
                     [ "AWS/EC2", "NetworkIn", "InstanceId", "${APP_SVR1_ID}", { "label": "App Server 1 (In)" } ],
                     [ "...", "${APP_SVR2_ID}", { "label": "App Server 2 (In)" }  ],
+                    [ "...", "${APPFE_SVR1_ID}", { "label": "FE App Server 1 (In)" }  ],
+                    [ "...", "${APPFE_SVR2_ID}", { "label": "FE App Server 2 (In)" }  ],
                     [ "...", "${GLB_LSCP_SVR1_ID}", { "label": "Backend 1 (In)" } ],
                     [ "...", "${GLB_LSCP_SVR2_ID}", { "label": "Backend 2 (In)" } ],
                     [ "...", "${IWEB_APP_SVR1_ID}", { "label": "Web Server 1 (In)" } ],
                     [ "...", "${IWEB_APP_SVR2_ID}", { "label": "Web Server 2 (In)" } ],
+                    [ "...", "${IWEBFE_APP_SVR1_ID}", { "label": "FE Web Server 1 (In)" } ],
+                    [ "...", "${IWEBFE_APP_SVR2_ID}", { "label": "FE Web Server 2 (In)" } ],
                     [ "...", "${WIT_SVR_ID}", { "label": "Witness Server (In)" } ],
                     [ "...", "${JUMP_SVR_ID}", { "label": "Jump Server (In)" } ],
                     [ "AWS/EC2", "NetworkOut", "InstanceId", "${APP_SVR1_ID}", { "label": "App Server 1 (Out)" } ],
@@ -1604,6 +2003,8 @@ Resources:
                     [ "...", "${GLB_LSCP_SVR2_ID}", { "label": "Backend 2 (Out)" } ],
                     [ "...", "${IWEB_APP_SVR1_ID}", { "label": "Web Server 1 (Out)" } ],
                     [ "...", "${IWEB_APP_SVR2_ID}", { "label": "Web Server 2 (Out)" } ],
+                    [ "...", "${IWEBFE_APP_SVR1_ID}", { "label": "FE Web Server 1 (Out)" } ],
+                    [ "...", "${IWEBFE_APP_SVR2_ID}", { "label": "FE Web Server 2 (Out)" } ],
                     [ "...", "${WIT_SVR_ID}", { "label": "Witness Server (Out)" } ],
                     [ "...", "${JUMP_SVR_ID}", { "label": "Jump Server (Out)" } ]
                   ],
@@ -1635,10 +2036,14 @@ Resources:
                     [ ".", "WriteThroughput", ".", ".", { "label": "RDS Write" }],
                     [ "AWS/EC2", "EBSReadOps", "InstanceId", "${APP_SVR1_ID}", { "label": "App Server 1 (In)" } ],
                     [ "...", "${APP_SVR2_ID}", { "label": "App Server 2 (In)" }  ],
+                    [ "...", "${APPFE_SVR1_ID}", { "label": "FE App Server 1 (In)" }  ],
+                    [ "...", "${APPFE_SVR2_ID}", { "label": "FE App Server 2 (In)" }  ],
                     [ "...", "${GLB_LSCP_SVR1_ID}", { "label": "Backend 1 (In)" } ],
                     [ "...", "${GLB_LSCP_SVR2_ID}", { "label": "Backend 2 (In)" } ],
                     [ "...", "${IWEB_APP_SVR1_ID}", { "label": "Web Server 1 (In)" } ],
                     [ "...", "${IWEB_APP_SVR2_ID}", { "label": "Web Server 2 (In)" } ],
+                    [ "...", "${IWEBFE_APP_SVR1_ID}", { "label": "FE Web Server 1 (In)" } ],
+                    [ "...", "${IWEBFE_APP_SVR2_ID}", { "label": "FE Web Server 2 (In)" } ],
                     [ "...", "${WIT_SVR_ID}", { "label": "Witness Server (In)" } ],
                     [ "...", "${JUMP_SVR_ID}", { "label": "Jump Server (In)" } ],
                     [ "AWS/EC2", "EBSWriteOps", "InstanceId", "${APP_SVR1_ID}", { "label": "App Server 1 (Out)" } ],
@@ -1647,6 +2052,8 @@ Resources:
                     [ "...", "${GLB_LSCP_SVR2_ID}", { "label": "Backend 2 (Out)" } ],
                     [ "...", "${IWEB_APP_SVR1_ID}", { "label": "Web Server 1 (Out)" } ],
                     [ "...", "${IWEB_APP_SVR2_ID}", { "label": "Web Server 2 (Out)" } ],
+                    [ "...", "${IWEBFE_APP_SVR1_ID}", { "label": "FE Web Server 1 (Out)" } ],
+                    [ "...", "${IWEBFE_APP_SVR2_ID}", { "label": "FE Web Server 2 (Out)" } ],
                     [ "...", "${WIT_SVR_ID}", { "label": "Witness Server (Out)" } ],
                     [ "...", "${JUMP_SVR_ID}", { "label": "Jump Server (Out)" } ]
                   ],
@@ -1691,6 +2098,8 @@ Resources:
           HIGH_CPU_GLBL_SCPSVR2: !GetAtt [HighCPUGLBLSCPSVR2Alarm, Arn]
           HIGH_CPU_IWEB_SVR1: !GetAtt [HighCPUIWEBAPPSVR1Alarm, Arn]
           HIGH_CPU_IWEB_SVR2: !GetAtt [HighCPUIWEBAPPSVR2Alarm, Arn]
+          HIGH_CPU_IWEBFE_SVR1: !GetAtt [HighCPUIWEBFEAPPSVR1Alarm, Arn]
+          HIGH_CPU_IWEBFE_SVR2: !GetAtt [HighCPUIWEBFEAPPSVR2Alarm, Arn]
           HIGH_CPU_WIT_SVR: !GetAtt [HighCPUCICSWITSVRAlarm, Arn]
           HIGH_CPU_JUMP_SVR: !GetAtt [HighCPUJUMPSVRAlarm, Arn]
           DB_HIGH_CPU: !GetAtt [DBStack, Outputs.DBHighCPUAlarm]
@@ -1704,10 +2113,14 @@ Resources:
           ELB_FULL_NAME: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
           APP_SVR1_ID: !Ref CICSAPPSVR1Instance
           APP_SVR2_ID: !Ref CICSAPPSVR2Instance
+          APPFE_SVR1_ID: !Ref CICSFEAPPSVRInstance1
+          APPFE_SVR2_ID: !Ref CICSFEAPPSVRInstance2
           GLB_LSCP_SVR1_ID: !Ref GLBLSCPSVR1Instance
           GLB_LSCP_SVR2_ID: !Ref GLBLSCPSVR2Instance
           IWEB_APP_SVR1_ID: !Ref IWEBAPPSVR1Instance
           IWEB_APP_SVR2_ID: !Ref IWEBAPPSVR2Instance
+          IWEBFE_APP_SVR1_ID: !Ref IWEBFEAPPSVRInstance1
+          IWEBFE_APP_SVR2_ID: !Ref IWEBFEAPPSVRInstance2
           WIT_SVR_ID: !Ref CICSWITSVRInstance
           JUMP_SVR_ID: !Ref PCHJUMPSVRInstance
 
