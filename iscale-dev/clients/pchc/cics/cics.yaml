@@ -1441,6 +1441,79 @@ Resources:
         - Name: InstanceId
           Value: !Ref PCHJUMPSVRInstance
 
+  PCHJUMPSVROperatorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR, Operator, Security, Group]]
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcCidrBlock'
+          Description: Allow all traffic on on all ports from inside VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR, Opeator, Security, Group]]
+
+  PCHJUMPSVROperatorInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref FEInstanceAMI #Instance AMI no longer there
+      InstanceType: t3.medium
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref PCHJUMPSVRInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds:
+        - !Ref PCHJUMPSVROperatorSecurityGroup
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PublicSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, PCHJUMPSVROPERATOR]]
+
+  HighCPUJUMPSVROperatorAlarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, JUMPSVROPERATOR, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref PCHJUMPSVROperatorInstance
+
+  AllowNoelTrafficIntoPCHJUMPSVROPERATOR:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Noel IP address
+      IpProtocol: TCP
+      GroupId: !Ref PCHJUMPSVROperatorSecurityGroup
+      FromPort: !Ref RDPPort
+      ToPort: !Ref RDPPort
+      CidrIp: 120.89.33.198/32
+
 ##
 # Active Directory
 ##
@@ -1566,7 +1639,7 @@ Resources:
         EnablePerformanceInsights: !If [IsProd, true, false]
         EnvName: !Ref EnvName
         Engine: sqlserver-se
-        EngineVersion: 15.00.4073.23.v1
+        EngineVersion: 15.00.4198.2.v1
         Family: sqlserver-se-15.0
         InstanceType: db.m5.2xlarge
         MasterUser: admin
@@ -1704,7 +1777,7 @@ Resources:
         EnablePerformanceInsights: !If [IsProd, true, false]
         EnvName: !Ref EnvName
         Engine: sqlserver-se
-        EngineVersion: 15.00.4073.23.v1
+        EngineVersion: 15.00.4198.2.v1
         Family: sqlserver-se-15.0
         InstanceType: db.m5.xlarge
         MasterUser: admin
