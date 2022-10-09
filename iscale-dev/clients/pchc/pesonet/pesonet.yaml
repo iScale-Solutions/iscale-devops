@@ -254,17 +254,6 @@ Resources:
 # Application
 ####
 
-  AppServerDeployStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name,app]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
-
   CacheStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -284,7 +273,7 @@ Resources:
   ServerStack:
     DependsOn:
       - DBStack
-      - AppServerDeployStack
+      # - AppServerDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
@@ -292,20 +281,9 @@ Resources:
         Name: !Join ['-', [!Ref Name,app]]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        ASGMaxSize: 3
-        ASGDesiredSize: 2
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
+        ASGMaxSize: 0
+        ASGMinSize: 0
+        ASGDesiredSize: 0
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint:
           Fn::GetAtt:
@@ -322,7 +300,6 @@ Resources:
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 443
-        # InstanceSpotPrice: 1
         InstanceSubnet: Private
         InstanceType: !If [IsProd, t3.large, t3.medium]
         LoadBalancerPriority: 100
@@ -336,30 +313,6 @@ Resources:
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
-
-  AppServerSchedulerStack:
-    DependsOn:
-      - DBStack
-      - ServerStack
-    Condition: IsNotProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
-        UseFriendlyNames: FALSE
-        CodeDeployApplicationName:
-          Fn::GetAtt:
-            - AppServerDeployStack
-            - Outputs.CodeDeployApplicationName
-        CodeDeployDeploymentGroupName:
-          Fn::GetAtt:
-            - AppServerDeployStack
-            - Outputs.CodeDeployDeploymentGroupName
 
 ###
 # App Server Treasury
@@ -678,21 +631,6 @@ Resources:
           Fn::GetAtt:
             - SidekiqServerDeployStack
             - Outputs.CodeDeployDeploymentGroupName
-
-  AllowJumpHostIntoServer:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from jump host
-      IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-            - ServerStack
-            - Outputs.AppServerSecurityGroup
-      FromPort: 22
-      ToPort: 22
-      SourceSecurityGroupId:
-        Fn::ImportValue:
-            !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   BackupStack:
     DependsOn:
