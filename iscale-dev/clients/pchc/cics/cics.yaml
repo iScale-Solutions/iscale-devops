@@ -220,6 +220,22 @@ Resources:
           Fn::ImportValue:
             !Sub '${NetworkStackName}-PublicSubnetId3'
 
+####
+# SFTP Section
+####
+
+  FTPStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/sftp.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        HostedZoneName: !Ref ClientDomainName
+        Hostname: sftp-cics
+
 ###
 # CICSAPPSVR1
 ###
@@ -255,7 +271,7 @@ Resources:
                   - s3:GetObject
                   - s3:DeleteObject
                   - s3:PutObject
-                  - s3:ListObject
+                  - s3:ListBucket
                 Resource:
                   - !Join [':', [arn, !Ref 'AWS::Partition', 's3::', !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'xfer1/ToServer/*']]]]
                   - !Join [':', [arn, !Ref 'AWS::Partition', 's3::', !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'xfer1/FromServer/*']]]]
@@ -277,6 +293,22 @@ Resources:
                   - sqs:ReceiveMessage
                 Resource:
                   -  !Join [':', [arn, !Ref 'AWS::Partition', sqs, '*', !Ref 'AWS::AccountId', CICSQUEUE]]
+        - PolicyName: SyncToCICSFTPSite
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:PutObject
+                Resource:
+                  - !Join ['/', [!GetAtt [FTPStack, Outputs.S3BucketARN], home, xxx, '*']]
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt [FTPStack, Outputs.S3BucketARN]
 
   CICSAPPSVRInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -1987,23 +2019,6 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         IWEBAPPSVRSecurityGroup: !GetAtt CICSFEAPPSVRSecurityGroup.GroupId
-
-
-####
-# SFTP Section
-####
-
-  FTPStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/sftp.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        NetworkStackName: !Ref NetworkStackName
-        HostedZoneName: !Ref ClientDomainName
-        Hostname: sftp-cics
 
 ###
 # Dashboard
