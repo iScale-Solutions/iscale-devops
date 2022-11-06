@@ -1,41 +1,35 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: 'This is a modified Akamai Enterprise Application Access (EAA) cloudformation template.
-  AWS CloudFormation Template Akamai Connector:  This template installs
-  Akamai Connector **WARNING** This template creates an Amazon EC2 instance and an
-  EBS volume. You will be billed for the AWS resources used if you create a stack
-  from this template.'
+Description: Akamai setup for PDDTS
 
 Metadata:
   AWS::CloudFormation::Interface: 
     ParameterGroups:
-      -
-        Label:
-          default: "Resource Configuration"
+      - Label:
+          default: Resource Configuration
         Parameters:
           - Name
           - OrgName
           - EnvName
-      -
-        Label:
-          default: "EC2 Configuration"
+      - Label:
+          default: EC2 Configuration
         Parameters:
           - InstanceType
-          - VpcId
-          - VpcSubnet
+          - PDDTSStackName
+          - SNSStackName
 
     ParameterLabels:
       Name:
-        default: "Resource Name"
+        default: Resource Name
       OrgName:
-        default: "Organization Name"
+        default: Organization Name
       EnvName:
-        default: "Environment Name"
+        default: Environment Name
       InstanceType:
-        default: "Instance Type"
-      VpcId:
-        default: "VPC ID"
-      VpcSubnet:
-        default: "Subnet ID"
+        default: Instance Type
+      PDDTSStackName:
+        default: PDDTS Stack Name
+      SNSStackName:
+        default: SNS Stack Name
 
 Parameters:
   Name:
@@ -94,14 +88,16 @@ Parameters:
     - t3.xlarge
     - t3.2xlarge
     ConstraintDescription: must be a valid EC2 instance type.
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-    Description: VpcId of your existing Virtual Private Cloud (VPC).
-    Default: 'vpc-045c92570c51de046' #change if needed
-  VpcSubnet:
-    Description: Enter the VPC subnet of you existing Virtual Private Cloud (VPC)
-    Type: AWS::EC2::Subnet::Id
-    Default: 'subnet-000c0ae57a3171145' #change if needed
+  PDDTSStackName:
+    Description: The name of the PDDTS stack
+    Type: String
+    Default: pchc-prd-ase1-pddts
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: pchc-prd-ase1-sns
+    MinLength: 1
 
 Mappings: 
   EnvShort:
@@ -281,22 +277,90 @@ Resources:
 ####
 # EC2 Section
 ####
-  PCHCConnectorUAT1SecurityGroup:
+
+  AkamaiConnectorEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      Policies:
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: AccessCloudWatchMetrics
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                  - autoscaling:DescribeTags
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                Resource: '*'
+
+  AkamaiConnectorIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Roles:
+        - !Ref AkamaiConnectorEC2Role
+
+  AkamaiConnectorSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Opening everything outbound
       VpcId:
-        Ref: VpcId
+        Fn::ImportValue:
+          Fn::Sub: '${PDDTSStackName}-VpcId'
       SecurityGroupEgress:
-      - IpProtocol: "-1"
-        FromPort: "-1"
-        ToPort: "-1"
+      - IpProtocol: -1
+        FromPort: -1
+        ToPort: -1
         CidrIp: 0.0.0.0/0
+
+  AllowConnectorIntoPDDTS:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue:
+          !Sub '${PDDTSStackName}-ELBSecurityGroup'
+      IpProtocol: TCP
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId:
+        !GetAtt AkamaiConnectorSecurityGroup.GroupId
+      Description:
+        Fn::Sub: 'Allow from ${Name}'
+
   Ec2Instance:
     Type: AWS::EC2::Instance
     Properties:
+      DisableApiTermination: true
+      IamInstanceProfile: !Ref AkamaiConnectorIamInstanceProfile
       SecurityGroupIds:
-      - Ref: PCHCConnectorUAT1SecurityGroup
+        - Ref: AkamaiConnectorSecurityGroup
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -310,11 +374,97 @@ Resources:
         - Ref: AWS::Region
         - AMI
       SubnetId:
-        Ref: VpcSubnet
+        Fn::ImportValue:
+          Fn::Sub: '${PDDTSStackName}-PublicSubnetId1'
       InstanceType:
         Ref: InstanceType
       UserData: # unique value in downloaded CF template from Akamai 
         Fn::Base64: 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
+
+  AkamaiConnectorHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref Ec2Instance
+
+###
+# Route53
+###
+
+  AkamaiDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Fn::ImportValue:
+                !Sub '${PDDTSStackName}-ClientDomainName'
+            - '.'
+      Name: !Join
+        - '.'
+        - - akamai-pddts
+          - Fn::ImportValue:
+              !Sub '${PDDTSStackName}-ClientDomainName'
+      ResourceRecords: 
+        - akamai-pddts-pchc-com-ph.go.akamai-access.com
+      TTL: 14400
+      Type: CNAME
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], akamai, pddts]]
+
+  PDDTSDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Fn::ImportValue:
+                !Sub '${PDDTSStackName}-ClientDomainName'
+            - '.'
+      Name: !Join
+        - '.'
+        - - pddts
+          - Fn::ImportValue:
+              !Sub '${PDDTSStackName}-ClientDomainName'
+      ResourceRecords:
+        - pddts-pchc-com-ph.go.akamai-access.com
+      TTL: 14400
+      Type: CNAME
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pddts]]
+
+  PortalDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName:
+        Fn::Join:
+          - ''
+          - - Fn::ImportValue:
+                !Sub '${PDDTSStackName}-ClientDomainName'
+            - '.'
+      Name: !Join
+        - '.'
+        - - portal
+          - Fn::ImportValue:
+              !Sub '${PDDTSStackName}-ClientDomainName'
+      ResourceRecords: 
+        - portal-pchc-com-ph.login.go.akamai-access.com
+      TTL: 14400
+      Type: CNAME
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], portal]]
 
 Outputs:
 
@@ -322,6 +472,7 @@ Outputs:
     Description: InstanceId of the newly created EC2 instance
     Value:
       Ref: Ec2Instance
+
   AZ:
     Description: Availability Zone of the newly created EC2 instance
     Value:
