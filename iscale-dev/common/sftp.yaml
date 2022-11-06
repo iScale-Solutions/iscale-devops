@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Test SFTP Server
+
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - HostedZoneName
+          - Hostname
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      HostedZoneName:
+        default: Domain name
+      Hostname:
+        default: SFTP host name
+      NetworkStackName:
+        default: Network Stack
+      SNSStackName:
+        default: SNS Stack
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: sftp
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  HostedZoneName:
+    Type: String
+    Description: Domain Name
+    Default: iscale-solutions.com
+  Hostname:
+    Type: String
+    Description: Hostname for the SFTP Server
+    Default: sftp
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+  
+  SFTPServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join [' ', [!Ref Name, SFTP Server Security Group]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+  
+  SFTPServerEIP:
+    Type: AWS::EC2::EIP
+
+  SFTPServer:
+    Type: AWS::Transfer::Server
+    Properties:
+      EndpointType: VPC
+      Domain: S3
+      EndpointDetails:
+        AddressAllocationIds:
+          - !GetAtt SFTPServerEIP.AllocationId
+        SecurityGroupIds:
+          - !Ref SFTPServerSecurityGroup
+        SubnetIds:
+          - Fn::ImportValue: !Sub '${NetworkStackName}-PublicSubnetId1'
+        VpcId: 
+          Fn::ImportValue:
+            !Sub '${NetworkStackName}-VpcId'
+      LoggingRole: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/AWSTransferLoggingAccess'
+      PreAuthenticationLoginBanner: This system is for the use of authorized users only. Individuals using this computer system without authority, or in excess of their authority, are subject to having all of their activities on this system monitored and recorded by system personnel.
+      Protocols: 
+        - SFTP
+      SecurityPolicyName: TransferSecurityPolicy-2022-03
+      Tags:
+        - Key: aws:transfer:customHostname
+          Value: !Join ['.', [!Ref Hostname, !Ref HostedZoneName]]
+  
+  SFTPServerDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Join ['.', [!Ref Hostname, !Ref HostedZoneName]]
+      HostedZoneName: !Join ['', [!Ref HostedZoneName, '.']]
+      Type: A
+      Comment: SFTP custom hostname
+      TTL: 300
+      ResourceRecords:
+        - !Ref SFTPServerEIP
+
+  SFTPServerS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join [ '-', [!Ref OrgName , !FindInMap [EnvShort, !Ref EnvName, Name],  !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ftp, server]]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName , s3, data]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  SFTPServerUserSessionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Join [ '-', [!Ref OrgName , !FindInMap [EnvShort, !Ref EnvName, Name],  !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ftp, user, session, policy]]
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !GetAtt SFTPServerS3Bucket.Arn
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:GetObjectVersion
+              - s3:GetObjectACL
+              - s3:PutObjectACL
+            Resource: !Join ['/', [!GetAtt SFTPServerS3Bucket.Arn, '*']]        
+
+  SFTPServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - transfer.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      RoleName: !Join [ '-', [!Ref OrgName , !FindInMap [EnvShort, !Ref EnvName, Name],  !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ftp, user, role]]
+      ManagedPolicyArns:
+        - !Ref SFTPServerUserSessionPolicy
+      Policies:
+        - PolicyName: AllowHomeDirectoryOperations
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: 'arn:aws:s3:::${transfer:HomeBucket}'
+                Condition:
+                  StringLike:
+                    's3:prefix': 
+                      - '${transfer:HomeFolder}/*'
+                      - '${transfer:HomeFolder}'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                  - s3:GetObjectVersion
+                  - s3:GetObjectACL
+                  - s3:PutObjectACL
+                Resource: 'arn:aws:s3:::${transfer:HomeDirectory}/*'
+
+Outputs:
+
+  HostName:
+    Description: FTP Hostname
+    Value: !Join ['.', [!Ref Hostname, !Ref HostedZoneName]]
+  
+  SecurityGroup:
+    Description: FTP Security Group
+    Value: !Ref SFTPServerSecurityGroup
+
+  S3Bucket:
+    Description: S3 Bucket
+    Value: !Ref SFTPServerS3Bucket
