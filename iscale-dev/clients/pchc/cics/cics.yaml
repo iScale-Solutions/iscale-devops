@@ -1606,6 +1606,104 @@ Resources:
       ToPort: !Ref RDPPort
       CidrIp: 120.89.33.198/32
 
+###
+# BKUPSVR
+###
+
+  BKUPSVREC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  BKUPSVRInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref BKUPSVREC2Role
+
+  BKUPSVRInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0526b9747c2c87a0b
+      InstanceType: t3.xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref BKUPSVRInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 50
+            VolumeType: gp3
+      SsmAssociations:
+        - DocumentName: !Ref EC2JoinADSSMDocument
+          AssociationParameters:
+            - Key: directoryId
+              Value:
+                - !Ref ActiveDirectory
+            - Key: directoryName
+              Value:
+                - !Join ['.', [!Join ['-', [!Ref OrgName, !Ref Name]], !FindInMap [EnvShort, !Ref EnvName, Name]]]
+            - Key: dnsIpAddresses
+              Value: !GetAtt [ActiveDirectory, DnsIpAddresses]
+      SecurityGroupIds:
+        - !Ref BKUPSVRSecurityGroup
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BKUPSVR]]
+
+  BKUPSVRSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BKUPSVR, Security, Group]]
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcCidrBlock'
+          Description: Allow all traffic on on all ports from inside VPC
+
+  HighCPUJUMPSVRAlarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BKUPSVR, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref BKUPSVRInstance
+
 ##
 # Active Directory
 ##
@@ -1763,6 +1861,16 @@ Resources:
       FromPort: 1433
       ToPort: 1433
       SourceSecurityGroupId: !Ref GLBLSCPSVRSecurityGroup
+  
+  AllowBKUPSVRIntoDB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from BKUPSVR
+      IpProtocol: TCP
+      GroupId: !GetAtt [DBStack, Outputs.SecurityGroupId]
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !Ref BKUPSVRSecurityGroup
 
   CICSListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
