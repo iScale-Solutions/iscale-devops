@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Backup infrastructure for Externisy
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: externisy
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Backup Resources
+####
+
+  BackupS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], data, backup]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], data, backup]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  BackupGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: ExternisyBackup
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AccessS3Bucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject*
+                  - s3:ListBucket
+                  - s3:PutObject*
+                Resource:
+                  - !GetAtt BackupS3Bucket.Arn
+                  - !Join ['/', [!GetAtt BackupS3Bucket.Arn, '*']]
+
+  BackupUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: backup@externisy.fr
+      Groups:
+      - !Ref BackupGroup
+      Tags:
+        - Key: Name
+          Value: NAS Backup Access
+        - Key: Email
+          Value: backup@externisy.fr
+
+  BackupUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName:
+        Ref: BackupUser
+
+Outputs:
+
+  BackupUserAccessKeyId:
+    Description: Access Key Id for the backup user
+    Value: !Ref BackupUserAccessKey
+  
+  BackupUserAccessKeySecret:
+    Description: Secret Key for the backup user
+    Value: !GetAtt [BackupUserAccessKey, SecretAccessKey]
