@@ -112,6 +112,242 @@ Resources:
                     - python3 -m pip install -U pip
 
 ###
+# Odoo15 Configurations
+###
+
+  Odoo15Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Odoo-15
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.4
+      Description: Installs Odoo 15
+      ChangeDescription: Initial version
+      Data: |
+        name: Odoo 15 - InlineData
+        description: Installation of Odoo 15
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallWkHTMLToPDF
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y --nogpgcheck https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.5/wkhtmltox-0.12.5-1.centos7.x86_64.rpm
+              - name: CreateDirs
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - mkdir -p /opt/odoo15
+                    - mkdir -p /var/log/odoo15
+              - name: DownloadOdoo15
+                action: WebDownload
+                maxAttempts: 3
+                inputs:
+                  - source: https://github.com/odoo/odoo/archive/15.0.zip
+                    destination: /tmp/15.0.zip
+              - name: UnzipOdoo15
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - unzip /tmp/15.0.zip -d /opt/odoo15
+                    - mv -fv /opt/odoo15/odoo-15.0/* /opt/odoo15/
+                    - rm -fr /opt/odoo15/odoo-15.0/
+              - name: InstallOdoo15Requirements
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo pip3 install -r /opt/odoo15/requirements.txt
+                    - sudo pip3 install html2text
+                    - sudo pip3 install reportlab
+                    - sudo pip3 install babel
+                    - sudo pip3 install decorator
+                    - sudo pip3 install python-dateutil
+                    - sudo pip3 install requests
+                    - sudo pip3 install jinja2
+                    - sudo pip3 install pyOpenSSL
+                    - sudo pip3 install freezegun
+                    - sudo pip3 install qrcode
+                    - pip3 install pdfminer
+                    - pip3 install psycopg2-binary
+                    - pip3 istall libsaas
+              - name: InstallOdoo15Cryptography
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo pip3 install setuptools-rust
+                    - sudo pip3 install cryptography
+              - name: CreateOdoo15config
+                action: CreateFile
+                inputs:
+                  - path: /opt/odoo15/odoo15.conf
+                    content: |
+                      [options]
+                      addons_path = /opt/odoo15/odoo/addons,/opt/odoo15/addons
+                      admin_passwd = admin
+                      csv_internal_sep = ,
+                      data_dir = /home/ec2-user/.local/share/Odoo
+                      db_host = False
+                      db_maxconn = 64
+                      db_name = False
+                      db_password = False
+                      db_port = False
+                      db_sslmode = prefer
+                      db_template = template0
+                      db_user = False
+                      dbfilter =
+                      demo = {}
+                      email_from = False
+                      # geoip_database = /usr/share/GeoIP/GeoLite2-City.mmdb
+                      http_enable = True
+                      http_interface =
+                      http_port = 8069
+                      import_partial =
+                      limit_memory_hard = 2684354560
+                      limit_memory_soft = 2147483648
+                      limit_request = 8192
+                      limit_time_cpu = 60
+                      limit_time_real = 120
+                      limit_time_real_cron = -1
+                      list_db = True
+                      log_db = False
+                      log_db_level = warning
+                      log_handler = :INFO
+                      log_level = info
+                      logfile =
+                      longpolling_port = 8072
+                      max_cron_threads = 4
+                      osv_memory_age_limit = False
+                      osv_memory_count_limit = False
+                      pg_path =
+                      pidfile =
+                      proxy_mode = True
+                      reportgz = False
+                      screencasts =
+                      screenshots = /tmp/odoo_tests
+                      server_wide_modules = base,web
+                      smtp_password = False
+                      smtp_port = 25
+                      smtp_server = localhost
+                      smtp_ssl = False
+                      smtp_user = False
+                      syslog = False
+                      test_enable = False
+                      test_file =
+                      test_tags = None
+                      transient_age_limit = 1.0
+                      translate_modules = ['all']
+                      unaccent = False
+                      upgrade_path =
+                      without_demo = False
+                      workers = 2
+                    overwrite: true
+              - name: SetOdoo15Permissions
+                action: SetFolderOwner
+                inputs:
+                  - path: /opt/odoo15
+                    owner: ec2-user
+                    group: ec2-user
+              - name: SetOdoo15LogPermissions
+                action: SetFolderOwner
+                inputs:
+                  - path: /var/log/odoo15
+                    owner: ec2-user
+                    group: ec2-user
+              - name: CreateOdoo15Service
+                action: CreateFile
+                inputs:
+                  - path: /lib/systemd/system/odoo15.service
+                    content: |
+                      [Unit]
+                      Description=Odoo15 Server
+                          
+                      [Service]
+                      Type=simple
+                      PermissionsStartOnly=true
+                      SyslogIdentifier=odoo15-server
+                      User=ec2-user
+                      Group=ec2-user
+                      ExecStart=/opt/odoo15/odoo-bin -c /opt/odoo15/odoo15.conf
+                      WorkingDirectory=/opt/odoo15/
+                          
+                      [Install]
+                      WantedBy=multi-user.target
+                    overwrite: true
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /opt/aws/amazon-cloudwatch-agent-config/odoo15-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/log/odoo15/odoo15.log",
+                                  "log_group_name": "/var/log/odoo15/odoo15.log"
+                                },
+                                {
+                                  "file_path": "/var/log/blur.log",
+                                  "log_group_name": "/var/log/blur.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent-config/odoo15-cloudwatch.json
+
+  Odoo15ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'odoo15']]
+      Version: 1.0.6
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.25']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', [!Ref OrgName, 'odoo15']]
+      Components: #Max 20
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/python-3-linux/1.0.2/1']]
+        - ComponentArn: !Ref PIP3Component
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/postgresql-12-client/1.0.2']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/python-3-devel/1.0.2']]
+        - ComponentArn: !Ref OpenLDAPDevelComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudwatchagent-for-autoscaling-group/1.0.0/1']]
+        - ComponentArn: !Ref Odoo15Component
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/nginx/1.0.3']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  Odoo15ImageBuilder: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters: 
+        Name: odoo15
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref Odoo15ImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
+
+###
 # Odoo14 Configurations
 ###
 
@@ -322,8 +558,8 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'odoo14']]
-      Version: 1.0.21
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
+      Version: 1.0.22
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.25']]
       WorkingDirectory: /tmp
       Description: !Join [' ', [!Ref OrgName, 'odoo14']]
       Components: #Max 20
@@ -544,8 +780,8 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'odoo13']]
-      Version: 1.0.20
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.20']]
+      Version: 1.0.21
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.25']]
       WorkingDirectory: /tmp
       Description: !Join [' ', [!Ref OrgName, 'odoo13']]
       Components: #Max 20
