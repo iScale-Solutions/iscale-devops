@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Externisy IAM users
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: externisy
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  OdooProdAccessGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, odoo, prod, access]]
+      Policies:
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], odoo, prod, policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: TerminateSSM
+                Effect: Allow
+                Action:
+                  - ssm:ResumeSession
+                  - ssm:TerminateSession
+                Resource:
+                  - arn:aws:ssm:*:*:session/${aws:username}-*
+              - Sid: AllowSSMinEC2
+                Effect: Allow
+                Action:
+                  - ssm:StartSession
+                Resource: 'arn:aws:ec2:*:*:instance/*'
+                Condition:
+                  StringLike:
+                    ssm:resourceTag/Name: externisy-prd-ew3-odoo
+              - Sid: AllowSSMSessionListing
+                Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - ssm:DescribeSessions
+                  - ssm:GetConnectionStatus
+                  - ssm:DescribeInstanceProperties
+                  - ssm:DescribeInstanceInformation
+                  - ec2:DescribeInstances
+                Resource: '*'
+
+  OdooTestAccessGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, odoo, test, access]]
+      Policies:
+        - PolicyName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], odoo, test, policy]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: TerminateSSM
+                Effect: Allow
+                Action:
+                  - ssm:ResumeSession
+                  - ssm:TerminateSession
+                Resource:
+                  - arn:aws:ssm:*:*:session/${aws:username}-*
+              - Sid: AllowSSMinEC2
+                Effect: Allow
+                Action:
+                  - ssm:StartSession
+                Resource: 'arn:aws:ec2:*:*:instance/*'
+                Condition:
+                  StringLike:
+                    ssm:resourceTag/Name: externisy-test-ew3-odoo
+              - Sid: AllowSSMSessionListing
+                Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - ssm:DescribeSessions
+                  - ssm:GetConnectionStatus
+                  - ssm:DescribeInstanceProperties
+                  - ssm:DescribeInstanceInformation
+                  - ec2:DescribeInstances
+                Resource: '*'
+
+  MandaIAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      LoginProfile:
+        Password: Manda123! #will be reset right away
+        PasswordResetRequired: true
+      UserName: manda@iscale-solutions.com
+      Groups:
+        - Billing
+        - ReadOnly
+        - MFA
+        - !Ref OdooProdAccessGroup
+        - !Ref OdooTestAccessGroup
+  
+  TsilavIAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      LoginProfile:
+        Password: Tsilav123! #will be reset right away
+        PasswordResetRequired: true
+      UserName: tsilavina@iscale-solutions.com
+      Groups:
+        - Billing
+        - ReadOnly
+        - MFA
+        - !Ref OdooProdAccessGroup
+        - !Ref OdooTestAccessGroup
+
+  GithubUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: github_user
+      Tags:
+        - Key: Name
+          Value: Github Access
+        - Key: Email
+          Value: github@externisy.fr
+
+  GithubUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName:
+        Ref: GithubUser
+
+# Outputs:
+
+#   GithubUserAccessKeyId:
+#     Description: Access Key Id for the Github user
+#     Value: !Ref GithubUserAccessKey
+  
+#   GithubUserAccessKeySecret:
+#     Description: Secret Key for the Github user
+#     Value: !GetAtt [GithubUserAccessKey, SecretAccessKey]
