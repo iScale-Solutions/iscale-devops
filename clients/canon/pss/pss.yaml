@@ -19,7 +19,8 @@ Metadata:
           default: Load Balancer Configuration
         Parameters:
           - ClientDomainName
-          - LoadBalancerCertificateArn
+          - APILoadBalancerCertificateArn
+          - WebLoadBalancerCertificateArn
       - Label:
           default: Rest Instance Configuration
         Parameters:
@@ -47,8 +48,10 @@ Metadata:
         default: Environment Name
       InstanceAMI:
         default: Instance AMI ID
-      LoadBalancerCertificateArn:
-        default: Load Balancer SSL Certificate ARN
+      APILoadBalancerCertificateArn:
+        default: API Load Balancer SSL Certificate ARN
+      WebLoadBalancerCertificateArn:
+        default: Web Load Balancer SSL Certificate ARN
       NetworkStackName:
         default: Network Stack Name
       RestServerAMI:
@@ -93,10 +96,14 @@ Parameters:
       - Staging
       - Development
       - Test
-  LoadBalancerCertificateArn:
-    Description: SSL Certificate for the ELB
+  APILoadBalancerCertificateArn:
+    Description: API SSL Certificate for the ELB
     Type: String
-    Default: arn:aws:acm:ap-southeast-1:780347486043:certificate/3b81b0f7-2210-4d89-afcf-5e9a422a57b0
+    Default: arn:aws:acm:ap-southeast-1:780347486043:certificate/f48c8db5-97cf-47d7-b15c-bf1c98b6af59
+  WebLoadBalancerCertificateArn:
+    Description: Web SSL Certificate for the ELB
+    Type: String
+    Default: arn:aws:acm:ap-southeast-1:780347486043:certificate/3e4a95a8-b70a-4864-806d-a31a04f25643
   NetworkStackName:
     Description: The name of the network stack
     Type: String
@@ -217,11 +224,19 @@ Resources:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        CertificateArn: !Ref LoadBalancerCertificateArn
+        CertificateArn: !Ref WebLoadBalancerCertificateArn
         DeletionProtection: !If [IsProd, true, false]
         IdleTimeout: 600
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+
+  SSLListenerCertificates:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref WebLoadBalancerCertificateArn
+        - CertificateArn: !Ref APILoadBalancerCertificateArn
+      ListenerArn: !GetAtt [ELBStack, Outputs.ApplicationListenerArn]
   
   AllowCSPLPenTestIntoELBHTTPS:
     Type: AWS::EC2::SecurityGroupIngress
@@ -478,7 +493,7 @@ Resources:
   WebServerInstance1:
     Type: AWS::EC2::Instance
     Properties:
-      # DisableApiTermination: !If [IsProd, true, false]
+      DisableApiTermination: !If [IsProd, true, false]
       ImageId: !Ref WebServerAMI
       InstanceType: !Ref WebServerType
       IamInstanceProfile: !Ref WebServerIamInstanceProfile
@@ -574,7 +589,7 @@ Resources:
   WebServerInstance2:
     Type: AWS::EC2::Instance
     Properties:
-      # DisableApiTermination: !If [IsProd, true, false]
+      DisableApiTermination: !If [IsProd, true, false]
       ImageId: !Ref WebServerAMI
       InstanceType: !Ref WebServerType
       IamInstanceProfile: !Ref WebServerIamInstanceProfile
@@ -731,7 +746,7 @@ Resources:
       Conditions:
         - Field: host-header
           Values:
-            - !Join ['.', [!Ref Name, 'iscale-solutions.com']] #Hardwired for now
+            - !Join ['.', [!Ref Name, ph, canon]]
       ListenerArn: 
         Fn::GetAtt:
           - ELBStack
@@ -869,7 +884,7 @@ Resources:
   RestServerInstance1:
     Type: AWS::EC2::Instance
     Properties:
-      # DisableApiTermination: !If [IsProd, true, false]
+      DisableApiTermination: !If [IsProd, true, false]
       ImageId: !Ref WebServerAMI
       InstanceType: !Ref RestServerType
       IamInstanceProfile: !Ref RestServerIamInstanceProfile
@@ -965,7 +980,7 @@ Resources:
   RestServerInstance2:
     Type: AWS::EC2::Instance
     Properties:
-      # DisableApiTermination: !If [IsProd, true, false]
+      DisableApiTermination: !If [IsProd, true, false]
       ImageId: !Ref RestServerAMI
       InstanceType: !Ref RestServerType
       IamInstanceProfile: !Ref RestServerIamInstanceProfile
@@ -1099,7 +1114,12 @@ Resources:
       Conditions:
         - Field: host-header
           Values:
-            - !Join ['.', ['restpss', 'iscale-solutions.com']]
+            - !Join ['.', [api, !Ref Name, ph, canon]]
+        - Field: source-ip
+          SourceIpConfig:
+            Values:
+            - 136.158.229.146/28
+            - 112.199.118.203/29
       ListenerArn:
         Fn::GetAtt:
           - ELBStack
