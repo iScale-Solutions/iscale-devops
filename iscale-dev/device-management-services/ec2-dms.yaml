@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Device Management Services Image Builder
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Sharing Configuration
+        Parameters:
+          - ShareImage
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      ShareImage:
+        default: Share image with other account? If sharing, encryption will be disabled.
+      SNSStackName:
+        default: SNS Topic Stack Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (e.g. wordpress).
+    Type: String
+    Default: dms
+    AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-ue2-network
+    MinLength: 1
+  ShareImage:
+    Description: Select true to not encrypt the image and share it with other accounts
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-dev-ue2-sns
+    MinLength: 1
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cf-templates/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cf-templates/include/conditions.yaml      
+  IsImageShared: !Equals [!Ref ShareImage, true]
+
+Resources:
+
+###
+# DMS Components
+###
+
+  LEMPStackRemiComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: LEMPStack-remi
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installing LEMP stack using remi repo (php 8.1) + composer
+      ChangeDescription: Initial version
+      Data: |
+        name: AmazonLinux2LEMPStackREMI - InlineData
+        description: Installation of LEMP Stack using remi repo
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallPHP
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      sudo yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+                      sudo yum -y install https://rpms.remirepo.net/enterprise/remi-release-7.rpm
+                      sudo yum -y install yum-utils
+                      sudo yum-config-manager --disable 'remi-php*'
+                      sudo yum-config-manager --enable remi-php81
+                      sudo yum -y install php81 php81-php-{common,cgi,cli,fpm,mysqlnd,devel,gd,mbstring,curl,xml,pear,bcmath,json,opcache,gettext,intl,zip}
+                      sudo ln -s /bin/php81 /usr/bin/php
+              - name: InstallNginx
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      sudo yum -y install nginx
+                      sudo mkdir /var/www
+                      sudo service nginx start
+              - name: InstallMySQL
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum -y install mysql
+              - name: InstallComposer
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      sudo curl -sS https://getcomposer.org/installer | sudo php
+                      sudo mv composer.phar /usr/local/bin/composer
+                      sudo ln -s /usr/local/bin/composer /usr/bin/composer
+
+###
+# Instance Image
+###
+
+  DMSImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'dms']]
+      Version: 1.0.0
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.0']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', [!Ref OrgName, 'dms']]
+      Components: #Max 20
+        - ComponentArn: !Ref LEMPStackRemiComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/reboot-test-linux/1.0.0/1']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  DMSImageBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cf-templates.s3.us-east-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: dms
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref DMSImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
