@@ -46,6 +46,7 @@ Metadata:
           default: EC2 Instance Configuration
         Parameters:
           - InstanceKeyName
+          - InstanceType
           - InstanceAMI
           - InstanceSubnet
       - Label:
@@ -53,10 +54,6 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
-      - Label:
-          default: Deploy Configuration
-        Parameters:
-          - CreateCodePipeline
 
     ParameterLabels:
       Name:
@@ -69,8 +66,6 @@ Metadata:
         default: Allow database blur
       AllowDatabaseRemoteAccess:
         default: Allow Database remote access
-      CreateCodePipeline:
-        default: Create Code Pipeline
       DatabaseStackName:
         default: Database Stack Name
       LoadBalancerCertificateArn:
@@ -91,6 +86,8 @@ Metadata:
         default: Instance AMI
       InstanceSubnet:
         default: Instance Subnet to use
+      InstanceType:
+        default: Instance type to use
       SharedEFSID:
         default: Shared EFS ID (if using shared EFS, else leave blank)
       SharedEFSSecurityGroup:
@@ -146,13 +143,6 @@ Parameters:
     AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
     Default: iscale-software.com
     MinLength: 1
-  CreateCodePipeline:
-    Description: Set to TRUE to create a code pipeline
-    Type: String
-    Default: FALSE
-    AllowedValues:
-      - FALSE
-      - TRUE
   DatabaseStackName:
     Description: The name of the database stack (only when NOT using own database)
     Type: String
@@ -185,6 +175,14 @@ Parameters:
       - Public
       - Private
     Default: Public
+  InstanceType:
+    Description: Type of instance for odoo server
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
   LoadBalancerCertificateArn:
     Description: Load Balancer Certificate ARN (only needed when using own ELB)
     Type: String
@@ -274,7 +272,6 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasAllowDatabaseRemoteAccess: !Equals [!Ref AllowDatabaseRemoteAccess, true]
   HasBlur: !Equals [!Ref AllowDatabaseBlur, true]
-  HasCodePipeline: !Equals [!Ref CreateCodePipeline, TRUE]
   HasMasterUserPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
   HasDatabaseUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
   HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
@@ -330,22 +327,8 @@ Resources:
         SnapshotIdentifier: !If [HasDBSnapshotIdentifier, !Ref DBSnapshotIdentifier, !Ref 'AWS::NoValue']
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
-
-  DeployStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        CreateCodePipeline: !If [HasCodePipeline, TRUE, FALSE]
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
   
   AppServerStack:
-    DependsOn:
-      - DeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
@@ -383,7 +366,7 @@ Resources:
         InstanceKeyName: !Ref InstanceKeyName
         InstanceSpotPrice: 2.5
         InstanceSubnet: !Ref InstanceSubnet
-        InstanceType: t3.medium
+        InstanceType: !Ref InstanceType
         LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
         SNSStackName: !Ref SNSStackName
         NetworkStackName: !Ref NetworkStackName
@@ -440,14 +423,6 @@ Resources:
               - DBStack
               - Outputs.DBClusterARN
           - !Ref 'AWS::NoValue'
-        CodeDeployApplicationName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployApplicationName
-        CodeDeployDeploymentGroupName:
-          Fn::GetAtt:
-            - DeployStack
-            - Outputs.CodeDeployDeploymentGroupName
 
 ####
 # Blur Section
@@ -662,12 +637,6 @@ Resources:
                 Resource: !GetAtt [BlurLambdaFunction, Arn]
 
 Outputs:
-  DeploymentUserGroup:
-    Description: Add your BitBucket user into this group
-    Value:
-      Fn::GetAtt:
-        - DeployStack
-        - Outputs.DeploymentUserGroup
 
   AppServerTargetGroup:
     Description: AppServer Target Group where odoo resides
