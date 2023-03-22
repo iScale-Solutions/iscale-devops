@@ -1,0 +1,306 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Lambda conencted to CICS VPC with cron trigger to query RDS
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - ScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      ScheduleExpression:
+        default: CRON Schedule
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: lambda
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production #Prod
+      - Staging #Pre-production
+      - Development #Regular day to day commit / deplay
+      - Test #WFH Setup with a simple S3 bucket and an access key for it
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: pchc-prd-ase1-cics-network
+    MinLength: 1
+  ScheduleExpression:
+    Description: schedule cron timer
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+      
+Resources:
+
+####
+# Lambda
+####
+  UserPermissionsGroup:
+    Type: AWS::IAM::Group
+
+  LambdaRDSQueryFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: RDSQueryFunction-LogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+        - PolicyName: RDSQueryFunction-S3Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: "arn:aws:s3:::*"
+        - PolicyName: RDSQueryFunction-VPCPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+
+  RDSQueryFunctionPermission:
+    Type: AWS::IAM::Policy
+    Properties:
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyName: AllowLambdaToRDS
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt RDSQueryFunction.Arn
+  
+  RDSQueryFunctionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, RDSQueryFunction, SecurityGroup]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, RDSQueryFunction, SecurityGroup]]
+      
+  RDSQueryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function for SQL query
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRDSQueryFunctionRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      VpcConfig:
+        SubnetIds:
+          - Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnetId1'
+          - Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnetId2'
+        SecurityGroupIds:
+          - !GetAtt RDSQueryFunctionSecurityGroup.GroupId
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          S3_BUCKET: !Ref LambdaSQLBucket
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+          import mysql.connector
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          db_user = os.environ['DB_USER']
+          db_password = os.environ['DB_PASSWORD']
+          db_host = 'my-fancydb.com'
+          db_name = 'my_database'
+
+          def lambda_handler(event, context):
+            
+            db_user = os.environ['DB_USER']
+            db_password = os.environ['DB_PASSWORD']
+            db_host = 'my-fancydb.com'
+            db_name = 'my_database'
+
+            conn = mysql.connector.connect(
+              user=db_user,
+              password=db_password,
+              host=db_host,
+              database=db_name
+            )
+
+            cursor = conn.cursor()
+            query = "SELECT * FROM my_table;"
+            cursor.execute(query)
+            results = cursor.fetchall()
+
+            conn.close()
+
+            return {
+              'statusCode': 200,
+              'body': results
+            }
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  AllowLambdaQueryIntoDB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from Lambda to query to DB
+      IpProtocol: TCP
+      GroupId:
+        Fn::ImportValue:
+          !Sub 'pchc-prd-ase1-cics-DBSecurityGroup'
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !GetAtt RDSQueryFunctionSecurityGroup.GroupId
+      
+###
+# S3 Bucket
+###
+
+  LambdaSQLBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Join [ '-', [!Ref OrgName , !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName , !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  LambdaSQLBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LambdaSQLBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowLambdaFunction
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 
+              - s3:GetObject
+              - s3:PutObject
+            Resource: 
+              - !Sub "arn:aws:s3:::${LambdaSQLBucket}/*"
+
+###
+# Cron
+###
+
+  LambdaScheduledEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RDSQueryFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LambdaScheduler.Arn
+
+  LambdaScheduler:
+    DependsOn:
+      - RDSQueryFunction
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, rds, cron]]
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt RDSQueryFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, rds, cron]]
+
+Outputs:
+
+  LambdaSQLBucket:
+    Description: S3 Bukcet for SQL queries
+    Value: !Ref LambdaSQLBucket
+
+  LambdaSecurityGroup:
+    Description: secgroup of lambda
+    Value: !GetAtt RDSQueryFunctionSecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaSecurityGroup'
