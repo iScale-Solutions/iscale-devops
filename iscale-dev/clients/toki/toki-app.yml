@@ -1,0 +1,301 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Toki App Resources
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - LoadBalancerStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerPriority
+          - LoadBalancerHostName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+          - InstanceType
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+          - CronApiKeyValue
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      CronApiKeyValue:
+        default: API Secret for the cron access key
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceType:
+        default: Instance Type
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
+      LoadBalancerPriority:
+        default: Load Balancer Rule Priority
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: toki
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production #Prod
+      - Staging #Pre-production
+      - Development #Regular day to day commit / deplay
+      - Test #WFH Setup with a simple S3 bucket and an access key for it
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: iscale-software.com
+    MinLength: 1
+  CronApiKeyValue:
+    Description: Secret key value for cron process
+    Type: String
+    Default: ''
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0ac64ad8517166fb1 # Base Amazon Linux 2 = Amazon Linux 2 AMI (HVM) - Kernel 5.10, SSD Volume Type (20230418)
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  InstanceType:
+    Description: Instance Type (size)
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.micro
+      - t3.small # dev
+      - t3.medium
+      - t3.large # prod and stage
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: app
+    MaxLength: 12
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 103
+    MinValue: 1
+    MaxValue: 50000
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: iscale-dev-stg-uw2-alb
+    MinLength: 1
+  MaintenanceWebsiteCertificate:
+    Description: Maintenance site certificate (For Prod Only)
+    Type: String
+    Default: arn:aws:acm:us-east-1:880804344419:certificate/61fe97b2-2645-4112-825d-51b69e5c8f58
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+      
+Resources:
+
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: IsNotTest
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: !If [IsDev, 20, 70] #Gb
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: mysql
+        EngineVersion: 8.0.23
+        Family: mysql8.0
+        InstanceType: !If [IsStagingOrProd, db.t3.medium, db.t3.micro]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+
+  DeployStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: IsNotTest
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  # CacheStack:
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       NetworkStackName: !Ref NetworkStackName
+  #       EncryptInTransit: TRUE
+  #       NodeType: cache.t3.micro
+  #       NumCacheClusters: 1
+  #       OrgName: !Ref OrgName
+  #       SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+  #       SNSStackName: !Ref SNSStackName
+  #       UseFriendlyNames: TRUE
+
+
+  ServerStack:
+    DependsOn:
+      - DeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 80
+        InstanceSubnet: Public
+        InstanceType: !If [IsProd, t3.medium, t3.small]
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: !Ref LoadBalancerPriority
+        LoadBalancerStackName: !Ref LoadBalancerStackName
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+
+  SchedulerStack:
+    DependsOn:                                                                                            
+      - DBStack
+      - AppServerStack
+    Condition: IsDevOrStaging
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployASGDesiredSize: 2
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+Outputs:
+
+  DeploymentUserGroup:
+     Description: Add the BitBucket user into this group
+     Value: 
+       Fn::GetAtt:
+         - DeployStack
+         - Outputs.DeploymentUserGroup
