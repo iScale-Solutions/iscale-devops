@@ -103,7 +103,7 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-0ac64ad8517166fb1 # Base Amazon Linux 2 = Amazon Linux 2 AMI (HVM) - Kernel 5.10, SSD Volume Type (20230418)
+    Default: ami-0c48a957d08dca404 # Toki image
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -120,7 +120,7 @@ Parameters:
   LoadBalancerHostName:
     Description: (Optional) Custom Hostname for load balancer URL
     Type: String
-    Default: app
+    Default: ''
     MaxLength: 12
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
@@ -170,33 +170,31 @@ Conditions:
       
 Resources:
 
-  # DBStack:
-  #   Type: AWS::CloudFormation::Stack
-  #   Condition: IsNotTest
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
-  #       AllocatedStorage: !If [IsDev, 20, 70] #Gb
-  #       BackupRetentionPeriod: !If [IsProd, 30, 7]
-  #       EnableEnhancedMonitoring: !If [IsProd, true, false]
-  #       EnablePerformanceInsights: !If [IsProd, true, false]
-  #       EnvName: !Ref EnvName
-  #       Engine: mysql
-  #       EngineVersion: 8.0.23
-  #       Family: mysql8.0
-  #       InstanceType: !If [IsStagingOrProd, db.t3.medium, db.t3.micro]
-  #       MasterUser: root
-  #       MultiAz: !If [IsProd, true, false]
-  #       NetworkStackName: !Ref NetworkStackName
-  #       OrgName: !Ref OrgName
-  #       SNSStackName: !Ref SNSStackName
-  #       StorageEncrypted: true
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: !If [IsDev, 20, 70] #Gb
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: mysql
+        EngineVersion: 8.0.28
+        Family: mysql8.0
+        InstanceType: !If [IsProd, db.t3.medium, db.t3.micro]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
 
   DeployStack:
     Type: AWS::CloudFormation::Stack
-    Condition: IsNotTest
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
       Parameters:
@@ -234,18 +232,18 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ClientDomainName: !Ref ClientDomainName
-        # DatabaseEndpoint:
-        #   Fn::GetAtt:
-        #     - DBStack
-        #     - Outputs.DBInstanceAddress
-        # DatabasePort:
-        #   Fn::GetAtt:
-        #     - DBStack
-        #     - Outputs.DBInstancePort
-        # DatabaseSecurityGroupId:
-        #   Fn::GetAtt:
-        #     - DBStack
-        #     - Outputs.SecurityGroupId
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 8080
@@ -255,17 +253,16 @@ Resources:
         LoadBalancerPriority: !Ref LoadBalancerPriority
         LoadBalancerStackName: !Ref LoadBalancerStackName
         NetworkStackName: !Ref NetworkStackName
-        # SharedSecretId:
-        #   Fn::GetAtt:
-        #     - DBStack
-        #     - Outputs.DBSecretManagerKeyId
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
 
   SchedulerStack:
-    DependsOn:                                                                                            
-      - DBStack
-      - AppServerStack
+    DependsOn:
+      - ServerStack
     Condition: IsDevOrStaging
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -277,10 +274,10 @@ Resources:
         StartScheduleExpression: !Ref StartScheduleExpression
         StopScheduleExpression: !Ref StopScheduleExpression
         UseFriendlyNames: FALSE
-        # DatabaseInstanceName:
-        #   Fn::GetAtt:
-        #     - DBStack
-        #     - Outputs.DBInstanceName
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
         CodeDeployApplicationName:
           Fn::GetAtt:
             - DeployStack
