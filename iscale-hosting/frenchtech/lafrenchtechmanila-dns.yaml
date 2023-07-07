@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for French Tech Manila
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: lftm
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+    Default: lafrenchtechmanila.com
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone: 
+    Type: AWS::Route53::HostedZone
+    Properties: 
+      HostedZoneConfig: 
+        Comment: !Join [' ',[Hosted Zone for, !Ref ClientDomainName]]
+      Name: !Ref ClientDomainName
+      HostedZoneTags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name]]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  HostedZoneDNSSECSigningKey:
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: arn:aws:kms:us-east-1:178070162686:key/315d6bf8-09eb-4b0d-971c-5ef787b8d57b
+      Name: key_signing_key
+      Status: ACTIVE
+
+  HostedZoneDNSSEC:
+    DependsOn: HostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref HostedZone
+
+  GoogleWorkspaceMXRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: Google Workspace MX Records
+      Name: !Ref ClientDomainName
+      Type: MX
+      TTL: 14400
+      ResourceRecords:
+        - 1 ASPMX.L.GOOGLE.COM
+        - 5 ALT1.ASPMX.L.GOOGLE.COM.
+        - 5 ALT2.ASPMX.L.GOOGLE.COM.
+        - 10 ALT3.ASPMX.L.GOOGLE.COM.
+        - 10 ALT4.ASPMX.L.GOOGLE.COM.
+
+  GoogleDomainVerificationTXTRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId : !Ref HostedZone
+      Name: !Ref ClientDomainName
+      Comment: Google TXT Record
+      ResourceRecords:
+        - '"google-site-verification=8LwcCPylczmRApoN3IuEKgpLabvpCrD4KEjpMC-Z2bM"'
+      TTL: 300
+      Type: TXT
+  
+  GoogleDKIMRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[google, _domainkey, !Ref ClientDomainName]]
+      ResourceRecords:
+      - '"v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCR3plcyb9q5WgRQOv7om+eQY6Z2XNNB9ibpZxupUpQHW3jREj8JWd5VrttjZDONyypSNR/vba5Kg4V2ItLrnLpbTQwcb0O21sav5Sap+kN3h6dZv3hulPDW8Spq7g/yDtHWlSADJOS5ZRJU3ftPG0md1i1MqoCi6T993XM1ds/kQIDAQAB"'
+      TTL: 14440
+      Type: TXT
+      Comment: Google DKIM record
+
+  DMARCTXTRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId : !Ref HostedZone
+      Name: !Join ['.',[_dmarc, !Ref ClientDomainName]]
+      ResourceRecords: 
+        - "\"v=DMARC1;p=quarantine;pct=100;fo=1\""
+      TTL: 14400
+      Type: TXT
+      Comment: DMARC TXT Record
