@@ -1,0 +1,291 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Toki Logistics Resources
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - LoadBalancerStackName
+          - DatabaseStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerPriority
+          - LoadBalancerHostName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+          - InstanceType
+          - VolumeName
+          - VolumeSize
+          - VolumeType
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceType:
+        default: Instance Type
+      VolumeName:
+        default: Volume Device Name
+      VolumeSize:
+        default: Volume Disk Size
+      VolumeType:
+        default: Volume Disk Type
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
+      LoadBalancerPriority:
+        default: Load Balancer Rule Priority
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      DatabaseStackName:
+        default: Database Stack Name
+      ClientDomainName:
+        default: Domain Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: logistics
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: tokiasia
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production #Prod
+      - Staging #Pre-production
+      - Development #Regular day to day commit / deplay
+      - Test #WFH Setup with a simple S3 bucket and an access key for it
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: tokiasia.com
+    MinLength: 1
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-08728648534514461 # Toki auction base - 20230630 (same components)
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  InstanceType:
+    Description: Instance Type
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small # staging
+      - t3.medium # prod
+  VolumeName:
+    Description: Amazon Linux 2 AMI uses /dev/xvda ; Ubuntu and Windows uses /dev/sda1
+    Type: String
+    Default: /dev/xvda
+    AllowedValues:
+      - /dev/xvda
+      - /dev/sda1
+  VolumeSize:
+    Description: EBS Size in GB (minimum 8)
+    Type: Number
+    Default: 8
+  VolumeType:
+    Description: EBS Volume Type
+    Type: String
+    Default: gp2
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: ''
+    MaxLength: 12
+  LoadBalancerPriority:
+    Description: The priority for ELB Listener.
+    Type: Number
+    Default: 102
+    MinValue: 1
+    MaxValue: 50000
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: tokiasia-stg-ase1-loadbalancer
+    MinLength: 1
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: tokiasia-stg-ase1-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack.
+    Type: String
+    Default: tokiasia-stg-ase1-sns
+    MinLength: 1
+  DatabaseStackName:
+    Description: The name of the Database stack.
+    Type: String
+    Default: tokiasia-stg-ase1-toki-auction-DBStack-FD5XI4N68VZ1
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+      
+Resources:
+
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, secrets]]
+      GenerateSecretString:
+        SecretStringTemplate: !Sub
+          - |
+            {
+              "Name": "${Name}"
+            }
+          - Name: !Ref Name
+        GenerateStringKey: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        PasswordLength: 30
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  DeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  ServerStack:
+    DependsOn:
+      - DeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::ImportValue:
+            !Sub "${DatabaseStackName}-DBInstanceAddress"
+        DatabasePort:
+          Fn::ImportValue:
+            !Sub "${DatabaseStackName}-DBInstancePort"
+        DatabaseSecurityGroupId:
+          Fn::ImportValue:
+            !Sub "${DatabaseStackName}-SecurityGroupId"
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 80
+        InstanceSubnet: Public
+        InstanceType: !If [IsProd, t3.medium, t3.small]
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: !Ref LoadBalancerPriority
+        LoadBalancerStackName: !Ref LoadBalancerStackName
+        NetworkStackName: !Ref NetworkStackName
+        # SharedSecretId:
+        #   Fn::ImportValue:
+        #     !Sub "${DatabaseStackName}-DBSecretManagerKeyId"
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        VolumeName: !Ref VolumeName
+        VolumeSize: !Ref VolumeSize
+        VolumeType: !Ref VolumeType
+
+  SchedulerStack:
+    DependsOn:
+      - ServerStack
+    Condition: IsDevOrStaging
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployASGDesiredSize: 1
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - DeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+Outputs:
+
+  DeploymentUserGroup:
+     Description: Add the BitBucket user into this group
+     Value: 
+       Fn::GetAtt:
+         - DeployStack
+         - Outputs.DeploymentUserGroup
