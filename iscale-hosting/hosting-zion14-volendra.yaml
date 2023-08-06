@@ -1,0 +1,549 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Zion14e - Volendra setup
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerCertificateArn
+          - LoadBalancerPriority
+          - LoadBalancerHostName
+      - Label:
+          default: DB Instance Configuration
+        Parameters:
+          - AllowDatabaseRemoteAccess
+          - DatabaseUser
+          - DatabaseUserPassword
+          - DBSnapshotIdentifier
+          - MasterUser
+          - MasterUserPassword
+      - Label:
+          default: Jump Server Configuration
+        Parameters:
+          - CTowerIP
+          - JumpInstanceAMI
+      - Label:
+          default: Odoo Instance Configuration
+        Parameters:
+          - OdooInstanceType
+          - OdooInstanceAMI
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      AllowDatabaseRemoteAccess:
+        default: Allow Database remote access
+      JumpInstanceAMI:
+        default: Jump Instance AMI
+      JumpInstanceAMI:
+        default: Jump Instance AMI
+      LoadBalancerCertificateArn:
+        default: Load Balancer Certificate ARN
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      OdooInstanceType:
+        default: Odoo Instance type
+      OdooInstanceAMI:
+        default: Odoo Instance AMI
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: zion14v
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: iscale-solutions.com
+    MinLength: 1
+  CTowerIP:
+    Description: IP of Volendra CTower
+    Type: String
+    Default: 3.136.252.36
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})
+    ConstraintDescription: must be a valid IP address of the form x.x.x.x.
+  DatabaseUser:
+    Description: The name of the database user
+    Type: String
+    Default: dbuser
+  DatabaseUserPassword:
+    Description: The password of the database user
+    NoEcho: true
+    Type: String
+    Default: ''
+  DBSnapshotIdentifier:
+    Description: The name or Amazon Resource Name (ARN) of the DB snapshot to restore. If you specied root user, make sure it matches
+    Type: String
+    Default: arn:aws:rds:us-west-2:178070162686:cluster-snapshot:iscale-zion14-08052023
+  JumpInstanceAMI:
+    Description: Jump Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0e78ee77fdce864ed
+  LoadBalancerCertificateArn:
+    Description: Load Balancer Certificate ARN (only needed when using own ELB)
+    Type: String
+    Default: arn:aws:acm:us-west-2:178070162686:certificate/6964d198-879b-431f-b7a6-9ebb8f4b0537
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: zion14v
+    MaxLength: 12
+  MasterUser:
+    Description: The name of the master user for the database instance.
+    Type: String
+    Default: root
+  MasterUserPassword:
+    Description: Master User Password
+    NoEcho: true
+    Type: String
+    Default: ''
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-internal-network
+    MinLength: 1
+  OdooInstanceAMI:
+    Description: Odoo Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-035393d14c33c23c3
+  OdooInstanceType:
+    Description: Type of instance for odoo server
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-sns
+    MinLength: 1
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasMasterUserPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
+  HasDatabaseUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
+  HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
+
+Resources:
+
+  ELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  DBStack:
+    DeletionPolicy: Retain
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]]
+        DatabaseUser: !Ref DatabaseUser
+        DatabaseUserPassword: !If [HasDatabaseUserPassword, !Ref DatabaseUserPassword, !Ref 'AWS::NoValue']
+        DeletionProtection: false
+        EnableCPUCreditAlarm: true
+        EnableEnhancedMonitoring: true
+        EnvName: !Ref EnvName
+        Engine: aurora-postgresql
+        EngineVersion: 12.12
+        Family: aurora-postgresql12
+        InstanceType: db.t4g.medium
+        MasterUser: !Ref MasterUser
+        MasterUserPassword: !If [HasMasterUserPassword, !Ref MasterUserPassword, !Ref 'AWS::NoValue']
+        Port: 5432
+        NetworkStackName: !Ref NetworkStackName
+        NetworkType: !Ref 'AWS::NoValue'
+        PubliclyAccessible: false
+        OrgName: !Ref OrgName
+        SnapshotIdentifier: !If [HasDBSnapshotIdentifier, !Ref DBSnapshotIdentifier, !Ref 'AWS::NoValue']
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+  
+  ### EFS Section ###
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  OdooEFS:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    Properties:
+      BackupPolicy: 
+        Status: ENABLED
+      Encrypted: true
+      PerformanceMode: generalPurpose 
+      ThroughputMode: elastic
+      FileSystemTags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  EFSMountTargetAZ1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref OdooEFS
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-InternalSubnetId1'
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTargetAZ2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref OdooEFS
+      SubnetId:
+        Fn::ImportValue:
+          Fn::Sub: '${NetworkStackName}-InternalSubnetId2'
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  AllowEFSConnectionFromOdooServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EFSSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !GetAtt OdooServerSecurityGroup.GroupId
+      Description: Allow connection from Odoo Server
+
+  AllowEFSConnectionFromJumpServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EFSSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !GetAtt JumpServerSecurityGroup.GroupId
+      Description: Allow connection from Jump Server
+
+  ### Jump Host Section ###
+
+  ServerEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      Policies:
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: AccessCloudWatchMetrics
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                Resource: '*'
+
+  JumpServerIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump, server]]
+      Roles:
+        - !Ref ServerEC2Role
+
+  JumpServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  JumpServerTeamSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump, team]]
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump, team]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump, team]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  AllowJumpServerSSHConnectionFromTeamIPs:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt JumpServerTeamSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Join [ '/', [!Ref CTowerIP, 32]] #Use Ctower by default then BN can change with his IP
+      Description: Allow SSH from BN IP
+
+  AllowJumpServerSSHConnectionFromCTower:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt JumpServerSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Join [ '/', [!Ref CTowerIP, 32]]
+      Description: Allow SSH from Volendra CTower
+
+  JumpServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: true
+      ImageId: !Ref JumpInstanceAMI
+      InstanceType: t3.nano
+      IamInstanceProfile: !Ref JumpServerIamInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref JumpServerSecurityGroup
+            - !Ref JumpServerTeamSecurityGroup
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PublicSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump]]
+
+  JumpServerInstancePublicEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref JumpServerInstance
+
+  ### Server Section ###
+  
+  OdooServerIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, odoo, server]]
+      Roles:
+        - !Ref ServerEC2Role
+
+  OdooServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  AllowOdooWebConnectionFromELB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt OdooServerSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !GetAtt [ELBStack, Outputs.SecurityGroupId]
+      Description: Allow HTTP from ELB
+
+  AllowOdooSSHConnectionFromJumpServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt OdooServerSecurityGroup.GroupId
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !GetAtt JumpServerSecurityGroup.GroupId
+      Description: Allow SSH from Jump Server
+
+  OdooServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: false
+      ImageId: !Ref OdooInstanceAMI
+      InstanceType: !Ref OdooInstanceType
+      IamInstanceProfile: !Ref OdooServerIamInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref OdooServerSecurityGroup
+          SubnetId:
+            Fn::ImportValue:
+              Fn::Sub: '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+### ELB Target Group settings ###
+
+  OdooServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: 200,301,303
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 600
+      TargetType: instance
+      Targets:
+        - Id: !Ref OdooServerInstance
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  OdooServerListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: forward
+          TargetGroupArn: !Ref OdooServerTargetGroup
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+      ListenerArn: !GetAtt [ELBStack, Outputs.ApplicationListenerArn]
+      Priority: 100
+
+### Backup ###
+
+  BackupStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - !GetAtt [DBStack, Outputs.DBClusterARN]
+            - !GetAtt OdooEFS.Arn
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref JumpServerInstance]]]]
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref OdooServerInstance]]]]
+
+Outputs:
+
+  JumpServerTeamSecurityGroup:
+    Description: Name of the security Group for the team to SSH in Jump Server
+    Value: !Ref JumpServerTeamSecurityGroup
