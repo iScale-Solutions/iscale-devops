@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Fishingkaki Lazaki
+Description: Fishingkaki Marketplace aka Lazaki
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -74,7 +74,6 @@ Parameters:
     Default: fk
     AllowedPattern: "^[a-z]+(-[a-z]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
-    MaxLength: 8
   EnvName:
     Description: The name of the environment
     Type: String
@@ -144,7 +143,7 @@ Conditions:
 Resources:
 
   ELBStack:
-    Condition: IsNotProd
+    # Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
@@ -157,7 +156,7 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   DBStack:
-    Condition: IsNotProd
+    # Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties: 
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -167,7 +166,7 @@ Resources:
         EnableEnhancedMonitoring: !If [IsProd, true, false]
         EnvName: !Ref EnvName
         Engine: aurora-mysql
-        EngineVersion: 5.7.mysql_aurora.2.09.3
+        EngineVersion: 5.7.mysql_aurora.2.11.2
         Family: aurora-mysql5.7
         InstanceType: db.t3.small
         MasterUser: root
@@ -177,9 +176,9 @@ Resources:
         StorageEncrypted: true
 
   DBSchedulerStack:
+    Condition: IsNotProd
     DependsOn:
       - DBStack
-    Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -200,6 +199,7 @@ Resources:
 ####
 
   WebDeployStack:
+    Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
@@ -211,6 +211,7 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   WebServerStack:
+    Condition: IsNotProd
     DependsOn:
       - DBStack
       - WebDeployStack
@@ -251,6 +252,7 @@ Resources:
         UseFriendlyNames: FALSE
 
   WebServerSchedulerStack:
+    Condition: IsNotProd
     DependsOn:
       - DBStack
       - WebServerStack
@@ -283,7 +285,7 @@ Resources:
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
       Parameters:
-        Name: laz-back
+        Name: fkmp
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
@@ -295,9 +297,9 @@ Resources:
       - BackEndDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
       Parameters:
-        Name: laz-back
+        Name: fkmp
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ClientDomainName: !Ref ClientDomainName
@@ -313,16 +315,17 @@ Resources:
           Fn::GetAtt:
             - DBStack
             - Outputs.SecurityGroupId
-        ExternalS3BucketArn:
-          Fn::GetAtt:
-            - WebServerStack
-            - Outputs.AppServerS3BucketArn
+        # ExternalS3BucketArn:
+        #   Fn::GetAtt:
+        #     - WebServerStack
+        #     - Outputs.AppServerS3BucketArn
         InstanceAMI: !Ref BackEndInstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstanceSpotPrice: 0.5
         InstancePort: 80
         InstanceType: t3.medium
-        LoadBalancerPriority: 101
+        LoadBalancerHostName: !Ref LoadBalancerHostName
+        LoadBalancerPriority: 200
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId:
@@ -331,12 +334,14 @@ Resources:
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
+        InstanceSubnet: !If [IsProd, Private, Public]
+        AllowJustDomainName: !If [IsProd, TRUE, FALSE]
 
   BackEndServerSchedulerStack:
+    Condition: IsNotProd
     DependsOn:
       - DBStack
       - BackEndServerStack
-    Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -363,7 +368,7 @@ Resources:
   BackupStack:
     DependsOn:
       - DBStack
-      - WebServerStack
+      # - WebServerStack
       - BackEndServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -377,21 +382,21 @@ Resources:
           - - Fn::GetAtt:
               - DBStack
               - Outputs.DBClusterARN
-            - Fn::GetAtt:
-              - WebServerStack
-              - Outputs.AppServerEFSArn
+            # - Fn::GetAtt:
+            #   - WebServerStack
+            #   - Outputs.AppServerEFSArn
             - Fn::GetAtt:
               - BackEndServerStack
               - Outputs.AppServerEFSArn
 
 Outputs:
 
-  WebDeploymentUserGroup:
-    Description: Add the BitBucket user into this group
-    Value:
-      Fn::GetAtt:
-        - WebDeployStack
-        - Outputs.DeploymentUserGroup
+  # WebDeploymentUserGroup:
+  #   Description: Add the BitBucket user into this group
+  #   Value:
+  #     Fn::GetAtt:
+  #       - WebDeployStack
+  #       - Outputs.DeploymentUserGroup
 
   BackEndDeploymentUserGroup:
     Description: Add the BitBucket user into this group
@@ -416,10 +421,10 @@ Outputs:
         - BackEndServerSchedulerStack
         - Outputs.UserPermissionsGroup
 
-  IAMUserGroup3:
-    Condition: IsNotProd
-    Description: Add the manual ON/OFF User into this group
-    Value:
-      Fn::GetAtt:
-        - WebServerSchedulerStack
-        - Outputs.UserPermissionsGroup
+  # IAMUserGroup3:
+  #   Condition: IsNotProd
+  #   Description: Add the manual ON/OFF User into this group
+  #   Value:
+  #     Fn::GetAtt:
+  #       - WebServerSchedulerStack
+  #       - Outputs.UserPermissionsGroup
