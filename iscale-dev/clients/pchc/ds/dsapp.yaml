@@ -103,7 +103,7 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-00b8d9cb8a7161e41 #Default Amazon Linux 2 for Singapore
+    Default: ami-02c68101cb9cceed4 # ami-02c68101cb9cceed4 for uat-oregon
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -248,7 +248,7 @@ Resources:
   ServerStack:
     DependsOn:
       - DBStack
-      - AppDeployStack
+      - DeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -285,7 +285,8 @@ Resources:
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
         InstancePort: 80
         InstanceSubnet: Private
-        InstanceType: !Ref InstanceType
+        InstanceType: !If [IsProd, t3.medium, t3.micro]
+        #LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
         LoadBalancerHostName: !Ref LoadBalancerHostName
         LoadBalancerPriority: 100
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
@@ -296,11 +297,12 @@ Resources:
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
+        VolumeSize: 10
 
   SchedulerStack:
     DependsOn:
       - DBStack
-      - AppServerStack
+      - ServerStack
     Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -314,11 +316,11 @@ Resources:
         UseFriendlyNames: FALSE
         CodeDeployApplicationName:
           Fn::GetAtt:
-            - AppDeployStack
+            - DeployStack
             - Outputs.CodeDeployApplicationName
         CodeDeployDeploymentGroupName:
           Fn::GetAtt:
-            - AppDeployStack
+            - DeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
 ###
@@ -342,7 +344,7 @@ Resources:
       - SidekiqDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
       Parameters:
         Name: !Join ['-', [!Ref Name, sidekiq]]
         EnvName: !Ref EnvName
@@ -376,18 +378,18 @@ Resources:
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
         InstancePort: 80
         InstanceSubnet: Private
-        InstanceType: !Ref InstanceType
+        InstanceType: !If [IsProd, t3.medium, t3.micro]
         # LoadBalancerHostName: No need of URL for sidekiq
         LoadBalancerPriority: 105
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
         NetworkStackName: !Ref NetworkStackName
         ExternalEFSID:
           Fn::GetAtt:
-            - AppServerStack
+            - ServerStack
             - Outputs.AppServerEFS
         ExternalEFSSecurityGroup:
           Fn::GetAtt:
-            - AppServerStack
+            - ServerStack
             - Outputs.AppServerEFSSecurityGroup
         SharedSecretId:
           Fn::GetAtt:
@@ -395,6 +397,7 @@ Resources:
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
+        VolumeSize: 10
 
   SidekiqSchedulerStack:
     DependsOn:
@@ -420,12 +423,11 @@ Resources:
             - SidekiqDeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
-
   BackupStack:
     Condition: IsProd
     DependsOn:
       - DBStack
-      - AppServerStack
+      - ServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -439,7 +441,7 @@ Resources:
               - DBStack
               - Outputs.DBInstanceARN
             - Fn::GetAtt:
-              - AppServerStack
+              - ServerStack
               - Outputs.AppServerEFSArn
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
         DailyExpiration: 60 #60 days
@@ -643,17 +645,17 @@ Resources:
             DB_LOW_CPU_CREDIT: !GetAtt [DBStack, Outputs.CPUCreditBalanceAlarm]
             DB_ERRORS: !GetAtt [DBStack, Outputs.DBErrorsAlarm]
             DB_ERROR_DENIED: !GetAtt [DBStack, Outputs.DBErrorDeniedAlarm]
-            TG_SLOW: !GetAtt [AppServerStack, Outputs.AppServerSlowTargetGroupAlarm]
-            TG_UNHEALTHY: !GetAtt [AppServerStack, Outputs.UnhealthyTargetGroupAlarm]
+            TG_SLOW: !GetAtt [ServerStack, Outputs.AppServerSlowTargetGroupAlarm]
+            TG_UNHEALTHY: !GetAtt [ServerStack, Outputs.UnhealthyTargetGroupAlarm]
             DB_INSTANCE_ID: !GetAtt [DBStack, Outputs.DBInstanceName]
             CACHE_INSTANCE_ID: !Join ['-', [!GetAtt [CacheStack, Outputs.ElasticacheReplicationGroup], '001']]
             REGION: !Ref 'AWS::Region'
             ELB_FULL_NAME: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
-            ASG_GROUP_NAME: "CodeDeploy_pchc-prd-ase1-pas6-AppDeployStack-5SX986PMPLRD-CodeDeployDeploymentGroup-1WFV4SQ8H6C3_d-QFDDVU9DK" #First time, it will be empty, that's OK
+            ASG_GROUP_NAME: "CodeDeploy_pchc-prd-ase1-dsapp-DeployStack-5SX986PMPLRD-CodeDeployDeploymentGroup-1WFV4SQ8H6C3_d-QFDDVU9DK" #First time, it will be empty, that's OK
             APP_SERVER_AMI: !Ref InstanceAMI
             APP_SERVER_ID: i-0d6e53ff58d0902e6 #Hardcoded for now
             APP_SERVER_TYPE: !Ref InstanceType
-            EFS_ID: !GetAtt [AppServerStack, Outputs.AppServerEFS]
+            EFS_ID: !GetAtt [ServerStack, Outputs.AppServerEFS]
 
 Outputs:
 
@@ -661,5 +663,5 @@ Outputs:
     Description: Add the BitBucket user into this group
     Value:
       Fn::GetAtt:
-        - AppDeployStack
+        - DeployStack
         - Outputs.DeploymentUserGroup
