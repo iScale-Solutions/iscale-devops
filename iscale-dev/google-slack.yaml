@@ -11,12 +11,6 @@ Metadata:
           - OrgName
           - EnvName
       - Label:
-          default: Google and Slack info
-        Parameters:
-          - GoogleDelegatedUser
-          - SlackApiUserToken
-          - ServiceAccountInfo
-      - Label:
           default: Scheduler Configuration
         Parameters:
           - ScheduleExpression
@@ -28,12 +22,6 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
-      GoogleDelegatedUser:
-        default: Google Delegated User
-      SlackApiUserToken:
-        default: Slack API User Token
-      ServiceAccountInfo:
-        default: Service Account Info
       ScheduleExpression:
         default: CRON Schedule
 
@@ -43,11 +31,11 @@ Parameters:
     Type: String
     MinLength: 3
     MaxLength: 20
-    Default: evilcorp-gslack
+    Default: gslack
   OrgName:
     Description: The name of the organization.
     Type: String
-    Default: iscale-dev
+    Default: org
     AllowedPattern: "^[a-z]+(-[a-z]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
     MaxLength: 10
@@ -59,64 +47,48 @@ Parameters:
       - Production
       - Staging
       - Development
-  
-  GoogleDelegatedUser:
-    Description: Google delegated user email address
-    Type: String
-    Default: ''
-  SlackApiUserToken:
-    Description: Slack API Token
-    Type: String
-    Default: ''
-  ServiceAccountInfo:
-    Description: Service account info in json format
-    Type: String
-    Default: 'skip-this'
-
   ScheduleExpression:
     Description: schedule cron timer
     Type: String
-    Default: cron(0 0 ? * MON-FRI *)
+    Default: cron(0 0 ? * MON-FRI *) # change to rate = rate(1 hour)
 
 Mappings: 
-  Fn::Transform:
-    Name: AWS::Include
-    Parameters:
-      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
-
-Conditions:
-  Fn::Transform:
-    Name: AWS::Include
-    Parameters:
-      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
       
 Resources:
 
 ####
 # Secrets
 ####
-  DefaultSecret:
+  AppSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, secrets]]
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, secrets]]
       GenerateSecretString:
         SecretStringTemplate: !Sub
           - |
             {
-              "GOOGLE_DELEGATED_USER": "${GOOGLE_DELEGATED_USER}",
-              "SLACK_API_USER_TOKEN": "${SLACK_API_USER_TOKEN}",
-              "SERVICE_ACCOUNT_INFO": "${SERVICE_ACCOUNT_INFO}"
+              "Name": "${Name}",
+              "GOOGLE_DELEGATED_USER": "you@email.com",
+              "SLACK_API_USER_TOKEN": "Input slack API user token here",
+              "SERVICE_ACCOUNT_INFO": "Input googler service account here"
             }
-          - GOOGLE_DELEGATED_USER: !Ref GoogleDelegatedUser
-            SLACK_API_USER_TOKEN: !Ref SlackApiUserToken
-            SERVICE_ACCOUNT_INFO: !Ref ServiceAccountInfo
-        GenerateStringKey: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          - Name: !Ref Name
+        GenerateStringKey: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
         PasswordLength: 30
         ExcludeCharacters: '"@/\'
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
 
 ####
 # Lambda
@@ -154,15 +126,15 @@ Resources:
               - Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Ref DefaultSecret
+                Resource: !Ref AppSecret
 
   LayerLibrary:
     Type: AWS::Lambda::LayerVersion
     Properties:
-      LayerName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, layer]]
-      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dependencies]]
+      LayerName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, layer]]
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, dependencies]]
       Content:
-        S3Bucket: iscale-dev-cloudformation
+        S3Bucket: iscale-dev-cloudformation # change to custom bucket which contains python modules only, whitelist AWS account number
         S3Key: lambda/python-gslack-modules.zip
       CompatibleRuntimes: 
         - python3.9
@@ -170,7 +142,7 @@ Resources:
   GoogleSlackFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
       Description: Lambda Function for Google-Slack integration
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -179,7 +151,7 @@ Resources:
       Environment:
         Variables:
           REGION: !Ref AWS::Region
-          SECRETS_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+          SECRETS_ID: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
       Layers: 
         - !Ref LayerLibrary
       Code:
@@ -325,18 +297,9 @@ Resources:
       - GoogleSlackFunction
     Type: AWS::Events::Rule
     Properties:
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cron]]
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, cron]]
       ScheduleExpression: !Ref ScheduleExpression
       State: ENABLED
       Targets:
         - Arn: !GetAtt GoogleSlackFunction.Arn
-          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cron]]
-
-Outputs:
-  LambdaFunction:
-    Description: Lambda Function
-    Value: !Ref GoogleSlackFunction
-
-  LambdaScheduler:
-    Description: Lambda Scheduler
-    Value: !Ref LambdaScheduler
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, cron]]
