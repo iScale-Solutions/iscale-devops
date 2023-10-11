@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for seoboost.io
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: dns
+    MinLength: 3
+    MaxLength: 9
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: seoboost
+    AllowedPattern: ^[a-z]+(-[a-z]+)*$
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Test
+  DomainName:
+    Description: The domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: seoboost.io
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join [' ',[Hosted Zone for, !Ref DomainName]]
+      Name: !Ref DomainName
+      HostedZoneTags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], hostedzone]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  HostedZoneDNSSECSigningKey:
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: arn:aws:kms:us-east-1:924893643129:key/6ab41794-c925-4a61-bf94-f5f92f0c55ee
+      Name: key_signing_key
+      Status: ACTIVE
+
+  HostedZoneDNSSEC:
+    DependsOn: HostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref HostedZone
+
+  # GoogleWorkspaceMXRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Comment: Google Workspace MX Records
+  #     Name: !Ref DomainName
+  #     Type: MX
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - 1 ASPMX.L.GOOGLE.COM
+  #       - 5 ALT1.ASPMX.L.GOOGLE.COM.
+  #       - 5 ALT2.ASPMX.L.GOOGLE.COM.
+  #       - 10 ALT3.ASPMX.L.GOOGLE.COM.
+  #       - 10 ALT4.ASPMX.L.GOOGLE.COM.
+
+  DMARCRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: DMARC record
+      Name: !Join ['.', [_dmarc, !Ref DomainName]]
+      Type: TXT
+      TTL: 14400
+      ResourceRecords:
+        - !Join ['', ["\"v=DMARC1;fo=1;p=reject;rua=mailto:dmarc@", !Ref DomainName, "\""]]
+
+  # DomainTXTRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Ref DomainName
+  #     ResourceRecords:
+  #       - '"google-site-verification=xH9V8UvW0xwyUspalVi23ONBUgLGtgaf5opJAPIHfmU"'
+  #       - '"v=spf1 include:_spf.google.com include:amazonses.com -all"'
+  #     TTL: 14400
+  #     Type: TXT
+  #     Comment: Domain TXT Record
+
+  # SSLValidationRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[_c15dfa92ba993e43861d77da09b0df72, !Ref DomainName]]
+  #     Type: CNAME
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - _27105e9a25835337133a43099c7b4b0c.dsrmygwdhx.acm-validations.aws.
+
+
+  # GoogleDKIMRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.', [google._domainkey, !Ref DomainName]]
+  #     Type: TXT
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - '"v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCJYStGijXq55KcOMZvEfvohopp7suaNB7/HS5Q3DB6+7E/BBvKxU7yJD6Ui5BimfXZam72v8/VXr5waAgtNf/DSu9M0GnS1MC/TJvUpxyc3EyKwCZOUhO291YAx345h7XtjgnL40stVgq8oA+ndK0b6WH6ImJHw662FQdrgHZh8wIDAQAB"'
+
+  # SESDKIMRecord1:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[7nqfzjmnbl3n46u6p7qveyesee5zymqy._domainkey, !Ref DomainName]]
+  #     Type: CNAME
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - 7nqfzjmnbl3n46u6p7qveyesee5zymqy.dkim.amazonses.com
+
+  # SESDKIMRecord2:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[25npewvcfrmhc7g7ep7fjfwzdhlgxfqo._domainkey, !Ref DomainName]]
+  #     Type: CNAME
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - 25npewvcfrmhc7g7ep7fjfwzdhlgxfqo.dkim.amazonses.com
+
+  # SESDKIMRecord3:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[suipcjbndg3c5phn2oygqqzsjggcrtev._domainkey, !Ref DomainName]]
+  #     Type: CNAME
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - suipcjbndg3c5phn2oygqqzsjggcrtev.dkim.amazonses.com
+
+  # WordpressDomainRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Ref DomainName
+  #     Type: A
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - 192.0.78.154
+  #       - 192.0.78.240
+
+  # WWWRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[www, !Ref DomainName]]
+  #     Type: CNAME
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - !Ref DomainName
