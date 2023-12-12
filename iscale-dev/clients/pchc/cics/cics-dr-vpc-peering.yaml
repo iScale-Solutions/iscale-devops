@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'VPC Peering between CICS and CICS Disaster Recovery VPC (DR). 
+  Deploy this template to the main CICS Region (Oregon for UAT, Singapore for PROD).
+  Deploy this also in DR region to update the VPC routing table.'
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+          - RequesterOrAccepter
+      - Label:
+          default: Requester VPC (Leave default if not a requester)
+        Parameters:
+          - RequesterNetworkStackName
+          - AccepterVpcId
+          - AccepterCidr
+          - AccepterRegion
+      - Label:
+          default: Accepter VPC (Leave default if not an accepter)
+        Parameters:
+          - TargetNetworkStackName
+          - VPCPeeringId
+          - RequesterCidrBlock
+
+
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      RequesterOrAccepter:
+        default: "Is this a VPC Peering REQUESTER or ACCEPTER?"
+      
+      RequesterNetworkStackName:
+        default: Requester VPC network stack name
+      AccepterVpcId:
+        default: Accepter VPC ID
+      AccepterCidr:
+        default: Accepter VPC CIDR block (network address)
+      AccepterRegion:
+        default: Accepter VPC Region
+      
+
+      TargetNetworkStackName:
+        default: Target VPC network stack name
+      VPCPeeringId:
+        default: VPC Peering ID
+      RequesterCidrBlock:
+        default: Requester VPC CIDR block (network address)
+
+
+Parameters: 
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: maws-cics
+    MinLength: 3
+    MaxLength: 20
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 12
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  RequesterOrAccepter:
+    Description: This VPC is a Requester or accepter
+    Type: String
+    MinLength: 1
+    AllowedValues:
+      - Requester
+      - Accepter
+
+  RequesterNetworkStackName:
+    Description: The name of the network stack for requester VPC
+    Type: String
+    Default: pchc-prd-ase1-cics
+    MinLength: 1
+  AccepterVpcId:
+    Description: The VPC ID of the target/accepting of VPC peering connection. (VPC should be existing)
+    Type: String
+    Default: vpc-0000
+  AccepterCidr:
+    Description: The CIDR block for the target/accepter VPC (e.g. 10.0.0.0/23)
+    Type: String
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    Default: 10.0.0.0/8
+  AccepterRegion:
+    Description: The Region code for the accepter VPC (e.g. us-west-1, us-west-2, etc.)
+    Type: String
+    Default: ''
+  
+  TargetNetworkStackName:
+    Description: The name of the network stack for accepter/target VPC
+    Type: String
+    Default: pchc-prd-ase1-cics
+    MinLength: 1
+  VPCPeeringId:
+    Description: The VPC Peering ID of accpeter/target VPC.
+    Type: String
+    Default: pcx-0000
+    MinLength: 1
+  RequesterCidrBlock:
+    Description: The CIDR block for the requester VPC (e.g. 10.0.0.0/23)
+    Type: String
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    Default: 10.0.0.0/8
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsRequester: !Equals [!Ref RequesterOrAccepter, 'Requester']
+  IsAccepter: !Equals [!Ref RequesterOrAccepter, 'Accepter']
+
+Resources:
+
+####
+# VPC Peering
+####
+
+  RequesterVPCPeering:
+    Condition: IsRequester
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        PeerRegion: !Ref AccepterRegion
+
+        # Update the routing table for requesting VPC
+        # Requester VPC
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPublicRouteTable: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PublicRouteTable'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+        RequesterPrivateRouteTable3: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable3'
+
+        # Target/Accepter VPC 
+        TargetVpcId: !Ref AccepterVpcId
+        TargetCidr: !Ref AccepterCidr
+  
+# This will only update the routing table of accepter VPC.
+  AccepterVPCPeering:
+    Condition: IsAccepter
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CreateVPCPeering: false
+        CrossRegionVPCPeeringId: !Ref VPCPeeringId
+
+        # Requester VPC
+        RequesterCidr: !Ref RequesterCidrBlock
+
+        # Update the routing table for accepting VPC
+        # Target/Accepter VPC
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackName}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackName}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackName}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackName}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackName}-PrivateRouteTable2'
+        TargetPrivateRouteTable3: !If
+          - IsProd
+          - !ImportValue
+              'Fn::Sub': '${TargetNetworkStackName}-PrivateRouteTable3'
+          - ''
