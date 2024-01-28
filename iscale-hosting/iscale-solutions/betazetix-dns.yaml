@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for betazetix.com
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: betazetix
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DomainName:
+    Description: The client's domain name (e.g. iscale-solutions.us).
+    Type: String
+    Default: betazetix.com
+  DNSSECKey:
+    Description: Enter the KMS key (from us-east-1) for DNSSSec (optional)
+    Type: String
+    Default: arn:aws:kms:us-east-1:178070162686:key/315d6bf8-09eb-4b0d-971c-5ef787b8d57b
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasDNSSEC: !Not [!Equals [!Ref DNSSECKey, ""]]
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone: 
+    Type: AWS::Route53::HostedZone
+    Properties: 
+      HostedZoneConfig: 
+        Comment: !Join [' ',[Hosted Zone for, !Ref DomainName]]
+      Name: !Ref DomainName
+      HostedZoneTags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], iscale-solutions]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  DMARCRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: DMARC record
+      Name: !Join ['.', [_dmarc, !Ref DomainName]]
+      Type: TXT
+      TTL: 14400
+      ResourceRecords:
+        - !Join ['', ["\"v=DMARC1;p=reject;pct=100;fo=1;rua=mailto:dmarc@", !Ref DomainName, "\""]]
+
+  DomainTXTRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId : !Ref HostedZone
+      Name: !Ref DomainName
+      Comment: Google TXT Record
+      ResourceRecords:
+        - '"v=spf1 include:_spf.google.com -all"'
+        - '"google-site-verification=T8spxrtKi0K8op3hIB1CSOE8Sabdtb_BKx-ersTaTS8"'
+      TTL: 14400
+      Type: TXT
+
+  GmailDKIMRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[google._domainkey, !Ref DomainName]]
+      ResourceRecords:
+        - '"v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDZBvs1PLJnjFAC4cRQUd4UfV6TL59bVVprnykYn3ounwoXMaiF82AfaRHuVLEneIz8pq6AuuQnKN+B2JENEPQ6swZ21cRGY64UXGnP0fN+/8X9pe51iKeL3K/ec4PqM8E/JKxMNA4wBn4rH6BdKR3FdI+bzAYr4KU5l933DJ1yVQIDAQAB"'
+      TTL: 14400
+      Type: TXT
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], gmail, dkim]]
+
+  GoogleWorkspaceMXRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: Google Workspace MX Records
+      Name: !Ref DomainName
+      Type: MX
+      TTL: 14400
+      ResourceRecords:
+        - 1 ASPMX.L.GOOGLE.COM
+        - 5 ALT1.ASPMX.L.GOOGLE.COM.
+        - 5 ALT2.ASPMX.L.GOOGLE.COM.
+        - 10 ALT3.ASPMX.L.GOOGLE.COM.
+        - 10 ALT4.ASPMX.L.GOOGLE.COM.
+
+  ###
+  # DNSSEC
+  ###
+
+  HostedZoneDNSSECSigningKey:
+    Condition: HasDNSSEC
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: !Ref DNSSECKey
+      Name: key_signing_key
+      Status: ACTIVE
+
+  HostedZoneDNSSEC:
+    Condition: HasDNSSEC
+    DependsOn: HostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref HostedZone
