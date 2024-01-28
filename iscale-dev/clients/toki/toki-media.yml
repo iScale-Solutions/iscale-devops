@@ -16,6 +16,7 @@ Metadata:
           - NetworkStackName
           - SNSStackName
           - LoadBalancerStackName
+          - DatabaseStackName
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -66,6 +67,8 @@ Metadata:
         default: Network Stack Name
       SNSStackName:
         default: SNS Topic Stack Name
+      DatabaseStackName:
+        default: Database Stack Name.
       ClientDomainName:
         default: Domain Name
       StartScheduleExpression:
@@ -158,6 +161,14 @@ Parameters:
     Type: String
     Default: tokiasia-stg-ase1-sns
     MinLength: 1
+  DatabaseStackName:
+    Description: The name of the toki-auction Database stack (for non-prod only). For prod, select the scraping DB stack.
+    Type: String
+    Default: tokiasia-dev-ase1-toki-auction-DBStack-E90RQ99YZ3T4
+    AllowedValues:
+      - tokiasia-dev-ase1-toki-auction-DBStack-E90RQ99YZ3T4 # development
+      - tokiasia-stg-ase1-toki-auction-DBStack-FD5XI4N68VZ1 # staging
+      - tokiasia-prd-ase1-toki-scraping-DBStack-XXXX # scraping DB production
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -237,6 +248,21 @@ Resources:
         VolumeSize: !Ref VolumeSize
         VolumeType: !Ref VolumeType
 
+  AllowServerStackIntoScrapingDB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from MediaAppServers to Scraping DB
+      IpProtocol: TCP
+      GroupId:
+        Fn::ImportValue:
+          !Sub "${DatabaseStackName}-SecurityGroupId"
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+            - ServerStack
+            - Outputs.AppServerSecurityGroup
+
   SchedulerStack:
     DependsOn:
       - ServerStack
@@ -264,8 +290,17 @@ Resources:
 Outputs:
 
   DeploymentUserGroup:
-     Description: Add the BitBucket user into this group
-     Value: 
-       Fn::GetAtt:
-         - DeployStack
-         - Outputs.DeploymentUserGroup
+    Description: Add the BitBucket user into this group
+    Value: 
+      Fn::GetAtt:
+        - DeployStack
+        - Outputs.DeploymentUserGroup
+  
+  AppServerS3BucketName:l
+    Description: App Server S3 Bucket Name
+    Value:
+      Fn::GetAtt:
+        - ServerStack
+        - Outputs.AppServerS3BucketName
+    Export: 
+      Name: !Sub ${AWS::StackName}-AppServerS3BucketArn

@@ -43,6 +43,7 @@ Metadata:
           - VolumeName
           - VolumeSize
           - VolumeType
+          - LaunchTemplate
       - Label:
           default: Domain Configuration
         Parameters:
@@ -137,6 +138,8 @@ Metadata:
         default: Volume Disk Size
       VolumeType:
         default: Volume Disk Type
+      LaunchTemplate:
+        default: Use launch template
 
 Parameters:
   OrgName:
@@ -316,6 +319,12 @@ Parameters:
   VolumeType:
     Type: String
     Default: gp2
+  LaunchTemplate:
+    Type: String
+    Default: false
+    AllowedValues:
+      - TRUE
+      - FALSE
 
 Mappings: 
   Fn::Transform:
@@ -344,6 +353,8 @@ Conditions:
   UseInternalEFS: !Not [!Condition UseExternalEFS]
   UseInternalS3: !Not [!Condition UseExternalS3]
   HasDatabase: !Not [!Equals [!Ref DatabaseEndpoint, '']]
+  UseLaunchTemplate: !Equals [!Ref LaunchTemplate, TRUE]
+  UseLaunchConfig: !Equals [!Ref LaunchTemplate, FALSE]
 
 Resources:
   
@@ -368,7 +379,106 @@ Resources:
 # AutoScaling Group 
 ####
 
+  AppServerLaunchTemplate:
+    Condition: UseLaunchTemplate
+    Type: AWS::EC2::LaunchTemplate
+    Metadata: 
+      AWS::CloudFormation::Init: 
+        configSets: 
+          Basic: 
+            - InstallCustomData
+        InstallCustomData:
+          files:
+            /var/lib/cloud/instance/custom-data.sh: 
+              content: !Sub
+                - |
+                  STACK_NAME=${AWS::StackName}
+                  AWS_REGION=${AWS::Region}
+                  DOMAIN=${DOMAIN}
+                  ENVIRONMENT=${ENVIRONMENT}
+                  CLIENT_NAME=${CLIENT_NAME}
+                  EFS_ID=${EFS_ID}
+                  APPLICATION_SITE=${APPLICATION_SITE}
+                  INSTANCE_ROLE=${INSTANCE_ROLE}
+                  SECRET_ID=${SECRET_ID}
+                  BASE_URL=https://${DOMAIN}/
+                  BUCKET_NAME=${BUCKET_NAME}
+                  CACHE_HOST=${CACHE_HOST}
+                  CACHE_PORT=${CACHE_PORT}
+                  DB_HOST=${DB_HOST}
+                  DB_PORT=${DB_PORT}
+                - DOMAIN: !If
+                    - HasLoadBalancerHostName
+                    - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+                    - !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+                  ENVIRONMENT: !Ref EnvName
+                  CLIENT_NAME: !Ref Name
+                  APPLICATION_SITE: !Ref OrgName
+                  INSTANCE_ROLE: !Ref AppServerIamRole
+                  EFS_ID: !If
+                    - UseInternalEFS
+                    - !Ref AppServerFileSystem
+                    - !Ref ExternalEFSID
+                  SECRET_ID: !If
+                    - HasSharedSecretId
+                    - !Ref SharedSecretId
+                    - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+                  BUCKET_NAME: !If
+                    - UseInternalS3
+                    - !Ref DataS3Bucket
+                    - !Select [ 5, !Split [ ':', !Ref ExternalS3BucketArn]]
+                  CACHE_HOST: !If
+                    - HasCache
+                    - !Ref CacheEndpoint
+                    - ''
+                  CACHE_PORT: !If
+                    - HasCache
+                    - !Ref DatabasePort
+                    - ''
+                  DB_HOST: !If
+                    - HasDatabase
+                    - !Ref DatabaseEndpoint
+                    - '' 
+                  DB_PORT: !If
+                    - HasDatabase
+                    - !Ref DatabasePort
+                    - ''
+              permissions: 0700
+              owner: root
+              group: root
+
+    Properties: 
+      LaunchTemplateName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, LaunchTemplate]]
+      LaunchTemplateData:
+        ImageId: !Ref InstanceAMI
+        InstanceType: !Ref InstanceType
+        KeyName: !If [HasInstanceKey, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+        SecurityGroupIds:
+          - !GetAtt AppServerSecurityGroup.GroupId
+        # SecurityGroups: !GetAtt AppServerSecurityGroup.GroupId
+        IamInstanceProfile:
+           Arn: !GetAtt AppServerIamProfile.Arn
+        Monitoring: 
+          Enabled: true
+        BlockDeviceMappings: 
+          - Ebs:
+              VolumeSize: !Ref VolumeSize
+              VolumeType: !Ref VolumeType
+              DeleteOnTermination: true # check
+            DeviceName: !Ref VolumeName
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash -xe
+              /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource AppServerLaunchTemplate -c Basic --region ${AWS::Region} --role ${ROLE}
+              # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+              /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+              # Signal the status from cfn-init
+              /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppServerLaunchTemplate  --region ${AWS::Region}
+            - ROLE: !Ref AppServerIamRole
+        
   AppServerLaunchConfig: 
+    Condition: UseLaunchConfig
     Type: AWS::AutoScaling::LaunchConfiguration
     Metadata: 
       AWS::CloudFormation::Init: 
@@ -491,7 +601,15 @@ Resources:
         - HasLoadBalancerStackName
         - [!Ref AppServerTargetGroup]
         - !Ref 'AWS::NoValue'
-      LaunchConfigurationName: !Ref AppServerLaunchConfig
+      LaunchConfigurationName: !If
+        - UseLaunchConfig
+        - !Ref AppServerLaunchConfig
+        - !Ref 'AWS::NoValue'
+      LaunchTemplate: !If
+        - UseLaunchTemplate
+        - LaunchTemplateId: !Ref AppServerLaunchTemplate
+          Version: !GetAtt AppServerLaunchTemplate.LatestVersionNumber
+        - !Ref 'AWS::NoValue'
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -505,6 +623,29 @@ Resources:
         - Key: Create_Auto_Alarms
           Value: true
           PropagateAtLaunch: True
+
+  # Application Server ELB Target Group 
+  AppServerTargetGroup:
+    Condition: HasLoadBalancerStackName
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200,301,302,303 #can make this a param if required
+      Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
+      Port: !Ref InstancePort
+      Protocol: HTTP
+      VpcId:  
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
 
   # Application Server ELB Target Group 
   AppServerTargetGroup:
@@ -633,10 +774,17 @@ Outputs:
     Value: !Ref AppServerSecurityGroup
 
   AppServerS3BucketArn:
-    Description: EFS Security Group
+    Description: App Server S3 Bucket ARN
     Value: !If
       - UseInternalS3
       - !GetAtt [DataS3Bucket, Arn]
+      - !Ref ExternalS3BucketArn
+  
+  AppServerS3BucketName:
+    Description: App Server S3 Bucket Name
+    Value: !If
+      - UseInternalS3
+      - !Ref DataS3Bucket
       - !Ref ExternalS3BucketArn
 
   AppServerTargetGroup:

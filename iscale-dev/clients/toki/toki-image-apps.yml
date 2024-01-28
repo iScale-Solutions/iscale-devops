@@ -229,7 +229,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.0
+      Version: 2.0.0
       Description: Installs NodeJS v16
       ChangeDescription: Initial version
       Data: |
@@ -244,8 +244,9 @@ Resources:
                 inputs:
                   commands:
                     - sudo yum install -y gcc-c++ make
-                    - curl -sL https://rpm.nodesource.com/setup_16.x | sudo bash -
-                    - sudo yum install -y nodejs
+                    - rpm --import https://rpm.nodesource.com/gpgkey/nodesource.gpg.key
+                    - sudo yum install https://rpm.nodesource.com/pub_16.x/nodistro/repo/nodesource-release-nodistro-1.noarch.rpm -y
+                    - sudo yum install nodejs -y --setopt=nodesource-nodejs.module_hotfixes=1
 
   SupervisorComponent:
     Type: AWS::ImageBuilder::Component
@@ -254,7 +255,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.0
+      Version: 1.0.1
       Description: Installation of SupervisorD
       ChangeDescription: Initial version
       Data: |
@@ -270,14 +271,37 @@ Resources:
                   commands:
                     - |
                       sudo yum install supervisor -y
+              
+  CloudWatchAgentRestart:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: CloudWatchAgentRestart-Component
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Restart CloudWatch agent to apply codedeploy logs
+      ChangeDescription: Initial version
+      Data: |
+        name: CloudWatchAgentRestart-Component - InlineData
+        description: Restart CloudWatch agent to apply codedeploy logs
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent-config/codedeploy-logs.json
 
 # Toki Auction Service - used by media, payments, and logistics
   TokiAuctionImageRecipe:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, toki-auction]]
-      Version: 1.0.2
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.1']]
+      Version: 1.0.3
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.3']]
       WorkingDirectory: /tmp
       Description: !Join [' ', [!Ref OrgName, toki-auction]]
       Components: #Max 20
@@ -314,8 +338,8 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, toki-media]]
-      Version: 1.0.3
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.1']]
+      Version: 1.0.4
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.3']]
       WorkingDirectory: /tmp
       Description: !Join [' ', [!Ref OrgName, toki-media]]
       Components: #Max 20
@@ -342,6 +366,84 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
         ImageRecipeARN: !Ref TokiMediaImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
+
+# Toki Scraping Service
+  TokiScrapingImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, toki-scraping]]
+      Version: 1.0.0
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.3']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', [!Ref OrgName, toki-scraping]]
+      Components: #Max 20
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref PHP82Component
+        - ComponentArn: !Ref MysqlComponent
+        - ComponentArn: !Ref ComposerComponent
+        - ComponentArn: !Ref SupervisorComponent
+        - ComponentArn: !Ref CloudWatchAgentRestart
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0/1']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  TokiScrapingBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: toki-scraping
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref TokiScrapingImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
+
+# Toki Offers Service
+  TokiOffersImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, toki-offers]]
+      Version: 1.0.1
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.3']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', [!Ref OrgName, toki-offers]]
+      Components: #Max 20
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref PHP82Component
+        - ComponentArn: !Ref MysqlComponent
+        - ComponentArn: !Ref ComposerComponent
+        - ComponentArn: !Ref SupervisorComponent
+        - ComponentArn: !Ref CloudWatchAgentRestart
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/simple-boot-test-linux/1.0.0/1']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  TokiOffersBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: toki-offers
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref TokiOffersImageRecipe
         ShareImage: !Ref ShareImage
         SNSStackName: !Ref SNSStackName
 
@@ -384,7 +486,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, toki-suppapp-fe]]
-      Version: 1.0.1
+      Version: 1.0.2
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.1']]
       WorkingDirectory: /tmp
       Description: !Join [' ', [!Ref OrgName, toki-media]]
@@ -418,7 +520,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, toki-suppapp-be]]
-      Version: 1.0.1
+      Version: 1.0.2
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.1']]
       WorkingDirectory: /tmp
       Description: !Join [' ', [!Ref OrgName, toki-media]]
@@ -452,7 +554,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, toki-admin-fe]]
-      Version: 1.0.2
+      Version: 1.0.3
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.1']]
       WorkingDirectory: /tmp
       Description: !Join [' ', [!Ref OrgName, toki-admin-fe]]
@@ -487,7 +589,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, toki-drops-fe]]
-      Version: 1.0.1
+      Version: 1.0.2
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2/1.0.1']]
       WorkingDirectory: /tmp
       Description: !Join [' ', [!Ref OrgName, toki-drops-fe]]
