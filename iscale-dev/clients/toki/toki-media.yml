@@ -211,6 +211,30 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
+  DBStack:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: !If [IsDev, 20, 35] #Gb
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: mariadb
+        EngineVersion: 10.6.10
+        Family: mariadb10.6
+        InstanceType: !If [IsProd, db.t3.medium, db.t3.micro]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+        
   DeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -233,6 +257,27 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint: !If
+          - IsProd
+          - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstanceAddress
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-DBInstanceAddress"
+        DatabasePort: !If
+          - IsProd
+          - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstancePort
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-DBInstancePort"
+        DatabaseSecurityGroupId: !If
+          - IsProd
+          - Fn::GetAtt:
+              - DBStack
+              - Outputs.SecurityGroupId
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-SecurityGroupId"
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 80
@@ -296,11 +341,11 @@ Outputs:
         - DeployStack
         - Outputs.DeploymentUserGroup
   
-  AppServerS3BucketName:l
+  AppServerS3BucketName:
     Description: App Server S3 Bucket Name
     Value:
       Fn::GetAtt:
         - ServerStack
         - Outputs.AppServerS3BucketName
     Export: 
-      Name: !Sub ${AWS::StackName}-AppServerS3BucketArn
+      Name: !Sub ${AWS::StackName}-AppServerS3BucketName
