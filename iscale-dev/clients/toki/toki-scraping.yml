@@ -17,6 +17,7 @@ Metadata:
           - SNSStackName
           - LoadBalancerStackName
           - DatabaseStackName
+          - MediaStackName
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -69,6 +70,8 @@ Metadata:
         default: SNS Topic Stack Name
       DatabaseStackName:
         default: Database Stack Name (for non-prod only).
+      MediaStackName:
+        default: toki-media Stack Name.
       ClientDomainName:
         default: Domain Name
       StartScheduleExpression:
@@ -168,6 +171,14 @@ Parameters:
     AllowedValues:
       - tokiasia-dev-ase1-toki-auction-DBStack-E90RQ99YZ3T4 # development
       - tokiasia-stg-ase1-toki-auction-DBStack-FD5XI4N68VZ1 # staging
+  MediaStackName:
+    Description: The name of the toki-media stack.
+    Type: String
+    Default: tokiasia-dev-ase1-toki-media
+    AllowedValues:
+      - tokiasia-dev-ase1-toki-media # development
+      - tokiasia-stg-ase1-toki-media # staging
+      - tokiasia-prd-ase1-toki-media # prod
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -293,6 +304,48 @@ Resources:
         VolumeSize: !Ref VolumeSize
         VolumeType: !Ref VolumeType
         LaunchTemplate: True
+
+# Attach Policy to Appserver IAM Role (appserver stack)
+
+  AllowScrapingAppServerToAccessMediaS3:
+    DependsOn:
+      - ServerStack
+    Description: Allow Scraping app servers to access toki-media S3
+    Type: AWS::IAM::Policy
+    Properties:
+      Roles:
+        - Fn::GetAtt:
+            - ServerStack
+            - Outputs.AppServerIamRole
+      PolicyName: AccessToMediaS3
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: "AccessS3Bucket"
+            Effect: Allow
+            Action:
+              - s3:GetObject*
+              - s3:ListBucket
+              - s3:PutObject*
+              - s3:DeleteObject
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Fn::ImportValue:
+                        !Sub "${MediaStackName}-AppServerS3BucketName"
+                    - "/*"
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Fn::ImportValue:
+                        !Sub "${MediaStackName}-AppServerS3BucketName"
+          - Sid: "AllowAccessS3"
+            Effect: Allow
+            Action:
+              - s3:ListAllMyBuckets
+              - s3:GetBucketLocation
+            Resource: arn:aws:s3:::*
 
   SchedulerStack:
     DependsOn:
