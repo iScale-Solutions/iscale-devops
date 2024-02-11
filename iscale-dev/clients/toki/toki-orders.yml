@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Toki Scraping Resources
+Description: Toki Orders Resources
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -17,7 +17,6 @@ Metadata:
           - SNSStackName
           - LoadBalancerStackName
           - DatabaseStackName
-          - MediaStackName
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -70,8 +69,6 @@ Metadata:
         default: SNS Topic Stack Name
       DatabaseStackName:
         default: Database Stack Name (for non-prod only).
-      MediaStackName:
-        default: toki-media Stack Name.
       ClientDomainName:
         default: Domain Name
       StartScheduleExpression:
@@ -85,7 +82,7 @@ Parameters:
     Type: String
     MinLength: 3
     MaxLength: 9
-    Default: scraping
+    Default: orders
   OrgName:
     Description: The name of the organization.
     Type: String
@@ -146,7 +143,7 @@ Parameters:
   LoadBalancerPriority:
     Description: The priority for ELB Listener.
     Type: Number
-    Default: 106
+    Default: 108
     MinValue: 1
     MaxValue: 50000
   LoadBalancerStackName:
@@ -167,18 +164,10 @@ Parameters:
   DatabaseStackName:
     Description: The name of the toki-auction Database stack (for non-prod only).
     Type: String
-    Default: tokiasia-dev-ase1-toki-auction-DBStack-E90RQ99YZ3T4
+    Default: tokiasia-dev-ase1-toki-auction
     AllowedValues:
-      - tokiasia-dev-ase1-toki-auction-DBStack-E90RQ99YZ3T4 # development
-      - tokiasia-stg-ase1-toki-auction-DBStack-FD5XI4N68VZ1 # staging
-  MediaStackName:
-    Description: The name of the toki-media stack.
-    Type: String
-    Default: tokiasia-dev-ase1-toki-media
-    AllowedValues:
-      - tokiasia-dev-ase1-toki-media # development
-      - tokiasia-stg-ase1-toki-media # staging
-      - tokiasia-prd-ase1-toki-media # prod
+      - tokiasia-dev-ase1-toki-auction # development
+      - tokiasia-stg-ase1-toki-auction # staging
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -274,21 +263,21 @@ Resources:
               - DBStack
               - Outputs.DBInstanceAddress
           - Fn::ImportValue:
-              !Sub "${DatabaseStackName}-DBInstanceAddress"
+              !Sub "${DatabaseStackName}-AuctionDBInstanceAddress"
         DatabasePort: !If
           - IsProd
           - Fn::GetAtt:
               - DBStack
               - Outputs.DBInstancePort
           - Fn::ImportValue:
-              !Sub "${DatabaseStackName}-DBInstancePort"
+              !Sub "${DatabaseStackName}-AuctionDBInstancePort"
         DatabaseSecurityGroupId: !If
           - IsProd
           - Fn::GetAtt:
               - DBStack
               - Outputs.SecurityGroupId
           - Fn::ImportValue:
-              !Sub "${DatabaseStackName}-SecurityGroupId"
+              !Sub "${DatabaseStackName}-AuctionDBSecurityGroupId"
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 80
@@ -304,48 +293,6 @@ Resources:
         VolumeSize: !Ref VolumeSize
         VolumeType: !Ref VolumeType
         LaunchTemplate: True
-
-# Attach Policy to Appserver IAM Role (appserver stack)
-
-  AllowScrapingAppServerToAccessMediaS3:
-    DependsOn:
-      - ServerStack
-    Description: Allow Scraping app servers to access toki-media S3
-    Type: AWS::IAM::Policy
-    Properties:
-      Roles:
-        - Fn::GetAtt:
-            - ServerStack
-            - Outputs.AppServerIamRole
-      PolicyName: AccessToMediaS3
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: "AccessS3Bucket"
-            Effect: Allow
-            Action:
-              - s3:GetObject*
-              - s3:ListBucket
-              - s3:PutObject*
-              - s3:DeleteObject
-            Resource:
-              - Fn::Join:
-                  - ""
-                  - - "arn:aws:s3:::"
-                    - Fn::ImportValue:
-                        !Sub "${MediaStackName}-AppServerS3BucketName"
-                    - "/*"
-              - Fn::Join:
-                  - ""
-                  - - "arn:aws:s3:::"
-                    - Fn::ImportValue:
-                        !Sub "${MediaStackName}-AppServerS3BucketName"
-          - Sid: "AllowAccessS3"
-            Effect: Allow
-            Action:
-              - s3:ListAllMyBuckets
-              - s3:GetBucketLocation
-            Resource: arn:aws:s3:::*
 
   SchedulerStack:
     DependsOn:
@@ -379,13 +326,3 @@ Outputs:
        Fn::GetAtt:
          - DeployStack
          - Outputs.DeploymentUserGroup
-  
-  ScrapingDBSecurityGroupId:
-    Condition: IsProd
-    Description: Scraping DB Secgroup ID
-    Value:
-      Fn::GetAtt:
-        - DBStack
-        - Outputs.SecurityGroupId
-    Export: 
-      Name: !Sub ${AWS::StackName}-ScrapingDBSecurityGroupId

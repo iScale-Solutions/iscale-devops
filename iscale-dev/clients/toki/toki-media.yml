@@ -17,6 +17,7 @@ Metadata:
           - SNSStackName
           - LoadBalancerStackName
           - DatabaseStackName
+          - ScrapingDatabaseStackName
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -69,6 +70,8 @@ Metadata:
         default: SNS Topic Stack Name
       DatabaseStackName:
         default: Database Stack Name.
+      ScrapingDatabaseStackName:
+        default: Scraping Database Stack Name.
       ClientDomainName:
         default: Domain Name
       StartScheduleExpression:
@@ -108,7 +111,7 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-0e5f1c28fc4ce13fb # Toki media base - 20230920
+    Default: ami-0e75ed0a058b99b0d # Toki media base - 20240130
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -162,13 +165,16 @@ Parameters:
     Default: tokiasia-stg-ase1-sns
     MinLength: 1
   DatabaseStackName:
-    Description: The name of the toki-auction Database stack (for non-prod only). For prod, select the scraping DB stack.
+    Description: The name of the toki-auction Database stack (for non-prod only).
     Type: String
     Default: tokiasia-dev-ase1-toki-auction-DBStack-E90RQ99YZ3T4
     AllowedValues:
       - tokiasia-dev-ase1-toki-auction-DBStack-E90RQ99YZ3T4 # development
       - tokiasia-stg-ase1-toki-auction-DBStack-FD5XI4N68VZ1 # staging
-      - tokiasia-prd-ase1-toki-scraping-DBStack-XXXX # scraping DB production
+  ScrapingServiceStackName:
+    Description: The name of the toki-scraping Database stack (for prod only).
+    Type: String
+    Default: tokiasia-prd-ase1-toki-scraping
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -193,6 +199,7 @@ Conditions:
 Resources:
 
   AppSecret:
+    Condition: IsNotProd
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -211,6 +218,30 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
+  DBStack:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: !If [IsDev, 20, 50] #Gb
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: mariadb
+        EngineVersion: 10.6.10
+        Family: mariadb10.6
+        InstanceType: !If [IsProd, db.t3.medium, db.t3.micro]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+        
   DeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -233,6 +264,27 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint: !If
+          - IsProd
+          - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstanceAddress
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-DBInstanceAddress"
+        DatabasePort: !If
+          - IsProd
+          - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstancePort
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-DBInstancePort"
+        DatabaseSecurityGroupId: !If
+          - IsProd
+          - Fn::GetAtt:
+              - DBStack
+              - Outputs.SecurityGroupId
+          - Fn::ImportValue:
+              !Sub "${DatabaseStackName}-SecurityGroupId"
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 80
@@ -249,13 +301,14 @@ Resources:
         VolumeType: !Ref VolumeType
 
   AllowServerStackIntoScrapingDB:
+    Condition: IsProd
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from MediaAppServers to Scraping DB
       IpProtocol: TCP
       GroupId:
         Fn::ImportValue:
-          !Sub "${DatabaseStackName}-SecurityGroupId"
+          !Sub "${ScrapingServiceStackName}-ScrapingDBSecurityGroupId"
       FromPort: 3306
       ToPort: 3306
       SourceSecurityGroupId:
@@ -296,11 +349,11 @@ Outputs:
         - DeployStack
         - Outputs.DeploymentUserGroup
   
-  AppServerS3BucketName:l
+  AppServerS3BucketName:
     Description: App Server S3 Bucket Name
     Value:
       Fn::GetAtt:
         - ServerStack
         - Outputs.AppServerS3BucketName
     Export: 
-      Name: !Sub ${AWS::StackName}-AppServerS3BucketArn
+      Name: !Sub ${AWS::StackName}-AppServerS3BucketName
