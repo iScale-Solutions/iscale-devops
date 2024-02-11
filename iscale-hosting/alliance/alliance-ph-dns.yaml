@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for alliance.ph
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: alliance
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DomainName:
+    Description: The client's domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+    Default: alliance.ph
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone: 
+    Type: AWS::Route53::HostedZone
+    Properties: 
+      HostedZoneConfig: 
+        Comment: !Join [' ',[Hosted Zone for, !Ref DomainName]]
+      Name: !Ref DomainName
+      HostedZoneTags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cci-philippines]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+  
+  HostedZoneDNSSECSigningKey:
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: arn:aws:kms:us-east-1:178070162686:key/315d6bf8-09eb-4b0d-971c-5ef787b8d57b
+      Name: key_signing_key
+      Status: ACTIVE
+
+  DefaultARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      ResourceRecords:
+       - 51.161.87.115
+      Type: A
+      TTL: 43200
+      Comment: Default A
+
+  FTPRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[ftp, !Ref DomainName]]
+      ResourceRecords:
+       - 192.169.170.16
+      Type: A
+      TTL: 43200
+      Comment: ftp
+
+  MailRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[mail, !Ref DomainName]]
+      ResourceRecords:
+       - 216.70.65.18
+      Type: A
+      TTL: 43200
+      Comment: ftp
+
+  StarARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',['*', !Ref DomainName]]
+      ResourceRecords:
+       - 192.169.170.16
+      Type: A
+      TTL: 43200
+      Comment: Star Record
+
+  WWWRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[www, !Ref DomainName]]
+      ResourceRecords:
+       - 51.161.87.115
+      Type: A
+      TTL: 43200
+      Comment: www
+
+  DomainTXTRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Ref DomainName
+      ResourceRecords:
+        - '"v=spf1 include:secureserver.net -all"'
+        - '"google-site-verification=FXU_-3eJSV64boZiAAb3SAYsvQwrpsg8UwSioexxBo0"'
+      TTL: 3600
+      Type: TXT
+      Comment: Domain TXT Record
+
+  AutoconfigRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[autoconfig, !Ref DomainName]]
+      ResourceRecords: 
+        - autodiscover.accessdomain.com.
+      TTL: 43200
+      Type: CNAME
+      Comment: AutoConfig
+
+  ComodoValidationRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[_055a319ab4b23a3d2c99ae16009675ed, !Ref DomainName]]
+      ResourceRecords: 
+        - 00b19efaa38b12424782e3dfcb97d36a.8ccf9201a5cbec20e67d2a25a32017a3.636be33012688.comodoca.com.
+      TTL: 43200
+      Type: CNAME
+      Comment: Comodo validation
+
+  DMARCRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: DMARC record
+      Name: !Join ['.', [_dmarc, !Ref DomainName]]
+      Type: TXT
+      TTL: 14400
+      ResourceRecords:
+        - !Join ['', ["\"v=DMARC1;p=reject;pct=100;fo=1;rua=mailto:sysadmin@", !Ref DomainName, "\""]]
+
+  DomainConnectRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[_domainconnect, !Ref DomainName]]
+      ResourceRecords: 
+        - _domainconnect.gd.domaincontrol.com.
+      TTL: 43200
+      Type: CNAME
+      Comment: Domain connect record
+
+  # MediaTempleMXRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Ref DomainName
+  #     ResourceRecords:
+  #       - !Join [' ',['10', !Join ['.',[mail, !Ref DomainName]]]]
+  #     TTL: 43200
+  #     Type: MX
+  #     Comment: MediaTemple MX Record
+
+  GoogleWorkspaceMXRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: Google Workspace MX Records
+      Name: !Ref DomainName
+      Type: MX
+      TTL: 14400
+      ResourceRecords:
+        - 1 ASPMX.L.GOOGLE.COM
+        - 5 ALT1.ASPMX.L.GOOGLE.COM.
+        - 5 ALT2.ASPMX.L.GOOGLE.COM.
+        - 10 ALT3.ASPMX.L.GOOGLE.COM.
+        - 10 ALT4.ASPMX.L.GOOGLE.COM.
+
+  GmailDKIMRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.',[google._domainkey, !Ref DomainName]]
+      ResourceRecords:
+        - '"v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC3Tx0CHw5VLSx4S1z6HWwjuApbfnUfJz3FaOEuDyuKYbLAt92NH+S2XbfrkASSrNpdDzCcgE77PUucn7G3+0EygG2i6PvuQAdXcTR6HAdcKkAKgdhY/0MXQQJKzaos1zbBgQgnQWptymAyW6sTdkKJSNHB9cORCwIk1R3AclJkiwIDAQAB"'
+      TTL: 14400
+      Type: TXT
+      Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], gmail, dkim]]
+
+
+  SRVRecord:
+    Type: AWS::Route53::RecordSet
+    DependsOn: HostedZone
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Join ['.', [_autodiscover, _tcp, '@', !Ref DomainName]]
+      Type: SRV
+      TTL: 43200
+      ResourceRecords:
+        - 0 10 443 autodiscover.accessdomain.com.
+      Comment: SRV Record
