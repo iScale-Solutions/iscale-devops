@@ -225,6 +225,125 @@ Resources:
         PeakSize: db.t4g.xlarge
         RegularSize: db.t4g.micro
 
+###
+# PDDTS RDS Read replica instance in Manila AZ (local zone)
+###
+
+  PDDTSReadReplicaInstance:
+    Condition: IsProd
+    Type: AWS::EC2::Instance
+    Metadata: 
+      AWS::CloudFormation::Init: 
+        configSets:
+          Basic: 
+            - "MySqlServerSetup"
+        MySqlServerSetup:
+          files:
+            /var/lib/cloud/instance/mysqlserver-setup.sh: 
+              content: !Sub
+                - |
+                  #!/bin/bash -xe
+                  sudo amazon-linux-extras install epel -y
+                  sudo yum install https://dev.mysql.com/get/mysql80-community-release-el7-5.noarch.rpm -y
+                  sudo yum install mysql-community-server -y
+                  sudo systemctl active mysqld -y
+                  sudo systemctl start mysqld -y
+                  echo "Done for ${ENVIRONMENT}"
+                - ENVIRONMENT: !Ref EnvName
+              permissions: 0700
+              owner: root
+              group: root
+    Properties: 
+      ImageId: !If [IsProd, ami-0e73d1144a39f9b41, ami-0dad7d174ea1f07e5] # base linux AMI generated from linux builder
+      InstanceType: !If [IsProd, t3.xlarge, t3.medium]
+      IamInstanceProfile: !Ref PDDTSReadReplicaInstanceIamProfile
+      Monitoring: true
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - Fn::GetAtt:
+                - DBStack
+                - Outputs.SecurityGroupId
+          SubnetId: !If
+            - IsProd
+            - subnet-0ca234a066df0f780 # Manila AZ local zone prod
+            - subnet-0720e821f506fc693 # Manila AZ local zone uat
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20 #GB
+            VolumeType: gp2
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+            # Install the files and packages from the metadata
+            /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource PDDTSReadReplicaInstance -c Basic --region ${AWS::Region} --role ${ROLE}
+            /bin/bash /var/lib/cloud/instance/mysqlserver-setup.sh
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+            #/usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+            /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource PDDTSReadReplicaInstance --region ${AWS::Region}
+          - ROLE: !Ref PDDTSReadReplicaInstanceIamRole
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, rds-read-replica]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+# pddts rds read replica iam section
+
+  PDDTSReadReplicaInstanceIamProfile:
+    Condition: IsProd
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: PDDTSReadReplicaInstanceIamRole
+
+  PDDTSReadReplicaInstanceIamRole:
+    Condition: IsProd
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AccessCloudWatchMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                Resource: '*'
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+
   DBSchedulerStack:
     DependsOn:
       - DBStack
