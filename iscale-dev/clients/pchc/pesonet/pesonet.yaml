@@ -156,57 +156,11 @@ Conditions:
 
 Resources:
 
-  ##
-  # Application Resources
-  ##
+##
+# Application Resources
+##
 
-  NetworkAppELBStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, app]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        CertificateArn: !Ref LoadBalancerCertificateArn
-        DeletionProtection: !Ref DeletionProtection
-        ElbProtocol: TCP
-        ElbType: network
-        InstancePort: 443
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
-
-  NetworkAPIELBStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, api]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        CertificateArn: !Ref LoadBalancerCertificateArn
-        DeletionProtection: !Ref DeletionProtection
-        ElbProtocol: TCP
-        ElbType: network
-        InstancePort: 443
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
-
-  NetworkSidekiqELBStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, kiq]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        CertificateArn: !Ref LoadBalancerCertificateArn
-        DeletionProtection: !Ref DeletionProtection
-        ElbProtocol: TCP
-        ElbType: network
-        InstancePort: 443
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
+# Database
 
   DBStack:
     Type: AWS::CloudFormation::Stack
@@ -270,10 +224,6 @@ Resources:
       SourceSecurityGroupId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
-          
-####
-# Application
-####
 
   CacheStack:
     Type: AWS::CloudFormation::Stack
@@ -290,6 +240,29 @@ Resources:
         SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: TRUE
+
+####
+# Application - retired
+####
+
+  # NetworkAppELBStack:
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+  #     Parameters:
+  #       Name: !Join ['-', [!Ref Name, app]]
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       CertificateArn: !Ref LoadBalancerCertificateArn
+  #       DeletionProtection: !Ref DeletionProtection
+  #       ElbProtocol: TCP
+  #       ElbType: network
+  #       InstancePort: 443
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SNSStackName: !Ref SNSStackName
+
+# need to retain this stack because the EFS is shared to all applications.
+# no need to run any instances, set auto-scaling to 0
 
   ServerStack:
     DependsOn:
@@ -323,10 +296,10 @@ Resources:
         InstancePort: 443
         InstanceSubnet: Private
         InstanceType: !If [IsProd, t3.large, t3.medium]
-        LoadBalancerPriority: 100
-        LoadBalancerHostName: !If [IsTest, pesonetmbsuat, pesonetmbs]
-        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkAppELBStack]]
-        LoadBalancerStackType: Network
+        # LoadBalancerPriority: 100
+        # LoadBalancerHostName: !If [IsTest, pesonetmbsuat, pesonetmbs]
+        # LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkAppELBStack]]
+        # LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId:
           Fn::GetAtt:
@@ -370,7 +343,7 @@ Resources:
       - TreasuryDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
       Parameters:
         Name: !Join ['-', [!Ref Name, treas]]
         EnvName: !Ref EnvName
@@ -416,7 +389,7 @@ Resources:
         InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
         InstanceSubnet: Private
         InstanceType: t3.medium
-        LoadBalancerHostName: !If [IsTest, treasury-pesonetmbsuat, treasury-pesonetmbs]
+        LoadBalancerHostName: !If [IsTest, pesonetmbsuat, pesonetmbs]
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref TreasuryELBStack]]
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId:
@@ -425,6 +398,10 @@ Resources:
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
+        VolumeSize: 10 #GB 
+        VolumeType: gp2
+        LaunchTemplate: True
 
   TreasurySchedulerStack:
     DependsOn:
@@ -454,6 +431,22 @@ Resources:
 # API
 ###
 
+  NetworkAPIELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, api]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        DeletionProtection: !Ref DeletionProtection
+        ElbProtocol: TCP
+        ElbType: network
+        InstancePort: 443
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
   APIServerDeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -471,7 +464,7 @@ Resources:
       - APIServerDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
       Parameters:
         Name: !Join ['-', [!Ref Name,api]]
         EnvName: !Ref EnvName
@@ -517,7 +510,7 @@ Resources:
         InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
         InstanceSubnet: Private
         InstanceType: t3.medium
-        LoadBalancerHostName: !If [IsTest, 'pesonetapimbsuat', api-pesonetmbs]
+        LoadBalancerHostName: !If [IsTest, 'api-pesonetmbsuat', api-pesonetmbs]
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkAPIELBStack]]
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
@@ -527,6 +520,10 @@ Resources:
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
+        VolumeSize: 10 #GB 
+        VolumeType: gp2
+        LaunchTemplate: True
 
   APIServerSchedulerStack:
     DependsOn:
@@ -556,6 +553,22 @@ Resources:
 # Sidekiq
 ###
 
+  NetworkSidekiqELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, kiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        DeletionProtection: !Ref DeletionProtection
+        ElbProtocol: TCP
+        ElbType: network
+        InstancePort: 443
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
   SidekiqServerDeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -573,7 +586,7 @@ Resources:
       - SidekiqServerDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
       Parameters:
         Name: !Join ['-', [!Ref Name,sidekiq]]
         EnvName: !Ref EnvName
@@ -628,6 +641,10 @@ Resources:
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
+        VolumeSize: 10 #GB 
+        VolumeType: gp2
+        LaunchTemplate: True
 
   SidekiqServerSchedulerStack:
     DependsOn:
