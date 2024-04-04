@@ -18,6 +18,8 @@ Metadata:
           - LoadBalancerStackName
           - DatabaseStackName
           - MediaStackName
+          - CacheEndpoint
+          - CacheSecurityGroupId
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -72,6 +74,10 @@ Metadata:
         default: Database Stack Name (for non-prod only).
       MediaStackName:
         default: toki-media Stack Name.
+      CacheEndpoint:
+        default: Cache Endpoint Name (for non-prod only).
+      CacheSecurityGroupId:
+        default: Cache Endpoint Security Group (for non-prod only).
       ClientDomainName:
         default: Domain Name
       StartScheduleExpression:
@@ -124,6 +130,7 @@ Parameters:
       - t3.small # staging
       - t3.medium # prod
       - t3.large # prod
+      - c6i.2xlarge # 8cpu, 16gb ram
   VolumeName:
     Description: Amazon Linux 2 AMI uses /dev/xvda ; Ubuntu and Windows uses /dev/sda1
     Type: String
@@ -168,10 +175,10 @@ Parameters:
   DatabaseStackName:
     Description: The name of the toki-auction Database stack (for non-prod only).
     Type: String
-    Default: tokiasia-dev-ase1-toki-auction-DBStack-E90RQ99YZ3T4
+    Default: tokiasia-dev-ase1-toki-auction
     AllowedValues:
-      - tokiasia-dev-ase1-toki-auction-DBStack-E90RQ99YZ3T4 # development
-      - tokiasia-stg-ase1-toki-auction-DBStack-FD5XI4N68VZ1 # staging
+      - tokiasia-dev-ase1-toki-auction # development
+      - tokiasia-stg-ase1-toki-auction # staging
   MediaStackName:
     Description: The name of the toki-media stack.
     Type: String
@@ -180,6 +187,20 @@ Parameters:
       - tokiasia-dev-ase1-toki-media # development
       - tokiasia-stg-ase1-toki-media # staging
       - tokiasia-prd-ase1-toki-media # prod
+  CacheEndpoint:
+    Description: The name of the toki-auction Cache stack (for non-prod only).
+    Type: String
+    Default: master.tokiasia-dev-ase1-auction-cache.6sfxgc.apse1.cache.amazonaws.com
+    AllowedValues:
+      - master.tokiasia-dev-ase1-auction-cache.6sfxgc.apse1.cache.amazonaws.com # development
+      - master.tokiasia-stg-ase1-auction-cache.6sfxgc.apse1.cache.amazonaws.com # staging
+  CacheSecurityGroupId:
+    Description: The security group of toki-auction Cache stack (for non-prod only).
+    Type: String
+    Default: sg-009d266a6c6dd017e
+    AllowedValues:
+      - sg-009d266a6c6dd017e # development
+      - sg-0ad471759fcb7b71d # staging
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -247,6 +268,24 @@ Resources:
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
 
+  CacheStack:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        EncryptInTransit: TRUE
+        EngineVersion: 6.0
+        NodeType: !If [IsProd, cache.t3.small, cache.t3.micro]
+        NumCacheClusters: 1
+        OrgName: !Ref OrgName
+        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: TRUE
+
   DeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -275,21 +314,33 @@ Resources:
               - DBStack
               - Outputs.DBInstanceAddress
           - Fn::ImportValue:
-              !Sub "${DatabaseStackName}-DBInstanceAddress"
+              !Sub "${DatabaseStackName}-AuctionDBInstanceAddress"
         DatabasePort: !If
           - IsProd
           - Fn::GetAtt:
               - DBStack
               - Outputs.DBInstancePort
           - Fn::ImportValue:
-              !Sub "${DatabaseStackName}-DBInstancePort"
+              !Sub "${DatabaseStackName}-AuctionDBInstancePort"
         DatabaseSecurityGroupId: !If
           - IsProd
           - Fn::GetAtt:
               - DBStack
               - Outputs.SecurityGroupId
           - Fn::ImportValue:
-              !Sub "${DatabaseStackName}-SecurityGroupId"
+              !Sub "${DatabaseStackName}-AuctionDBSecurityGroupId"
+        CacheEndpoint: !If
+          - IsProd
+          - Fn::GetAtt:
+              - CacheStack
+              - Outputs.CachePrimaryEndpoint
+          - !Ref CacheEndpoint
+        CacheSecurityGroupId: !If
+          - IsProd
+          - Fn::GetAtt:
+              - CacheStack
+              - Outputs.SecurityGroupId
+          - !Ref CacheSecurityGroupId
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 80
