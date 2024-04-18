@@ -17,6 +17,7 @@ Metadata:
           - SNSStackName
           - LoadBalancerStackName
           - DatabaseStackName
+          - OrdersServiceStackName
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -163,10 +164,16 @@ Parameters:
     Default: tokiasia-stg-ase1-sns
     MinLength: 1
   DatabaseStackName:
-    Description: The name of the toki-auction Database stack. (For Dev and staging only. Prod will ignore this value)
+    Description: The name of the toki-auction Database stack (for non-prod only).
     Type: String
-    Default: tokiasia-stg-ase1-toki-auction-DBStack-FD5XI4N68VZ1
-    MinLength: 1
+    Default: tokiasia-dev-ase1-toki-auction
+    AllowedValues:
+      - tokiasia-dev-ase1-toki-auction # development
+      - tokiasia-stg-ase1-toki-auction # staging
+  OrdersServiceStackName:
+    Description: The name of the toki-orders stack (for prod only).
+    Type: String
+    Default: tokiasia-prd-ase1-toki-orders
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -262,21 +269,21 @@ Resources:
               - DBStack
               - Outputs.DBInstanceAddress
           - Fn::ImportValue:
-              !Sub "${DatabaseStackName}-DBInstanceAddress"          
+              !Sub "${DatabaseStackName}-AuctionDBInstanceAddress"
         DatabasePort: !If
           - IsProd
           - Fn::GetAtt:
               - DBStack
-              - Outputs.DBInstancePort          
+              - Outputs.DBInstancePort
           - Fn::ImportValue:
-              !Sub "${DatabaseStackName}-DBInstancePort"
+              !Sub "${DatabaseStackName}-AuctionDBInstancePort"
         DatabaseSecurityGroupId: !If
           - IsProd
           - Fn::GetAtt:
               - DBStack
-              - Outputs.SecurityGroupId          
+              - Outputs.SecurityGroupId
           - Fn::ImportValue:
-              !Sub "${DatabaseStackName}-SecurityGroupId"
+              !Sub "${DatabaseStackName}-AuctionDBSecurityGroupId"
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 80
@@ -292,6 +299,24 @@ Resources:
         VolumeSize: !Ref VolumeSize
         VolumeType: !Ref VolumeType
         LaunchTemplate: True
+
+# Allow Logistics microservice to access Orders DB
+
+  AllowServerStackIntoOrdersDB:
+    Condition: IsProd
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from LogisticsAppServers to Orders DB
+      IpProtocol: TCP
+      GroupId:
+        Fn::ImportValue:
+          !Sub "${OrdersServiceStackName}-OrdersDBSecurityGroupId"
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+            - ServerStack
+            - Outputs.AppServerSecurityGroup
 
   SchedulerStack:
     DependsOn:
