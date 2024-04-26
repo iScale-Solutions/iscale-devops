@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This template provisions CloudTrail
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - OrgName
+    
+    ParameterLabels:
+      OrgName:
+        default: Organization Name
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: tokiasia
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.  
+
+Resources:
+
+###
+# CloudTrail
+###
+
+  S3Bucket:
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-', [!Ref OrgName, 'cloudtrail']]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName , cloudtrail]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  S3BucketPolicy:
+    DeletionPolicy: Retain
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: S3Bucket
+      PolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource:
+              !Sub |-
+                arn:aws:s3:::${S3Bucket}
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource:
+              !Sub |-
+                arn:aws:s3:::${S3Bucket}/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  CloudTrail:
+    DeletionPolicy: Retain
+    DependsOn:
+      - S3Bucket
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      EnableLogFileValidation: true
+      S3BucketName: !Ref S3Bucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      TrailName: !Join ['-', [!Ref OrgName, trail]]
+
+Outputs:
+
+  CloudTrail:
+    Description: CloudTrail object
+    Value: !Ref CloudTrail
