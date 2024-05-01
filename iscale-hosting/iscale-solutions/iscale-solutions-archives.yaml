@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Backup infrastructure for Externisy
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Backup Resources
+####
+
+  BackupS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: iscale-solutions-archives
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteIncompleteFiles
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 3
+            Status: Enabled
+          - Id: StorageClasses
+            ExpirationInDays: 3650
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+              - StorageClass: DEEP_ARCHIVE
+                TransitionInDays: 180
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Tags: 
+      #   - Key: Name
+      #     Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], data, backup]]
+      #   - Key: Organization
+      #     Value: !Ref OrgName
+  
+  GmailBackupGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: GmailBackup
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: ViewS3Bucket
+                Effect: Allow
+                Action: 
+                  - s3:GetBucketLocation
+                  - s3:ListAllMyBuckets
+                Resource: !GetAtt BackupS3Bucket.Arn
+              - Sid: SaveInS3BucketGmailFolder
+                Effect: Allow
+                Action:
+                  - s3:GetObject*
+                  - s3:ListBucket
+                  - s3:PutObject*
+                Resource:
+                  - !GetAtt BackupS3Bucket.Arn
+                  - !Join ['/', [!GetAtt BackupS3Bucket.Arn, 'GSuite']]
+
+  GmailBackupUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: gmail_backup_user
+      Groups:
+      - !Ref GmailBackupGroup
+      Tags:
+        - Key: Name
+          Value: Gmail backup user
+        - Key: Email
+          Value: gmailbackup@externisy.fr
+
+  GmailBackupUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName:
+        Ref: GmailBackupUser
+
+Outputs:
+
+  GmailBackupUserAccessKeyId:
+    Description: Access Key Id for the Gmail backup user
+    Value: !Ref GmailBackupUserAccessKey
+  
+  GmailBackupUserAccessKeySecret:
+    Description: Secret Key for the Gmail backup user
+    Value: !GetAtt [GmailBackupUserAccessKey, SecretAccessKey]
