@@ -17,6 +17,7 @@ Metadata:
           - SNSStackName
           - LoadBalancerStackName
           - DatabaseStackName
+          - ImsDBSecretArn
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -69,6 +70,8 @@ Metadata:
         default: SNS Topic Stack Name
       DatabaseStackName:
         default: Database Stack Name (for non-prod only).
+      ImsDBSecretArn:
+        default: IMS DB Secrets Manager ARN. 
       ClientDomainName:
         default: Domain Name
       StartScheduleExpression:
@@ -168,6 +171,10 @@ Parameters:
     AllowedValues:
       - tokiasia-dev-ase1-toki-auction # development
       - tokiasia-stg-ase1-toki-auction # staging
+  ImsDBSecretArn:
+    Description: The ARN of IMS DB Secrets Manager.
+    Type: String
+    Default: ''
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -317,6 +324,101 @@ Resources:
           Fn::GetAtt:
             - DeployStack
             - Outputs.CodeDeployDeploymentGroupName
+
+# Event Rule to update IMS env file from Secrets Manager rotation event
+
+  RotationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EventInvokeRun-InstanceTarget
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow 
+                Action: 
+                  - ssm:SendCommand
+                Resource: !Join [":", ["arn:aws:ec2", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "instance/*"]]
+                Condition:
+                  StringEquals: 
+                    ec2:ResourceTag/*: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - PolicyName: EventInvokeRun-RunShellScript
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                Resource: !Join [":", ["arn:aws:ssm", !Ref 'AWS::Region', "*", "document/AWS-RunShellScript"]]
+
+  RotationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+      LogGroupName: !Join [ '/', [/aws/rds/instance, !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], rotation-log]]
+
+  RotationEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.secretsmanager
+        detail-type:
+          - AWS Service Event via CloudTrail
+        detail:
+          eventSource:
+            - secretsmanager.amazonaws.com
+          eventName:
+            - RotationSucceeded
+          additionalEventData:
+            SecretId:
+              - !Ref ImsDBSecretArn
+      State: ENABLED
+      Targets:
+        - Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, log, group]]
+          Arn: !GetAtt RotationLogGroup.Arn
+        - Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, RunShellScript]]
+          Arn: arn:aws:ssm:ap-southeast-1::document/AWS-RunShellScript
+          RoleArn: !GetAtt RotationRole.Arn
+          Input: >-
+            {
+              "executionTimeout":["60"],
+              "commands":["bash /tmp/update-env-file.sh"]
+            }
+          RunCommandParameters:
+            RunCommandTargets:
+              - Key: tag:Name
+                Values:
+                  - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+# Allow IMS Instances to access IMS DB Secrets
+
+  GetSecretFromImsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: GetSecretValueFromIMS
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Ref ImsDBSecretArn
+      Roles:
+        - Fn::GetAtt:
+            - ServerStack
+            - Outputs.AppServerIamRole
 
 # Jumphost access
 
