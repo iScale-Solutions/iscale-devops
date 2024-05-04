@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions resources for iScale Solutions
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - LoadBalancerStackName
+          - SNSStackName
+      - Label:
+          default: EC2/Auto-Scaling Group Configuration
+        Parameters:
+          - AssociatePublicIp
+          - InstanceAMI
+          - InstanceType
+          - EnableMonitoring
+          - KeyName
+          - EnableCPUCreditAlarm
+          - MaxSize
+          - MinSize
+          - SpotPrice
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - SSLCertificateArn
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
+      DomainName:
+        default: Domain Name
+      SSLCertificateArn:
+        default: ELB SSL Certificate ARN
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: www
+    MaxLength: 9 # Max length for target group name is only 32 characters.
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-hosting
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-network
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: HostingProductionELB
+  DomainName:
+    Description: The client's domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+    Default: iscale-solutions.com
+  Priority1:
+    Description: The priority for listener rule 1.
+    Type: Number
+    Default: 257
+    MinValue: 1
+    MaxValue: 50000
+  Priority2:
+    Description: The priority for listener rule 2.
+    Type: Number
+    Default: 258
+    MinValue: 1
+    MaxValue: 50000
+  SSLCertificateArn:
+    Description: ELB SSL Certificate ARN
+    Type: String
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Certificate Section
+####
+
+  SSLListenerCertificates:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref SSLCertificateArn
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub '${LoadBalancerStackName}-SSLListener'
+
+  HTTPListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            Host: !Ref DomainName
+            Path: '/#{path}'
+            Query: '#{query}'
+            StatusCode: HTTP_301
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', [www, !Ref DomainName]]
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub '${LoadBalancerStackName}-HttpListenerArn'
+      Priority: !Ref Priority1
+
+  HTTPSListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties: 
+      Actions: 
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            Host: !Ref DomainName
+            Path: '/#{path}'
+            Query: '#{query}'
+            StatusCode: HTTP_301
+      Conditions: 
+        - Field: host-header
+          Values: 
+            - !Join ['.', [www, !Ref DomainName]]
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub '${LoadBalancerStackName}-SSLListener'
+      Priority: !Ref Priority2
+
+####
+# S3 Section
+####
+  WWWRedirectBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['.', [www, !Ref DomainName]]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      WebsiteConfiguration:
+        RedirectAllRequestsTo:
+          HostName: !Ref DomainName
+          Protocol: https
