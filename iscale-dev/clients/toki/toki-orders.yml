@@ -17,6 +17,7 @@ Metadata:
           - SNSStackName
           - LoadBalancerStackName
           - DatabaseStackName
+          - LogisticsServiceStackName
       - Label:
           default: Load Balancer Configuration
         Parameters:
@@ -69,6 +70,8 @@ Metadata:
         default: SNS Topic Stack Name
       DatabaseStackName:
         default: Database Stack Name (for non-prod only).
+      LogisticsServiceStackName:
+        default: Logistics Database Stack Name
       ClientDomainName:
         default: Domain Name
       StartScheduleExpression:
@@ -168,6 +171,10 @@ Parameters:
     AllowedValues:
       - tokiasia-dev-ase1-toki-auction # development
       - tokiasia-stg-ase1-toki-auction # staging
+  LogisticsServiceStackName:
+    Description: The name of the toki-logstics stack (for prod only).
+    Type: String
+    Default: tokiasia-prd-ase1-toki-logistics
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -318,6 +325,24 @@ Resources:
             - DeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
+# Allow orders microservice to access logistics DB
+
+  AllowServerStackIntoLogisticsDB:
+    Condition: IsProd
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from OrdersAppServers to Logistics DB
+      IpProtocol: TCP
+      GroupId:
+        Fn::ImportValue:
+          !Sub "${LogisticsServiceStackName}-LogisticsDBSecurityGroupId"
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+            - ServerStack
+            - Outputs.AppServerSecurityGroup
+
 # Jumphost access
 
   AllowJumpHostIntoServer:
@@ -347,7 +372,7 @@ Outputs:
 
   OrdersDBSecurityGroupId:
     Condition: IsProd
-    Description: Scraping DB Secgroup ID
+    Description: Orders DB Secgroup ID
     Value:
       Fn::GetAtt:
         - DBStack
