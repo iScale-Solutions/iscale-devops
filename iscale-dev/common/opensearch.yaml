@@ -15,9 +15,9 @@ Metadata:
         Parameters:
           - Version
           - InstanceType
+          - InstanceCount
           - VolumeType
           - VolumeSize
-          - AutomatedSnapshotStartHour
           - EncryptAtRestEnabled
           - RestActionMultiAllowExplicitIndexEnabled
           - LogPublishingIndexEnabled
@@ -44,14 +44,14 @@ Metadata:
         default: OpenSearch Version
       InstanceType:
         default: OpenSearch Instance Type
+      InstanceCount:
+        default: Opensearch number of instance
       VolumeType:
         default: Volume Type
       VolumeSize:
         default: Volume Size
       RestActionMultiAllowExplicitIndexEnabled:
         default: Enable Rest Action Multi Allow Explicti Index
-      AutomatedSnapshotStartHour:
-        default: Automated Snapshot Start Hour
       EncryptAtRestEnabled:
         default: Enable Encrypt at Rest
       LogPublishingIndexEnabled:
@@ -90,6 +90,10 @@ Parameters:
     Description: Instance type
     Type: String
     Default: t3.small.search
+  InstanceCount:
+    Description: Instance Count
+    Type: Number
+    Default: 1
   VolumeType:
     Description: Values must be [gp2, io1, standard]
     Type: String
@@ -102,10 +106,6 @@ Parameters:
     Description: OpenSearch Volume Size
     Type: Number
     Default: 10
-  AutomatedSnapshotStartHour:
-    Description: The hour in UTC during which the service takes an automated daily snapshot of the indices in the Amazon ES domain.
-    Type: Number
-    Default: 0
   EncryptAtRestEnabled:
     Description: Enables encrypt data at rest.
     Type: String
@@ -352,13 +352,15 @@ Resources:
 
   OpenSearchDomain:
     Type: AWS::OpenSearchService::Domain
+    UpdatePolicy:
+      EnableVersionUpgrade: True
     Properties:
       DomainName: !If
         - UseFriendlyNames
         - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         - !Ref 'AWS::NoValue'
       ClusterConfig:
-        InstanceCount: 1
+        InstanceCount: !Ref InstanceCount
         InstanceType: !Ref InstanceType
       EBSOptions:
         EBSEnabled: true
@@ -366,34 +368,15 @@ Resources:
         VolumeType: !Ref VolumeType
       EncryptionAtRestOptions:
         Enabled: !Ref EncryptAtRestEnabled
-      SnapshotOptions:
-        AutomatedSnapshotStartHour: !Ref AutomatedSnapshotStartHour
       AccessPolicies:
         Version: 2012-10-17
         Statement:
           - Effect: Allow
             Principal:
-              # AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
               AWS: '*'
             Action:
               - es:*
             Resource: '*'
-          # - Effect: Allow
-          #   Principal:
-          #     AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
-          #   Action:
-          #     - logs:CreateLogGroup
-          #     - logs:CreateLogStream
-          #     - logs:DescribeLogStreams
-          #     - logs:GetLogEvents
-          #     - logs:FilterLogEvents
-          #     - logs:PutLogEvents
-          #   Resource: '*'
-          # - Effect: Allow
-          #   Action:
-          #     - logs:PutResourcePolicy
-          #     - logs:DeleteResourcePolicy
-          #   Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
       AdvancedOptions:
         rest.action.multi.allow_explicit_index: !Ref RestActionMultiAllowExplicitIndexEnabled
       LogPublishingOptions:
@@ -420,6 +403,7 @@ Resources:
 # VPC Section
 ####
 
+  # #By default, no inbound connection are allowed. The caller (AppServer / Lambda) will need to add itself to the allowed callers list.
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
