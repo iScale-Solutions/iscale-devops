@@ -20,6 +20,10 @@ Metadata:
           - BackupWindow
           - SnapshotIdentifier
           - AutoMinorVersionUpgrade
+          - ClusterType
+          - ShardCapacity
+          - ShardCount
+          - ShardInstanceCount
       - Label:
           default: CloudWatch Configuration
         Parameters:
@@ -52,6 +56,14 @@ Metadata:
         default: Snapshot Identifier
       AutoMinorVersionUpgrade:
         default: Auto-Minor Version Upgrade
+      ClusterType:
+        default: DocumentDB Cluster Type
+      ShardCapacity:
+        default: DocumentDB Elastic Shard Capacity
+      ShardCount:
+        default: DocumentDB Elastic Shard Count
+      ShardInstanceCount:
+        default: DocumentDB Cluster Type
       LogRetentionPeriod:
         default: Log Retention Period
       EnableCPUCreditAlarm:
@@ -122,6 +134,31 @@ Parameters:
     AllowedValues:
       - true
       - false
+  ClusterType:
+    Description: DocumentDB cluster type.
+    Type: String
+    Default: instance
+    AllowedValues:
+      - instance
+      - elastic
+  ShardCapacity:
+    Description: The number of vCPUs assigned to each elastic cluster shard. 
+    Type: Number
+    Default: 2
+    AllowedValues: [2, 4, 8, 16, 32, 64]
+  ShardCount:
+    Description: The number of shards assigned to the elastic cluster.
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 32
+    ConstraintDescription: Maximum is 32.
+  ShardInstanceCount:
+    Description: 'The number of replica instances applying to all shards in the cluster. 
+    A shardInstanceCount value of 1 means there is one writer instance, and any additional 
+    instances are replicas that can be used for reads and to improve availability.'
+    Type: Number
+    Default: 1
   LogRetentionPeriod:
     Description: The number of days to retain the log events in the specified log group
     Type: Number
@@ -157,6 +194,8 @@ Conditions:
   HasBackupWindow: !Not [!Equals [!Ref BackupWindow, ""]]
   IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
   IsEncrypted: !Equals [!Ref StorageEncrypted, true]
+  InstanceTypeCluster: !Equals [!Ref ClusterType, instance]
+  ElasticTypeCluster: !Equals [!Ref ClusterType, elastic]
 
 Resources:
 
@@ -270,7 +309,10 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
+# DocumentDB instance type cluster
+
   DBSubnetGroup:
+    Condition: InstanceTypeCluster
     Type: AWS::RDS::DBSubnetGroup
     Properties:
       DBSubnetGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -285,6 +327,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
   DBClusterParameterGroup:
+    Condition: InstanceTypeCluster
     Type: AWS::DocDB::DBClusterParameterGroup
     Properties:
       Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -297,9 +340,10 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
   
   DBCluster:
+    Condition: InstanceTypeCluster
     Type: AWS::DocDB::DBCluster
     Properties: 
-      BackupRetentionPeriod: 8
+      BackupRetentionPeriod: !Ref BackupRetentionPeriod
       DBClusterParameterGroupName: !Ref DBClusterParameterGroup
       DBSubnetGroupName: !Ref DBSubnetGroup
       MasterUsername: !Ref MasterUser
@@ -312,6 +356,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
   DBInstance:
+    Condition: InstanceTypeCluster
     Type: AWS::DocDB::DBInstance
     Properties:
       AutoMinorVersionUpgrade: true
@@ -322,12 +367,57 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
+# DocumentDB Elastic type cluster
+
+  DocuDBElastic:
+    Condition: ElasticTypeCluster
+    Type: AWS::DocDBElastic::Cluster
+    Properties:
+      AdminUserName: !Ref MasterUser
+      AdminUserPassword: !GetAtt RDSPasswordGenerator.DatabaseRootPassword
+      AuthType: PLAIN_TEXT
+      BackupRetentionPeriod: !Ref BackupRetentionPeriod
+      ClusterName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      # KmsKeyId:
+      PreferredBackupWindow: !If [ HasBackupWindow, !Ref BackupWindow, !Ref 'AWS::NoValue']
+      # PreferredMaintenanceWindow:
+      ShardCapacity: !Ref ShardCapacity
+      ShardCount: !Ref ShardCount
+      ShardInstanceCount: !Ref ShardInstanceCount
+      SubnetIds:
+        - Fn::ImportValue:
+            !Sub "${NetworkStackName}-InternalSubnetId1"
+        - Fn::ImportValue:
+            !Sub "${NetworkStackName}-InternalSubnetId2"
+      VpcSecurityGroupIds:
+        - !Ref DocuDBElasticSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
 ####
 # VPC Section
 ####
 
   #By default, no inbound connection are allowed. The caller (AppServer / Lambda) will need to add itself to the allowed callers list.
   DBClusterSecurityGroup:
+    Condition: InstanceTypeCluster
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], db] ]
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  DocuDBElasticSecurityGroup:
+    Condition: ElasticTypeCluster
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], db] ]
@@ -379,6 +469,7 @@ Resources:
   # Database log / metrics / alarms
 
   RDSLogGroup:
+    Condition: InstanceTypeCluster
     Type: AWS::Logs::LogGroup
     Properties:
       RetentionInDays: !If [IsProd, 365, !Ref LogRetentionPeriod]
@@ -395,10 +486,12 @@ Outputs:
     Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
   DBClusterARN:
+    Condition: InstanceTypeCluster
     Description: ARN of the created DB cluster
     Value: !Join [":", ["arn:aws:rds", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "cluster", !Ref DBCluster]]
 
   SecurityGroupId:
+    Condition: InstanceTypeCluster
     Description: The security group id of the RDS instance
     Value: !GetAtt DBClusterSecurityGroup.GroupId
 
@@ -407,9 +500,11 @@ Outputs:
     Value: !Ref Port
 
   ClusterEndpointAddress:
+    Condition: InstanceTypeCluster
     Description: The endpoint address of the RDS cluster
     Value: !GetAtt DBCluster.Endpoint
 
   ClusterReadEndpointAddress:
+    Condition: InstanceTypeCluster
     Description: The read endpoint address of the rds cluster
     Value: !GetAtt DBCluster.ReadEndpoint
