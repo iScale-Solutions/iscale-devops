@@ -1,0 +1,242 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Monitoring Instance (Windows)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceAMI
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      InstanceAMI:
+        default: Instance AMI ID
+      NetworkStackName:
+        default: Network Stack Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: monitor
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-04eb6bba8a64bfa5b #Default Windows 2019 base server
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: pchc-test-uw2-monitor-network
+    MinLength: 1
+  NetworkStackNameCICS:
+    Description: CICS Network stack
+    Type: String
+    Default: pchc-test-uw2-cics-network
+  NetworkStackNameDSAPP:
+    Description: DSAPP Network stack
+    Type: String
+    Default: pchc-test-uw2-dsapp-network
+  NetworkStackNamePAYGATE:
+    Description: PAYGATE Network stack
+    Type: String
+    Default: pchc-test-uw2-paygate-network
+  NetworkStackNamePDDTSEOD:
+    Description: PDDTSEOD Network stack
+    Type: String
+    Default: pchc-test-uw2-pddts-eod-network
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+###
+# Monitoring Windows Instnace
+###
+
+  MonitorEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  MonitorInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref MonitorEC2Role
+  
+  MonitorInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: m4.xlarge
+      DisableApiTermination: false
+      IamInstanceProfile: !Ref MonitorInstanceProfile
+      KeyName: cics-uat
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 50
+            VolumeType: gp3
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref MonitorInstanceSecurityGroup
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PublicSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+# Secgroup
+
+  MonitorInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, Security, Group]]
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcCidrBlock'
+          Description: Allow all traffic on on all ports from inside VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, Security, Group]]
+
+  AllowCICSVpcToMonitorEC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow traffic from CICS VPC
+      IpProtocol: -1
+      GroupId: !Ref MonitorInstanceSecurityGroup
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackNameCICS}-VpcCidrBlock'
+
+  AllowDSAPPVpcToMonitorEC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow traffic from DSAPP VPC
+      IpProtocol: -1
+      GroupId: !Ref MonitorInstanceSecurityGroup
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackNameDSAPP}-VpcCidrBlock'
+
+  AllowPAYGATEVpcToMonitorEC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow traffic from PAYGATE VPC
+      IpProtocol: -1
+      GroupId: !Ref MonitorInstanceSecurityGroup
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackNamePAYGATE}-VpcCidrBlock'
+
+  AllowPDDTSEODVpcToMonitorEC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow traffic from PDDTSEOD VPC
+      IpProtocol: -1
+      GroupId: !Ref MonitorInstanceSecurityGroup
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackNamePDDTSEOD}-VpcCidrBlock'
+
+# Whitelist IP
+
+  WhiteListIpPCHC1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: PCHC MNL PLDT
+      IpProtocol: -1
+      GroupId: !Ref MonitorInstanceSecurityGroup
+      CidrIp: 119.92.188.0/28
+
+  WhiteListIpPCHC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: PCHC MNL ETPI
+      IpProtocol: -1
+      GroupId: !Ref MonitorInstanceSecurityGroup
+      CidrIp: 120.89.33.192/26
+
+  WhiteListIp3:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: PCHC MKT1
+      IpProtocol: -1
+      GroupId: !Ref MonitorInstanceSecurityGroup
+      CidrIp: 120.89.49.8/29
+
+  WhiteListIp4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: PCHC MKT2
+      IpProtocol: -1
+      GroupId: !Ref MonitorInstanceSecurityGroup
+      CidrIp: 112.199.115.0/29
