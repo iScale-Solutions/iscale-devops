@@ -20,8 +20,8 @@ Metadata:
           default: "EC2 Configuration"
         Parameters:
           - InstanceType
-          - VpcId
-          - VpcSubnet
+          - ImageId
+          - NetworkStackName
 
     ParameterLabels:
       Name:
@@ -32,10 +32,10 @@ Metadata:
         default: "Environment Name"
       InstanceType:
         default: "Instance Type"
-      VpcId:
-        default: "VPC ID"
-      VpcSubnet:
-        default: "Subnet ID"
+      ImageId:
+        default: "Instance AMI"
+      NetworkStackName:
+        default: "Network Stack Name"
 
 Parameters:
   Name:
@@ -94,14 +94,15 @@ Parameters:
     - t3.xlarge
     - t3.2xlarge
     ConstraintDescription: must be a valid EC2 instance type.
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-    Description: VpcId of your existing Virtual Private Cloud (VPC).
-    Default: 'vpc-0fed281d3b7026344' #change if needed
-  VpcSubnet:
-    Description: Enter the VPC subnet of you existing Virtual Private Cloud (VPC)
-    Type: AWS::EC2::Subnet::Id
-    Default: 'subnet-0a48f81980ff1167a' #change if needed, need public subnet
+  ImageId:
+    Description: Instance AMI, get the value from the downloaded Akamai CF template
+    Type: String
+    Default: ''
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: pchc-prd-ase1-pas6-network # change if needed
+    MinLength: 1
 
 Mappings: 
   EnvShort:
@@ -113,121 +114,6 @@ Mappings:
       Name: dev
     Test:
       Name: test
-  AWSInstanceType2Arch:
-    c5.large:
-      Arch: '64'
-    c5.xlarge:
-      Arch: '64'
-    c5.2xlarge:
-      Arch: '64'
-    c5.4xlarge:
-      Arch: '64'
-    c5d.large:
-      Arch: '64'
-    c5d.xlarge:
-      Arch: '64'
-    c5d.2xlarge:
-      Arch: '64'
-    c5d.4xlarge:
-      Arch: '64'
-    m5.large:
-      Arch: '64'
-    m5.2xlarge:
-      Arch: '64'
-    m5.4xlarge:
-      Arch: '64'
-    m5d.large:
-      Arch: '64'
-    m5d.2xlarge:
-      Arch: '64'
-    m5d.4xlarge:
-      Arch: '64'
-    r5.large:
-      Arch: '64'
-    r5.xlarge:
-      Arch: '64'
-    r5.2xlarge:
-      Arch: '64'
-    r5.4xlarge:
-      Arch: '64'
-    r5.8xlarge:
-      Arch: '64'
-    r5d.large:
-      Arch: '64'
-    r5d.xlarge:
-      Arch: '64'
-    r5d.2xlarge:
-      Arch: '64'
-    r5d.4xlarge:
-      Arch: '64'
-    r5d.8xlarge:
-      Arch: '64'
-    i3.large:
-      Arch: '64'
-    i3.2xlarge:
-      Arch: '64'
-    i3.4xlarge:
-      Arch: '64'
-    i3.8xlarge:
-      Arch: '64'
-    t3.xlarge:
-      Arch: '64'
-    t3.2xlarge:
-      Arch: '64'
-  RegionMap: # change AMI ID if needed
-    us-east-1:
-      AMI: ami-04af29dfbe000e153
-    us-west-1:
-      AMI: ami-0a3467e704060a3d4
-    us-west-2:
-      AMI: ami-017bf5e389f0dac00
-    eu-west-1:
-      AMI: ami-0b4f5d35e1d1321c1
-    ap-south-1:
-      AMI: ami-0001437da27ed446e
-    ap-southeast-1:
-      AMI: ami-06342e1c0855d82dd
-    ap-northeast-1:
-      AMI: ami-019b9ef3127308ab7
-    ap-northeast-2:
-      AMI: ami-0281c97bcfeef6443
-    ap-southeast-2:
-      AMI: ami-09aed27d0d1948f83
-    sa-east-1:
-      AMI: ami-0e4667ea32c60ba21
-    eu-central-1:
-      AMI: ami-069b6673b0c06acdd
-    us-gov-west-1:
-      AMI: ami-00f912fc588d5a495
-    us-east-2:
-      AMI: ami-04b48070e5a4c3905
-    eu-west-2:
-      AMI: ami-02d96e2f4ed2a2089
-    ca-central-1:
-      AMI: ami-0734fef2df2ceb684
-    ap-east-1:
-      AMI: ami-05ed1e61cc387af47
-    me-south-1:
-      AMI: ami-00be3ed703ae0358a
-    eu-west-3:
-      AMI: ami-0fc762c35cd73a67e
-    eu-north-1:
-      AMI: ami-09b381565961cae79
-    af-south-1:
-      AMI: ami-060da77b7f1c31195
-    eu-south-1:
-      AMI: ami-0694c0d6ebb58f8f0
-    ap-northeast-3:
-      AMI: ami-01bb95237a92a8290
-  AWSRegionArch2AMI:
-    us-east-1:
-      '32': NOT_YET_SUPPORTED
-      '64': ami-04af29dfbe000e153
-      64HVM: NOT_YET_SUPPORTED
-    us-west-1:
-      '32': NOT_YET_SUPPORTED
-      '64': ami-0a3467e704060a3d4
-      64HVM: NOT_YET_SUPPORTED
   RegionShort:
     us-east-2:
       Name: ue2
@@ -281,22 +167,24 @@ Resources:
 ####
 # EC2 Section
 ####
-  PCHCConnectorUAT1SecurityGroup:
+  AkamaiConnectorSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Opening everything outbound
-      VpcId:
-        Ref: VpcId
+      VpcId:  
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
       SecurityGroupEgress:
       - IpProtocol: "-1"
         FromPort: "-1"
         ToPort: "-1"
         CidrIp: 0.0.0.0/0
-  Ec2Instance:
+
+  AkamaiConnectorInstance:
     Type: AWS::EC2::Instance
     Properties:
       SecurityGroupIds:
-      - Ref: PCHCConnectorUAT1SecurityGroup
+      - Ref: AkamaiConnectorSecurityGroup
       Tags:
         - 
           Key: Name
@@ -307,27 +195,24 @@ Resources:
         - 
           Key: Organization
           Value: !Ref OrgName
-      ImageId:
-        Fn::FindInMap:
-        - RegionMap
-        - Ref: AWS::Region
-        - AMI
-      SubnetId:
-        Ref: VpcSubnet
+      ImageId: !Ref ImageId
+      SubnetId:  
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-PublicSubnetId1"
       InstanceType:
         Ref: InstanceType
       UserData: # unique value in downloaded CF template from Akamai 
-        Fn::Base64: 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
+        Fn::Base64: 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
 
 Outputs:
 
   InstanceId:
     Description: InstanceId of the newly created EC2 instance
     Value:
-      Ref: Ec2Instance
+      Ref: AkamaiConnectorInstance
   AZ:
     Description: Availability Zone of the newly created EC2 instance
     Value:
       Fn::GetAtt:
-      - Ec2Instance
+      - AkamaiConnectorInstance
       - AvailabilityZone
