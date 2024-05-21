@@ -1,0 +1,402 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: iScale Trading Bot
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - LoadBalancerStackName
+      - Label:
+          default: Binance Configuration
+        Parameters:
+          - BinanceApiKey
+          - BinanceApiSecret
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      LoadBalancerStackName:
+        default: Loadbalancer Stack Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      BinanceApiKey:
+        default: Binance API Key
+      BinanceApiSecret:
+        default: Binance API Secret
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: tradingbot
+    MaxLength: 32
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  LoadBalancerStackName:
+    Description: The name of the load balancer stack.
+    Type: String
+    Default: HostingProductionELB
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-network
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-hosting-prd-uw2-sns
+  BinanceApiKey: 
+    Description: Binance API Key
+    Type: String
+  BinanceApiSecret: 
+    NoEcho: true
+    Description: Binance API Secret
+    Type: String
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  DataS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, deploy]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, deploy]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  DataS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataS3Bucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject*
+              - s3:GetObject*
+              - s3:DeleteObject
+            Resource:
+              - !GetAtt DataS3Bucket.Arn
+              - !Join ['/',[!GetAtt DataS3Bucket.Arn, '*']]
+            Principal:
+              AWS:
+                - !Ref 'AWS::AccountId'
+
+  DeployUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, deploy, user]]
+      Groups:
+        - !Ref DeployUserGroup
+
+  DeployUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref DeployUser  
+
+  DeployUserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      Policies:
+        - PolicyName: S3DeployBucketWriteAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticbeanstalk:CreateApplicationVersion
+                  - elasticbeanstalk:UpdateEnvironment
+                  - elasticbeanstalk:DescribeEnvironments
+                  - elasticbeanstalk:DescribeEnvironmentResources
+                  - elasticbeanstalk:DescribeApplicationVersions
+                  - elasticbeanstalk:ListTagsForResource
+                # Resource: !Ref BeanstalkApplication
+                Resource: '*'
+
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Join ['/',[!GetAtt DataS3Bucket.Arn, '*']]
+
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeKeyPairs
+                Resource: '*'
+
+              - Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:UpdateAutoScalingGroup
+                Resource: 
+                  !Sub 'arn:aws:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/*'
+
+              # - Effect: Allow
+              #   Action:
+              #     - iam:PassRole
+              #   Resource: "arn:aws:iam::account-id:role/role-name"
+              #   Condition:
+              #     StringEquals:
+              #       iam:PassedToService:
+              #         - 'elasticbeanstalk.amazonaws.com'
+
+  Secrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: !Join [' ', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]]]
+      GenerateSecretString:
+        SecretStringTemplate: !Sub
+          - |
+            {
+              "BINANCE_API_KEY": "${BINANCE_KEY}",
+              "BINANCE_API_SECRET": "${BINANCE_SECRET}"
+            }
+          - BINANCE_KEY: !Ref BinanceApiKey
+            BINANCE_SECRET: !Ref BinanceApiSecret
+        GenerateStringKey: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name]]
+
+  BeanstalkServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: elasticbeanstalk.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ElasticBeanstalkInstancePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:Describe*
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:DeregisterTargets
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - elasticbeanstalk:Describe*
+                Resource: '*'
+        - PolicyName: ElasticBeanstalkAutoScalingPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:TerminateInstanceInAutoScalingGroup
+                  - autoscaling:SetDesiredCapacity
+                  - autoscaling:SetInstanceProtection
+                  - autoscaling:UpdateAutoScalingGroup
+                  - autoscaling:PutNotificationConfiguration
+                Resource: '*'
+
+  BeanstalkInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AccessEC2Info
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                Resource: '*'
+        - PolicyName: AccessCloudWatch
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+        - PolicyName: ElasticBeanstalkInstancePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:Describe*
+                Resource: '*'
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                #Resource: 'arn:aws:logs:*:*:log-group:/aws/elasticbeanstalk*'
+                Resource: '*'
+        - PolicyName: AccessSecretsManager
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref Secrets
+
+  BeanstalkInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref BeanstalkInstanceRole
+
+  BeanstalkApplication:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+  
+  # BeanstalkApplicationVersion:
+  #   Type: AWS::ElasticBeanstalk::ApplicationVersion
+  #   Properties:
+  #     ApplicationName: !Ref BeanstalkApplication
+  #     Description: New application version
+  #     SourceBundle:
+  #       S3Bucket: !Ref DataS3Bucket
+  #       S3Key: "TradeBot.war"
+
+  BeanstalkEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref BeanstalkApplication
+      #EnvironmentName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      SolutionStackName: 64bit Amazon Linux 2023 v4.2.3 running Corretto 21
+      OptionSettings:
+        - Namespace: aws:ec2:vpc
+          OptionName: VPCId
+          Value:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcId'
+        - Namespace: aws:ec2:vpc
+          OptionName: Subnets
+          Value:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetIds'
+        - Namespace: aws:ec2:vpc
+          OptionName: AssociatePublicIpAddress
+          Value: false
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: IamInstanceProfile
+          Value: !Ref BeanstalkInstanceProfile
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: ServiceRole
+          Value: !Ref BeanstalkServiceRole
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: InstanceType
+          Value: t3.micro
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: LoadBalancerIsShared
+          Value: true
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: LoadBalancerType
+          Value: application
+        - Namespace: aws:elbv2:loadbalancer
+          OptionName: SharedLoadBalancer
+          Value:
+            Fn::ImportValue:
+              !Sub '${LoadBalancerStackName}-LoadBalancerArn'          
+        - Namespace: aws:autoscaling:asg
+          OptionName: MinSize
+          Value: 1
+        - Namespace: aws:autoscaling:asg
+          OptionName: MaxSize
+          Value: 1
+
+Outputs:
+
+  DeployUserAccessKey:
+    Description: Access Key for the Deploy User
+    Value: !Ref DeployUserAccessKey
+
+  DeployUserSecretKey:
+    Description: Secret Key for the Deploy User
+    Value: !GetAtt DeployUserAccessKey.SecretAccessKey
