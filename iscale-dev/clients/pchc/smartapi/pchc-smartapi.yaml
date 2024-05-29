@@ -1,0 +1,521 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: ECS Fargate for PCHC API
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerHostName
+          - LoadBalancerCertificateArn
+      - Label:
+          default: DocumentDB Configuration
+        Parameters:
+          - ClusterType
+          - ShardCapacity
+          - ShardCount
+          - ShardInstanceCount
+      - Label:
+          default: Containers Configuration
+        Parameters:
+          - MinContainers
+          - MaxContainers
+          - AutoScalingTargetValue
+          - Image
+          - EnvFile
+          - ContainerPort
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
+      LoadBalancerCertificateArn:
+        default: Load Balancer SSL Certificate ARN
+      MinContainers:
+        default: Minimum Running Containers
+      MaxContainers:
+        default: Maximum Running Containers
+      AutoScalingTargetValue:
+        default: Target Scaling Value
+      Image:
+        default: Container Image URI
+      EnvFile:
+        default: Env File URI
+      ContainerPort:
+        default: Container Port
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: 'smart'
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production #Prod
+      - Staging #Pre-production
+      - Development #Regular day to day commit / deplay
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: 'pchc-test-uw2-smartapi-network'
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack.
+    Type: String
+    Default: 'pchc-test-uw2-sns'
+    MinLength: 1
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: pchcdev.com
+    MinLength: 1
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: ''
+    MaxLength: 12
+  ClusterType:
+    Description: DocumentDB cluster type.
+    Type: String
+    Default: elastic
+    AllowedValues:
+      - instance
+      - elastic
+  ShardCapacity:
+    Description: The number of vCPUs assigned to each elastic cluster shard. 
+    Type: Number
+    Default: 2
+    AllowedValues: [2, 4, 8, 16, 32, 64]
+  ShardCount:
+    Description: The number of shards assigned to the elastic cluster.
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 32
+    ConstraintDescription: Maximum is 32.
+  ShardInstanceCount:
+    Description: 'The number of replica instances applying to all shards in the cluster. 
+    A shardInstanceCount value of 1 means there is one writer instance, and any additional 
+    instances are replicas that can be used for reads and to improve availability.'
+    Type: Number
+    Default: 1
+  LoadBalancerCertificateArn:
+    Description: SSL Certificate ARN for the ELB
+    Type: String
+    Default: arn:aws:acm:us-west-2:050821737631:certificate/715bd527-40f0-4b1c-9da6-5880131ac2a9
+  MinContainers:
+    Description: Minimum running containers. 
+    Type: Number
+    Default: 2
+  MaxContainers:
+    Description: Maximum running containers. 
+    Type: Number
+    Default: 40
+  AutoScalingTargetValue:
+    Description: Target percentage value for scaling. 
+    Type: Number
+    Default: 60
+  Image:
+    Type: String
+    Description: URI of image of the api pushed to ECR
+    Default: '050821737631.dkr.ecr.us-west-2.amazonaws.com/pchc-test-uw2-smartapi-s3-ecr-ecr:latest'
+  EnvFile:
+    Type: String
+    Description: Arn of the env file uploaded to the S3 Bucket
+    Default: 'arn:aws:s3:::pchc-test-uw2-smartapi-s3-ecr-ecr-env-var/uat.env'
+  ContainerPort:
+    Type: Number
+    Default: 3000    
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+################################
+# Parameters:
+  
+#   ServiceName:
+#     Type: String
+#     Default: cf-pchcapi
+
+  # HostedZoneName:
+  #   Type: String
+  #   Default: ""
+
+  # HostedZoneId:
+  #   Type: String
+  #   Default: ""
+
+  # Subdomain:
+  #   Type: String
+  #   Default: ""
+
+Resources:
+
+###
+# Load Balancer Stack
+###
+
+  ELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+        HealthCheckTimeoutSeconds: 5
+        HealthyThresholdCount: 2
+        UnhealthyThresholdCount: 2
+        HealthCheckIntervalSeconds: 30
+        TargetType: ip
+        HealthCheckPath: /
+        IdleTimeout: 60
+
+###
+# Document DB Section
+###
+
+  DocumentDBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/docdb-database.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClusterType: !Ref ClusterType #instance | elastic
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        ShardCapacity: !Ref ShardCapacity
+        ShardCount: !Ref ShardCount
+        ShardInstanceCount: !Ref ShardInstanceCount
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+###
+# ECS Section
+###
+
+  # Role needed by ECS
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["", [!Ref Name, ExecutionRole]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: S3FullAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                  - s3-object-lambda:*
+                Resource: '*'
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
+
+  # ECS Task Role for containers
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+
+  # ECS Fargate Cluster
+  ECSCluster:
+    DependsOn:
+      - ELBStack
+      - DocumentDBStack
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, Cluster]]
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: DEFAULT
+      ServiceConnectDefaults:
+        Namespace: ECSClusterNamespace
+
+  # ECS Task Definition
+  ECSTaskDefinition:
+    DependsOn:
+      - ELBStack
+      - DocumentDBStack
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, taskdef]]
+      TaskRoleArn: !GetAtt ExecutionRole.Arn
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      # OperatingSystemFamily: LINUX
+      # CPUArchitecture: X86_64  
+      Memory: 2048
+      Cpu: 1024
+      ContainerDefinitions:
+        - Name: !Join ['-', [!Ref Name, container]]
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          Essential: true
+          EnvironmentFiles:
+            - Value: !Ref EnvFile
+              Type: "s3"
+          Image: !Ref Image
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: ecs
+
+  # ECS Fargate Service
+  ECSService:
+    DependsOn:
+      - ELBStack
+      - DocumentDBStack
+    Type: AWS::ECS::Service
+    Properties: 
+      ServiceName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, service]]
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !GetAtt ECSTaskDefinition.TaskDefinitionArn
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+      DesiredCount: 2
+      # This may need to be adjusted if the container takes a while to start up
+      HealthCheckGracePeriodSeconds: 30
+      LaunchType: FARGATE
+      NetworkConfiguration: 
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - Fn::ImportValue:
+                !Sub "${NetworkStackName}-PrivateSubnetId1"
+            - Fn::ImportValue:
+                !Sub "${NetworkStackName}-PrivateSubnetId2"
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup0
+      LoadBalancers:
+        - ContainerName: !Join ['-',[!Ref Name, container]]
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn:
+            Fn::GetAtt:
+              - ELBStack
+              - Outputs.ApplicationTargetGroup
+
+  # Container security group
+  ContainerSecurityGroup0:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SecurityGroup for ECS
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, container-secg]]
+      VpcId: 
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      SecurityGroupIngress:
+        - FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort  
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+
+  # Create ingress to allow ContainerSecurityGroup to docudb secg
+
+  AllowECSToDocumentDB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from ECS to Document DB
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - DocumentDBStack
+          - Outputs.DocuDBElasticSecurityGroup
+      FromPort: 27017
+      ToPort: 27017
+      SourceSecurityGroupId: !GetAtt ContainerSecurityGroup0.GroupId
+
+# allow jumpserver to docuDB
+
+###
+# Auto scaling Section
+###
+
+  # Auto scaling role
+  ECSAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [application-autoscaling.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole"
+
+  # Auto scaling targets
+  ECSAutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref MinContainers
+      MaxCapacity: !Ref MaxContainers
+      ResourceId: !Join ['/', [service, !Ref ECSCluster, !GetAtt ECSService.Name]]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !GetAtt ECSAutoScalingRole.Arn
+
+  # Auto scaling policy
+  ECSAutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Join ['', [!Ref Name, AutoScalingPolicy]]
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSAutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 10
+        ScaleOutCooldown: 10
+        TargetValue: !Ref AutoScalingTargetValue
+
+###
+# CloudWatch Section
+###
+
+  # ECS Log group
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', [/ecs/, !Ref Name, taskdef]]
+
+###
+# Route53 Section
+###
+
+  # Add DNS record for the api end point
+  DNSRecord:
+    DependsOn:
+      - ELBStack
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
+      Comment: !Join ['', [Domain Name Record for, !Ref Name]]
+      RecordSets:
+        - Name: !If
+            - IsProd
+            - !Join ['.', [!Ref Name, !Ref ClientDomainName]]
+            - !Join ['', [!Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName]]
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::GetAtt:
+                - ELBStack
+                - Outputs.CanonicalHostedZoneID
+            DNSName:
+              Fn::GetAtt:
+                - ELBStack
+                - Outputs.DNSName
+
+Outputs:
+  ApplicationLoadBalancerDNSName:
+    Description: DNS name of the Application Load Balancer
+    Value:
+      Fn::GetAtt:
+        - ELBStack
+        - Outputs.DNSName
+
+  Endpoint:
+    Description: Endpoint URL
+    Value: !Join ['', ['https://', !Ref DNSRecord]]  

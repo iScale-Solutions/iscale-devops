@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: PCHC API ECR and S3 template
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 20
+    Default: 'smartapi-prereq'
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production #Prod
+      - Staging #Pre-production
+      - Development #Regular day to day commit / deplay
+      - Test 
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+###
+# ECR
+###
+
+  ECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: false
+      # EncryptionConfiguration: 
+      #   EncryptionConfiguration
+      # ImageScanningConfiguration: 
+      #   ImageScanningConfiguration
+      ImageTagMutability: IMMUTABLE
+      # LifecyclePolicy: 
+      #   LifecyclePolicy
+      RepositoryName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr]]
+      # RepositoryPolicyText: Json
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr]]
+
+###
+# S3
+###
+
+  DataS3Bucket:
+    Type: AWS::S3::Bucket
+    # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
+    # Recommend not specifying bucket name here for non-prod setups
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr-env-var]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr-env-var]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
