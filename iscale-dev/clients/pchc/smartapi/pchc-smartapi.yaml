@@ -37,6 +37,7 @@ Metadata:
           - Image
           - EnvFile
           - ContainerPort
+          - EcrName
       - Label:
           default: Scheduler Configuration
         Parameters:
@@ -263,7 +264,12 @@ Resources:
 # ECS Section
 ###
 
-  # Role needed by ECS
+  # Role needed by ECS - task execution role
+  # pulls a container image from an Amazon ECR private repository.
+  # sends container logs to CloudWatch Logs using the awslogs log driver
+  # AmazonECSTaskExecutionRolePolicy
+  # permission to get file from s3 (env file)
+
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -289,18 +295,13 @@ Resources:
         - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
 
   # ECS Task Role for containers
+  # need to attach a role to containers, attach permissions if containers need to access to some AWS services
   ECSTaskRole:
     Type: AWS::IAM::Role
     Properties:
       Path: /
       AssumeRolePolicyDocument:
         Statement:
-          - Action:
-              - sts:AssumeRole
-            Effect: Allow
-            Principal:
-              Service:
-                - ecs-tasks.amazonaws.com
           - Action:
               - sts:AssumeRole
             Effect: Allow
@@ -508,6 +509,63 @@ Resources:
                 - ELBStack
                 - Outputs.DNSName
 
+###
+# Deployment user group
+###
+
+  EcsDeploymentUserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      Policies:
+        - PolicyName: EcrWriteAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:CompleteLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:InitiateLayerUpload
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                Resource: arn:aws:ecr:region:111122223333:repository/repository-name # import repo name !Ref ecr name
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+        - PolicyName: DescribeEcsTaskDefinition
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: ecs:DescribeTaskDefinition
+                Resource: "*"
+        - PolicyName: EcsDeploy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: ecs:DescribeTaskDefinition
+                Resource: "*"     
+            Statement:
+              - Sid: RegisterTaskDefinition
+                Effect: Allow
+                Action:
+                  - ecs:RegisterTaskDefinition
+                Resource: "*"
+              - Sid: PassRolesInTaskDefinition
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !GetAtt ExecutionRole.Arn
+              - Sid: DeployService
+                Effect: Allow
+                Action:
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                Resource:
+                  - !Ref ECSService
+
 Outputs:
   ApplicationLoadBalancerDNSName:
     Description: DNS name of the Application Load Balancer
@@ -518,4 +576,8 @@ Outputs:
 
   Endpoint:
     Description: Endpoint URL
-    Value: !Join ['', ['https://', !Ref DNSRecord]]  
+    Value: !Join ['', ['https://', !Ref DNSRecord]]
+  
+  EcsService:
+    Description: ecs service output
+    Value: !Ref ECSService
