@@ -44,6 +44,10 @@ Metadata:
           - VolumeSize
           - VolumeType
           - LaunchTemplate
+          - AutoRotate
+          - RotateAdd
+          - RecurrenceIncrease
+          - RecurrenceDecrease
       - Label:
           default: Domain Configuration
         Parameters:
@@ -140,6 +144,14 @@ Metadata:
         default: Volume Disk Type
       LaunchTemplate:
         default: Use launch template
+      AutoRotate:
+        default: Enable Auto Rotate
+      RotateAdd:
+        default: Instance Rotation Count
+      RecurrenceIncrease:
+        default: Instance rotate start time (increase count)
+      RecurrenceDecrease:
+        default: Instance rotate start time (decrease count)
 
 Parameters:
   OrgName:
@@ -325,6 +337,25 @@ Parameters:
     AllowedValues:
       - TRUE
       - FALSE
+  AutoRotate:
+    Description: Scheduled Auto-scaling auto ratation. This will ensure a fresh instance is running.
+    Type: String
+    Default: false
+    AllowedValues:
+      - TRUE
+      - FALSE
+  RotateAdd:
+    Description: Desired instance count for instance rotation. Recommended size is double the current Autoscaling instance count.
+    Type: Number
+    Default: 2
+  RecurrenceIncrease:
+    Description: The recurring schedule for this action when increasing instance count.
+    Type: String
+    Default: "0 1 * * 6" # every saturday 9 AM
+  RecurrenceDecrease:
+    Description: Should be 1 hour after increasing the instance count.
+    Type: String
+    Default: "0 2 * * 6"
 
 Mappings: 
   Fn::Transform:
@@ -356,6 +387,7 @@ Conditions:
   HasDatabase: !Not [!Equals [!Ref DatabaseEndpoint, '']]
   UseLaunchTemplate: !Equals [!Ref LaunchTemplate, TRUE]
   UseLaunchConfig: !Equals [!Ref LaunchTemplate, FALSE]
+  IsAutoRotate: !Equals [!Ref AutoRotate, TRUE]
 
 Resources:
   
@@ -588,6 +620,8 @@ Resources:
       HealthCheckType: ELB
       HealthCheckGracePeriod: 120
       DesiredCapacity: !Ref ASGDesiredSize
+      TerminationPolicies:
+        - OldestInstance
       VPCZoneIdentifier: !If
         - UsePrivateSubnet
         - - Fn::ImportValue:
@@ -624,6 +658,26 @@ Resources:
         - Key: Create_Auto_Alarms
           Value: true
           PropagateAtLaunch: True
+
+  AppServerAutoScalingGroupScheduledActionIncrease:
+    Condition: IsAutoRotate
+    Type: AWS::AutoScaling::ScheduledAction
+    Properties:
+      AutoScalingGroupName: !Ref AppServerAutoScalingGroup
+      DesiredCapacity: !Ref RotateAdd
+      MaxSize: !Ref RotateAdd
+      MinSize: !Ref ASGMinSize
+      Recurrence: !Ref RecurrenceIncrease
+  
+  AppServerAutoScalingGroupScheduledActionDecrease:
+    Condition: IsAutoRotate
+    Type: AWS::AutoScaling::ScheduledAction
+    Properties:
+      AutoScalingGroupName: !Ref AppServerAutoScalingGroup
+      DesiredCapacity: !Ref ASGDesiredSize
+      MaxSize: !Ref ASGMaxSize
+      MinSize: !Ref ASGMinSize
+      Recurrence: !Ref RecurrenceDecrease
 
   # Application Server ELB Target Group 
   AppServerTargetGroup:
