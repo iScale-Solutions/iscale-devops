@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: PDDTS Resources pchc-prd-ase1-pddts
+Description: MIS Resources
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -70,7 +70,7 @@ Parameters:
     Type: String
     MinLength: 3
     MaxLength: 9
-    Default: pddts
+    Default: mis
   OrgName:
     Description: The name of the organization
     Type: String
@@ -103,7 +103,7 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-00b8d9cb8a7161e41 #Default Amazon Linux 2 for Singapore
+    Default: ami-01cb3912348e56e11 # MIS base image
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -111,8 +111,9 @@ Parameters:
   InstanceType:
     Description: Type of instance for app server
     Type: String
-    Default: t3.medium
+    Default: t3.small
     AllowedValues:
+      - t3.small
       - t3.medium
       - t3.large
       - t3.xlarge
@@ -159,18 +160,8 @@ Conditions:
 
 Resources:
 
-  BSPVPNGatewayEIP1: # - Hardcoded for BSP
-    DeletionPolicy: Retain #Make sure to retain always
-    # Condition: IsProd
-    Type: AWS::EC2::EIP
-
-  BSPVPNGatewayEIP2: # - Hardcoded for BSP
-    DeletionPolicy: Retain #Make sure to retain always
-    # Condition: IsProd
-    Type: AWS::EC2::EIP
-
   ##
-  # PDDTS Application Resources
+  # MIS Application Resources
   ##
 
   ELBStack:
@@ -199,7 +190,7 @@ Resources:
         EnablePerformanceInsights: !If [IsProd, true, false]
         EnvName: !Ref EnvName
         Engine: mysql
-        EngineVersion: 8.0.28
+        EngineVersion: 8.0.35
         Family: mysql8.0
         InstanceType: !If [IsProd, db.t4g.xlarge, db.t4g.micro]
         MasterUser: root
@@ -208,210 +199,6 @@ Resources:
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
-
-  DBResizer:
-    Condition: IsProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-resizer.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        DatabaseInstanceName: 
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceName
-        PeakSize: db.t4g.xlarge
-        RegularSize: db.t4g.micro
-
-###
-# PDDTS RDS Read replica instance in Manila AZ (local zone)
-###
-
-  PDDTSReadReplicaInstance:
-    Type: AWS::EC2::Instance
-    Metadata: 
-      AWS::CloudFormation::Init: 
-        configSets:
-          Basic: 
-            - "MySqlServerSetup"
-        MySqlServerSetup:
-          files:
-            /var/lib/cloud/instance/mysqlserver-setup.sh: 
-              content: !Sub
-                - |
-                  #!/bin/bash -xe
-                  sudo amazon-linux-extras install epel -y
-                  sudo rpm --import https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
-                  sudo yum install https://dev.mysql.com/get/mysql80-community-release-el7-5.noarch.rpm -y
-                  sudo yum install mysql-community-server -y
-                  sudo systemctl start mysqld
-                  sudo systemctl enable mysqld
-                  echo "Done for ${ENVIRONMENT}"
-                - ENVIRONMENT: !Ref EnvName
-              permissions: 0700
-              owner: root
-              group: root
-    Properties: 
-      ImageId: !If [IsProd, ami-0e73d1144a39f9b41, ami-0dad7d174ea1f07e5] # base linux AMI generated from linux builder
-      InstanceType: !If [IsProd, t3.xlarge, t3.medium]
-      IamInstanceProfile: !Ref PDDTSReadReplicaInstanceIamProfile
-      Monitoring: true
-      SecurityGroupIds:
-        - Fn::GetAtt:
-          - DBStack
-          - Outputs.SecurityGroupId
-        - !GetAtt PDDTSReadReplicaInstanceSecGroup.GroupId
-      SubnetId: !If
-        - IsProd
-        - subnet-0ca234a066df0f780 # Manila AZ local zone prod
-        - subnet-0720e821f506fc693 # Manila AZ local zone uat
-      BlockDeviceMappings:
-        - DeviceName: /dev/xvda
-          Ebs:
-            VolumeSize: 20 #GB - updating this will cause instance replacement.
-            VolumeType: gp2
-      UserData:
-        Fn::Base64: !Sub
-          - |
-            #!/bin/bash -xe
-            # Install the files and packages from the metadata
-            /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource PDDTSReadReplicaInstance -c Basic --region ${AWS::Region} --role ${ROLE}
-            /bin/bash /var/lib/cloud/instance/mysqlserver-setup.sh
-            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
-            #/usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
-            # Signal the status from cfn-init
-            /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource PDDTSReadReplicaInstance --region ${AWS::Region}
-          - ROLE: !Ref PDDTSReadReplicaInstanceIamRole
-      Tags:
-        - 
-          Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, rds-read-replica]]
-        - 
-          Key: Environment
-          Value: !Ref EnvName
-        - 
-          Key: Organization
-          Value: !Ref OrgName
-
-# pddts rds read replica secgroup section
-
-  PDDTSReadReplicaInstanceSecGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], rds-read-replica-secgroup]]
-      GroupDescription: security group for rds-read-replica instance
-      VpcId:
-        Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcId"
-      Tags:
-        - 
-          Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], rds-read-replica-secgroup]]
-
-  # Security group rules
-  AllowReadReplicaEC2IntoDB:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from rds-read-replica instance
-      IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.SecurityGroupId
-      FromPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      ToPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      SourceSecurityGroupId: !GetAtt PDDTSReadReplicaInstanceSecGroup.GroupId
-
-  AllowDBIntoReadReplicaEC2:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from rds to instance
-      IpProtocol: TCP
-      GroupId: !GetAtt PDDTSReadReplicaInstanceSecGroup.GroupId
-      FromPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      ToPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      SourceSecurityGroupId:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.SecurityGroupId
-
-# pddts rds read replica iam section
-
-  PDDTSReadReplicaInstanceIamProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles:
-        - Ref: PDDTSReadReplicaInstanceIamRole
-
-  PDDTSReadReplicaInstanceIamRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: 1
-            Effect: Allow
-            Action: sts:AssumeRole
-            Principal:
-              Service: ec2.amazonaws.com
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-      Policies:
-        - PolicyName: AccessCloudWatchMetrics
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - cloudwatch:PutMetricData
-                  - cloudwatch:GetMetricStatistics
-                  - cloudwatch:ListMetrics
-                  - ec2:DescribeTags
-                Resource: '*'
-        - PolicyName: WriteCloudWatchLogs
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogStream
-                  - logs:DescribeLogStreams
-                  - logs:CreateLogGroup
-                  - logs:PutLogEvents
-                Resource: 'arn:aws:logs:*:*:*'
-
-  DBSchedulerStack:
-    DependsOn:
-      - DBStack
-    Condition: IsNotProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
-        UseFriendlyNames: FALSE
-        DatabaseInstanceName:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceName
 
   DeployStack:
     Type: AWS::CloudFormation::Stack
@@ -424,22 +211,6 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
-  CacheStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        NetworkStackName: !Ref NetworkStackName
-        EncryptInTransit: TRUE
-        NodeType: cache.t3.micro
-        NumCacheClusters: 1
-        OrgName: !Ref OrgName
-        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
-        SNSStackName: !Ref SNSStackName
-        UseFriendlyNames: TRUE
-
   ServerStack:
     DependsOn:
       - DBStack
@@ -451,18 +222,6 @@ Resources:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint:
           Fn::GetAtt:
@@ -479,9 +238,8 @@ Resources:
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
         InstancePort: 80
-        InstanceSubnet: Private
+        InstanceSubnet: !If [IsDev, Public, Private]
         InstanceType: !Ref InstanceType
-        # LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
         LoadBalancerHostName: !Ref LoadBalancerHostName
         LoadBalancerPriority: 100
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
@@ -493,6 +251,8 @@ Resources:
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         LaunchTemplate: True
+        AutoRotate: !If [IsProd, true, false]
+        RotateAdd: 2 # will only work if AutoRotate is true
 
   SchedulerStack:
     DependsOn:
@@ -516,157 +276,6 @@ Resources:
         CodeDeployDeploymentGroupName:
           Fn::GetAtt:
             - DeployStack
-            - Outputs.CodeDeployDeploymentGroupName
-
-# SFTP Server using Transfer Family
-
-  SFTPServer:
-    Condition: IsProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/transfer-family.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        NetworkStackName: !Ref NetworkStackName
-        HostedZoneName: !Ref ClientDomainName
-        UseDefaultSecGroup: FALSE
-
-  AllowJumpHostIntoServer:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from jump host
-      IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-            - ServerStack
-            - Outputs.AppServerSecurityGroup
-      FromPort: 22
-      ToPort: 22
-      SourceSecurityGroupId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
-
-  AllowJumpHostIntoDB:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from jump host
-      IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.SecurityGroupId
-      FromPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      ToPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      SourceSecurityGroupId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
-
-###
-# Sidekiq Stacks
-###
-
-  SidekiqDeployStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, sidek]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
-
-  SidekiqServerStack:
-    DependsOn:
-      - DBStack
-      - SidekiqDeployStack
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, sidek]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
-        ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
-        InstanceAMI: !Ref InstanceAMI
-        InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-        InstancePort: 80
-        InstanceSubnet: Private
-        InstanceType: !Ref InstanceType
-        # LoadBalancerHostName: No need of URL for sidekiq
-        LoadBalancerPriority: 105
-        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
-        NetworkStackName: !Ref NetworkStackName
-        ExternalEFSID:
-          Fn::GetAtt:
-            - ServerStack
-            - Outputs.AppServerEFS
-        ExternalEFSSecurityGroup:
-          Fn::GetAtt:
-            - ServerStack
-            - Outputs.AppServerEFSSecurityGroup
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
-        SNSStackName: !Ref SNSStackName
-        UseFriendlyNames: FALSE
-        LaunchTemplate: True
-
-  SidekiqSchedulerStack:
-    DependsOn:
-      - DBStack
-      - SidekiqServerStack
-    Condition: IsNotProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, sidek]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
-        UseFriendlyNames: FALSE
-        CodeDeployApplicationName:
-          Fn::GetAtt:
-            - SidekiqDeployStack
-            - Outputs.CodeDeployApplicationName
-        CodeDeployDeploymentGroupName:
-          Fn::GetAtt:
-            - SidekiqDeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
   BackupStack:
@@ -694,215 +303,6 @@ Resources:
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
         MonthlyExpiration: 3650 # 10 years
 
-  Dashboard:
-    Condition: IsProd
-    Type: AWS::CloudWatch::Dashboard
-    Properties:
-        DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-        DashboardBody: !Sub
-          - |
-            {
-              "widgets": [
-                {
-                  "height": 12,
-                  "width": 6,
-                  "y": 0,
-                  "x": 0,
-                  "type": "alarm",
-                  "properties": {
-                    "title": "Alarms",
-                    "alarms": [
-                      "${CACHE_HIGH_CPU}",
-                      "${CACHE_LOW_MEM}",
-                      "${DB_HIGH_CPU}",
-                      "${DB_LOW_STORAGE}",
-                      "${DB_LOW_CPU_CREDIT}",
-                      "${DB_ERRORS}",
-                      "${DB_ERROR_DENIED}",
-                      "${TG_UNHEALTHY}",
-                      "${TG_SLOW}"
-                    ]
-                  }
-                },
-                {
-                  "height": 6,
-                  "width": 6,
-                  "y": 0,
-                  "x": 6,
-                  "type": "metric",
-                  "properties": {
-                    "metrics": [
-                      [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS" } ],
-                      [ "AWS/ElastiCache", "CPUUtilization", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis" } ],
-                      [ "AWS/EC2", "CPUUtilization", "AutoScalingGroupName", "${ASG_GROUP_NAME}" , { "label": "App Servers" }]
-                    ],
-                    "view": "timeSeries",
-                    "stacked": false,
-                    "region": "${REGION}",
-                    "period": 300,
-                    "title": "CPU",
-                    "stat": "Average",
-                    "yAxis": {
-                      "left": {
-                        "label": "Utilization"
-                      }
-                    }
-                  }
-                },
-                {
-                  "height": 6,
-                  "width": 6,
-                  "y": 6,
-                  "x": 6,
-                  "type": "metric",
-                  "properties": {
-                    "metrics": [
-                      [ { "expression": "100-((m4/(16*1024*1000000))*100)", "label": "RDS (memory)", "id": "e1", "region": "${REGION}" } ],
-                      [ "AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m4", "visible": false } ],
-                      [ "AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis (memory)" } ],
-                      [ "CWAgent", "mem_used_percent", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "${APP_SERVER_TYPE}" , { "label": "App Servers (memory)" }],
-                      [ { "expression": "100-(m1/(20*1024*1000000)*100)", "label": "RDS (disk)", "id": "e2", "region": "${REGION}" } ],
-                      [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m1", "visible": false } ],
-                      [ "CWAgent", "disk_used_percent", "path", "/", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "${APP_SERVER_TYPE}", "device", "nvme0n1p1", "fstype", "xfs" , { "label": "App Servers (disk)" } ]
-                    ],
-                    "view": "timeSeries",
-                    "stacked": false,
-                    "region": "${REGION}",
-                    "period": 300,
-                    "title": "Memory / Storage",
-                    "stat": "Average",
-                    "yAxis": {
-                      "left": {
-                        "label": "Utilization"
-                      }
-                    }
-                  }
-                },
-                {
-                  "height": 6,
-                  "width": 6,
-                  "y": 0,
-                  "x": 12,
-                  "type": "metric",
-                  "properties": {
-                    "metrics": [
-                      [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
-                      [ "AWS/RDS", "ReadLatency", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" } ],
-                      [ ".", "WriteLatency", ".", ".", { "label": "RDS Write" } ]
-                    ],
-                    "view": "timeSeries",
-                    "stacked": false,
-                    "region": "${REGION}",
-                    "period": 300,
-                    "title": "Performance",
-                    "stat": "Average",
-                    "yAxis": {
-                      "left": {
-                        "showUnits": true,
-                        "label": "Time"
-                      }
-                    }
-                  }
-                },
-                {
-                  "height": 6,
-                  "width": 6,
-                  "y": 0,
-                  "x": 18,
-                  "type": "metric",
-                  "properties": {
-                    "metrics": [
-                      [ "AWS/EC2", "NetworkIn", "AutoScalingGroupName", "${ASG_GROUP_NAME}", { "label": "App Servers (In)" }],
-                      [ ".", "NetworkOut", ".", ".", { "label": "App Servers (out)" }],
-                      [ "AWS/ApplicationELB", "ProcessedBytes", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
-                      [ "AWS/RDS", "NetworkReceiveThroughput", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS (In)" }],
-                      [ ".", "NetworkTransmitThroughput", ".", ".", { "label": "RDS (Out)" }],
-                      [ "AWS/ElastiCache", "NetworkBytesIn", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis (In)" }],
-                      [ ".", "NetworkBytesOut", ".", ".", { "label": "Redis (Out)" }]
-                    ],
-                    "view": "timeSeries",
-                    "stacked": false,
-                    "title": "Network",
-                    "region": "${REGION}",
-                    "period": 300,
-                    "stat": "Average",
-                    "legend": {
-                      "position": "bottom"
-                    },
-                    "yAxis": {
-                      "left": {
-                        "label": "Volume"
-                      }
-                    }
-                  }
-                },
-                {
-                  "height": 6,
-                  "width": 6,
-                  "y": 6,
-                  "x": 12,
-                  "type": "metric",
-                  "properties": {
-                    "metrics": [
-                      [ "AWS/RDS", "ReadThroughput", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" }],
-                      [ ".", "WriteThroughput", ".", ".", { "label": "RDS Write" }],
-                      [ "AWS/EFS", "DataReadIOBytes", "FileSystemId", "${EFS_ID}", { "label": "EFS Read" }],
-                      [ ".", "DataWriteIOBytes", ".", ".", { "label": "EFS Write" }]
-                    ],
-                    "view": "timeSeries",
-                    "stacked": false,
-                    "region": "${REGION}",
-                    "period": 300,
-                    "title": "I/O",
-                    "stat": "Average",
-                    "yAxis": {
-                      "left": {
-                        "label": "Count",
-                        "showUnits": false
-                      }
-                    }
-                  }
-                },
-                {
-                  "height": 6,
-                  "width": 6,
-                  "y": 6,
-                  "x": 18,
-                  "type": "metric",
-                  "properties": {
-                    "metrics": [
-                      [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB HTTP 5XX_Count" } ],
-                      [ ".", "HTTPCode_ELB_4XX_Count", ".", ".", { "label": "ELB HTTP 4XX_Count" } ]
-                    ],
-                    "view": "timeSeries",
-                    "stacked": false,
-                    "region": "${REGION}",
-                    "title": "Error Count",
-                    "period": 300,
-                    "stat": "Average"
-                  }
-                }
-              ]
-            }
-          - CACHE_HIGH_CPU: !GetAtt [CacheStack, Outputs.HighCPUAlarm]
-            CACHE_LOW_MEM: !GetAtt [CacheStack, Outputs.LowMemoryAlarm]
-            DB_HIGH_CPU: !GetAtt [DBStack, Outputs.DBHighCPUAlarm]
-            DB_LOW_STORAGE: !GetAtt [DBStack, Outputs.DBLowStorageAlarm]
-            DB_LOW_CPU_CREDIT: !GetAtt [DBStack, Outputs.CPUCreditBalanceAlarm]
-            DB_ERRORS: !GetAtt [DBStack, Outputs.DBErrorsAlarm]
-            DB_ERROR_DENIED: !GetAtt [DBStack, Outputs.DBErrorDeniedAlarm]
-            TG_SLOW: !GetAtt [ServerStack, Outputs.AppServerSlowTargetGroupAlarm]
-            TG_UNHEALTHY: !GetAtt [ServerStack, Outputs.UnhealthyTargetGroupAlarm]
-            DB_INSTANCE_ID: !GetAtt [DBStack, Outputs.DBInstanceName]
-            CACHE_INSTANCE_ID: !Join ['-', [!GetAtt [CacheStack, Outputs.ElasticacheReplicationGroup], '001']]
-            REGION: !Ref 'AWS::Region'
-            ELB_FULL_NAME: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
-            ASG_GROUP_NAME: "CodeDeploy_pchc-prd-ase1-pddts-DeployStack-12Y1HBDTTP3XN-CodeDeployDeploymentGroup-1UYDF589716KF_d-TDI9R511K" #First time, it will be emptu, that's OK
-            APP_SERVER_AMI: !Ref InstanceAMI
-            APP_SERVER_ID: i-0d6e53ff58d0902e6 #Hardcoded for now
-            APP_SERVER_TYPE: !Ref InstanceType
-            EFS_ID: !GetAtt [ServerStack, Outputs.AppServerEFS]
-
 Outputs:
 
   DeploymentUserGroup:
@@ -911,29 +311,3 @@ Outputs:
       Fn::GetAtt:
         - DeployStack
         - Outputs.DeploymentUserGroup
-
-  ClientDomainName:
-    Description: Client Domain Name
-    Value: !Ref ClientDomainName
-    Export:
-      Name: !Sub '${AWS::StackName}-ClientDomainName'
-
-  ELBSecurityGroup:
-    Description: Name of the ELB Security Group
-    Value: !GetAtt [ELBStack, Outputs.SecurityGroupId]
-    Export:
-      Name: !Sub '${AWS::StackName}-ELBSecurityGroup'
-
-  PublicSubnetId1:
-    Description: Name of the PublicSubnetId1 subnet
-    Value: !ImportValue
-       Fn::Sub: '${NetworkStackName}-PublicSubnetId1'
-    Export:
-      Name: !Sub '${AWS::StackName}-PublicSubnetId1'
-
-  VpcId:
-    Description: Name of the VPC
-    Value: !ImportValue
-      Fn::Sub: '${NetworkStackName}-VpcId'
-    Export:
-      Name: !Sub '${AWS::StackName}-VpcId'
