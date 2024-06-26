@@ -35,7 +35,7 @@ Metadata:
           - MaxContainers
           - AutoScalingTargetValue
           - Image
-          - EnvFile
+          - EnvBucket
           - ContainerPort
           - EcrName
       - Label:
@@ -69,8 +69,8 @@ Metadata:
         default: Target Scaling Value
       Image:
         default: Container Image URI
-      EnvFile:
-        default: Env File URI
+      EnvBucket:
+        default: Env Bucket Name
       ContainerPort:
         default: Container Port
       StartScheduleExpression:
@@ -167,10 +167,10 @@ Parameters:
     Type: String
     Description: URI of image of the api pushed to ECR
     Default: '050821737631.dkr.ecr.us-west-2.amazonaws.com/pchc-test-uw2-smartapi-s3-ecr-ecr:latest'
-  EnvFile:
+  EnvBucket:
     Type: String
-    Description: Arn of the env file uploaded to the S3 Bucket
-    Default: 'arn:aws:s3:::pchc-test-uw2-smartapi-s3-ecr-ecr-env-var/uat.env'
+    Description: Bucket name where env file is stored
+    Default: 'pchc-test-uw2-smartapi-s3-ecr-ecr-env-var'
   ContainerPort:
     Type: Number
     Default: 3000    
@@ -194,25 +194,6 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
-
-################################
-# Parameters:
-  
-#   ServiceName:
-#     Type: String
-#     Default: cf-pchcapi
-
-  # HostedZoneName:
-  #   Type: String
-  #   Default: ""
-
-  # HostedZoneId:
-  #   Type: String
-  #   Default: ""
-
-  # Subdomain:
-  #   Type: String
-  #   Default: ""
 
 Resources:
 
@@ -269,6 +250,7 @@ Resources:
   # sends container logs to CloudWatch Logs using the awslogs log driver
   # AmazonECSTaskExecutionRolePolicy
   # permission to get file from s3 (env file)
+  # pulling the image and storing the application logs in cloudwatch
 
   ExecutionRole:
     Type: AWS::IAM::Role
@@ -281,7 +263,7 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: "sts:AssumeRole"
       Policies:
-        - PolicyName: S3FullAccessPolicy
+        - PolicyName: EnvBucketAccessPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -289,13 +271,13 @@ Resources:
                 Action: 
                   - s3:*
                   - s3-object-lambda:*
-                Resource: '*' # adjust to only s3 bucket with env file in it
+                Resource: !Ref EnvBucket
       ManagedPolicyArns:
         - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
         - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
 
   # ECS Task Role for containers
-  # need to attach a role to containers, attach permissions if containers need to access to some AWS services
+  # attach permissions if containers/tasks need to access to some AWS services like s3, sqs, etc.
   ECSTaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -352,7 +334,7 @@ Resources:
             - ContainerPort: !Ref ContainerPort
           Essential: true
           EnvironmentFiles:
-            - Value: !Ref EnvFile
+            - Value: !Join ['', ['arn:aws:s3:::', !Ref EnvBucket, /uat.env]]
               Type: "s3"
           Image: !Ref Image
           LogConfiguration:
