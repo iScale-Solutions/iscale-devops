@@ -67,7 +67,7 @@ Parameters:
     Type: String
     MinLength: 3
     MaxLength: 8
-    Default: lazaki
+    Default: lazaki # fkmp for prod
   OrgName:
     Description: The name of the organization
     Type: String
@@ -100,7 +100,7 @@ Parameters:
   LoadBalancerHostName:
     Description: (Optional) Custom Hostname for load balancer URL
     Type: String
-    Default: lazaki
+    Default: lazaki # no value in prod
   LoadBalancerCertificateArn:
     Description: SSL Certificate for the ELB
     Type: String
@@ -143,7 +143,6 @@ Conditions:
 Resources:
 
   ELBStack:
-    # Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
@@ -156,7 +155,6 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   DBStack:
-    # Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties: 
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -195,7 +193,7 @@ Resources:
             - Outputs.DBClusterARN
 
 ####
-# Web Application
+# Web Application | Lazaki web
 ####
 
   WebDeployStack:
@@ -217,7 +215,7 @@ Resources:
       - WebDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
       Parameters:
         Name: laz-web
         EnvName: !Ref EnvName
@@ -250,6 +248,9 @@ Resources:
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
+        VolumeSize: 15 # GB
+        VolumeType: gp2
+        LaunchTemplate: True
 
   WebServerSchedulerStack:
     Condition: IsNotProd
@@ -285,7 +286,7 @@ Resources:
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
       Parameters:
-        Name: fkmp
+        Name: !If [IsProd, fkmp, laz-back]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
@@ -299,7 +300,7 @@ Resources:
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
       Parameters:
-        Name: fkmp
+        Name: !If [IsProd, fkmp, laz-back]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ClientDomainName: !Ref ClientDomainName
@@ -315,10 +316,12 @@ Resources:
           Fn::GetAtt:
             - DBStack
             - Outputs.SecurityGroupId
-        # ExternalS3BucketArn:
-        #   Fn::GetAtt:
-        #     - WebServerStack
-        #     - Outputs.AppServerS3BucketArn
+        ExternalS3BucketArn: !If
+          - IsNotProd
+          - Fn::GetAtt:
+              - WebServerStack
+              - Outputs.AppServerS3BucketArn
+          - !Ref 'AWS::NoValue'
         InstanceAMI: !Ref BackEndInstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstanceSpotPrice: 0.5
@@ -335,6 +338,9 @@ Resources:
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         InstanceSubnet: !If [IsProd, Private, Public]
+        VolumeSize: 15 # GB
+        VolumeType: gp2
+        LaunchTemplate: True
 
   BackEndServerSchedulerStack:
     Condition: IsNotProd
@@ -387,6 +393,42 @@ Resources:
             - Fn::GetAtt:
               - BackEndServerStack
               - Outputs.AppServerEFSArn
+
+###
+# OpenSearch Section
+###
+
+  OpenSearchStack:
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3.us-west-2.amazonaws.com/common/opensearch.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        LogPublishingIndexEnabled: TRUE
+        LogPublishingSearchEnabled: TRUE
+        LogPublishingApplicationEnabled: TRUE
+        UseFriendlyNames: TRUE
+        InstanceType: !If [IsNotProd, t3.small.search, r6g.large.search]
+        InstanceCount: !If [IsNotProd, 1, 2]
+        VolumeSize: !If [IsNotProd, 10, 20]
+
+  AllowAppServerIntoOpenSearch:
+    Condition: IsNotProd
+    DependsOn:
+      - OpenSearchStack
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt [OpenSearchStack, Outputs.SecurityGroupId]
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt [BackEndServerStack, Outputs.AppServerSecurityGroup]
+      Description: Allow HTTPS connections from App Server
 
 Outputs:
 
