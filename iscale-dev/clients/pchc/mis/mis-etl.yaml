@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: MIS ETL Resources (S3, Redshift)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - DeletionProtection
+      - Label:
+          default: Redshift Cluster Configuration
+        Parameters:
+          - NodeType
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DeletionProtection:
+        default: Protect core items against deletion
+      NodeType:
+        default: Node Type/Size
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 12
+    Default: mis
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production # Test for uat
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DeletionProtection:
+    Description: Set to true to enable (valid only in Production mode)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  NodeType:
+    Description: The node size to be provisioned (Only ra3 instances support multi-node cluter type.)
+    Type: String
+    Default: dc2.large
+    AllowedValues:
+      - dc2.large
+      - dc2.8xlarge
+      - ra3.xlplus
+      - ra3.xlplus
+      - ra3.4xlarge
+      - ra3.16xlarge
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: pchc-dev-uw2-mis-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+    MinLength: 1
+  MisStackName:
+    Description: The name of the MIS stack
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+##
+# MIS Redshift Resources
+##
+
+  RedshiftStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/redshift.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DatabaseName: !Join ['',[!FindInMap [EnvShort, !Ref EnvName, Name], misrsdb]]
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        NodeType: dc2.large
+
+  AllowLambdaToRedshift:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from lambda
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - RedshiftStack
+          - Outputs.RedshiftSecurityGroupIdExport
+      FromPort: 5439
+      ToPort: 5439
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${MisStackName}-MisLambdaSecurityGroupId'
+  
+  AllowJumphostToRedshift:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jumphost
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - RedshiftStack
+          - Outputs.RedshiftSecurityGroupIdExport
+      FromPort: 5439
+      ToPort: 5439
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  # SchedulerStack:
+  #   DependsOn:
+  #     - RedshiftStack
+  #   Condition: IsNotProd
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       StartScheduleExpression: !Ref StartScheduleExpression
+  #       StopScheduleExpression: !Ref StopScheduleExpression
+  #       UseFriendlyNames: FALSE
+  #       CodeDeployApplicationName:
+  #         Fn::GetAtt:
+  #           - DeployStack
+  #           - Outputs.CodeDeployApplicationName
+            
