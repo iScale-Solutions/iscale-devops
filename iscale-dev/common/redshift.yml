@@ -1,0 +1,401 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS Redshift Resources
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Redshift Configuration
+        Parameters:
+          - DatabaseName
+          - ClusterType
+          - NumberOfNodes
+          - NodeType
+          - MasterUsername
+          - MasterUserPassword
+          - PortNumber
+          - ClusterSubnet
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DatabaseName:
+        default: Name of the initial database of redshift.
+      ClusterType:
+        default: Cluster Type
+      NumberOfNodes:
+        default: Number of nodes
+      NodeType:
+        default: Node Type/Size
+      MasterUsername:
+        default: Admin user name
+      MasterUserPassword:
+        default: Admin password
+      PortNumber:
+        default: Redshift port
+      ClusterSubnet:
+        default: Cluster Subnet
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 12
+    Default: redshift
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: iscale
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: tokiasia-stg-ase1-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: tokiasia-stg-ase1-sns
+    MinLength: 1
+  DatabaseName:
+    Description: The name of the first database to be created when the cluster is created
+    Type: String
+    Default: redshiftdb
+    AllowedPattern: "([a-z]|[0-9])+"
+  ClusterType:
+    Description: The type of cluster
+    Type: String
+    Default: single-node
+    AllowedValues:
+      - single-node
+      - multi-node
+  NumberOfNodes:
+    Description: The number of compute nodes in the cluster. For multi-node clusters, the NumberOfNodes parameter must be greater than 1
+    Type: Number
+    Default: '1'
+  NodeType:
+    Description: The node size to be provisioned (Only ra3 instances support multi-node cluter type.)
+    Type: String
+    Default: dc2.large
+    AllowedValues:
+      - dc2.large
+      - dc2.8xlarge
+      - ra3.xlplus
+      - ra3.xlplus
+      - ra3.4xlarge
+      - ra3.16xlarge
+  MasterUsername:
+    Description: The user name that is associated with the master user account for
+      the cluster that is being created
+    Type: String
+    Default: redshiftadmin
+    AllowedPattern: "([a-z])([a-z]|[0-9])*"
+  MasterUserPassword:
+    Description: The password that is associated with the master user account for the cluster that is being created. Leave blank for random generated password.
+    Type: String
+    NoEcho: 'true'
+    Default: ''
+  PortNumber:
+    Description: The port number on which the cluster accepts incoming connections.
+    Type: Number
+    Default: '5439'
+  ClusterSubnet:
+    Description: Cluster Subnet.
+    Type: String
+    Default: public
+    AllowedValues:
+      - public
+      - private
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasDBRootPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
+  IsMultiNodeCluster: !Equals [!Ref ClusterType, 'multi-node']
+  UsePrivateSubnet: !Equals [!Ref ClusterSubnet, Private]
+
+Resources:
+
+####
+# Lambda Section
+####
+
+  RedshiftPasswordGenerator:
+    Type: Custom::PasswordGenerator
+    Properties:
+      ServiceToken: !GetAtt RedshiftLambdaPasswordGeneratorFunction.Arn
+
+  RedshiftLambdaPasswordGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaPasswordGeneratorExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Code:
+        ZipFile: |
+
+          import cfnresponse
+          import json
+          import logging
+          import time
+          import base64
+          import string
+          import random
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+
+            responseData={}
+            physicalResourceId={}
+            request_type = event['RequestType']
+
+            try:
+
+              if request_type in ['Create', 'Update']:
+                responseData['DatabasePassword']=generate_random_password(20)
+                responseData['DatabaseRootPassword']=generate_random_password(20)
+
+              send(event, context, cfnresponse.SUCCESS, responseData, physicalResourceId)
+              return
+
+            except Exception:
+
+              logger.exception('Error Encountered')
+              send(event, context, cfnresponse.FAILED, responseData, physicalResourceId)
+              return
+
+          def send(event, context, responseStatus, responseData, physicalResourceId=None):
+            resourceId = physicalResourceId or context.log_stream_name
+            responseBody = {'Status': responseStatus,
+                            'Reason': 'See the details in CloudWatch Log Stream: ' + context.log_stream_name,
+                            'PhysicalResourceId': resourceId,
+                            'StackId': event['StackId'],
+                            'RequestId': event['RequestId'],
+                            'LogicalResourceId': event['LogicalResourceId'],
+                            'Data': responseData}
+            logger.info('RESPONSE BODY:' + json.dumps(responseBody))
+            cfnresponse.send(event, context, responseStatus, responseData, resourceId)
+
+          def generate_random_password(password_length=20):
+            """
+            Generates a random password sent back to CF
+            :param password_length: Length of the password in number of characters
+            :return: String of the password
+            """
+            password = ''
+            char_set = string.ascii_uppercase + string.ascii_lowercase + string.digits + '-'
+            while '-' not in password:
+                password = ''.join(random.sample(char_set * 6, int(password_length)))
+
+            return password
+
+  LambdaPasswordGeneratorExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaPasswordGeneratorFunctionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+
+####
+# RDS Section
+####
+
+  RedshiftSecretManager:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, rs]]
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, rs]]
+      GenerateSecretString:
+        SecretStringTemplate: !Sub
+          - |
+            {
+              "DB_ROOT_USER": "${DB_ROOT_USER}",
+              "DB_ROOT_PASSWORD": "${DB_ROOT_PASSWORD}",
+              "DB_NAME": "${DB_NAME}",
+              "DB_USER": "${DB_USER}",
+              "DB_PASSWORD": "${DB_PASSWORD}"
+            }
+          - DB_ROOT_USER: !Ref MasterUsername
+            DB_ROOT_PASSWORD: !If [HasDBRootPassword, !Ref MasterUserPassword, !GetAtt RedshiftPasswordGenerator.DatabaseRootPassword]
+            DB_NAME: !Ref DatabaseName
+            DB_USER: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], dbuser]]
+            DB_PASSWORD: !GetAtt RedshiftPasswordGenerator.DatabasePassword
+        GenerateStringKey: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        PasswordLength: 30
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+
+  RedshiftIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: 
+               - redshift-serverless.amazonaws.com
+               - redshift.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonRedshiftAllCommandsFullAccess
+
+###
+# Redshift Section
+###
+
+  RedshiftClusterParameterGroup:
+    Type: AWS::Redshift::ClusterParameterGroup
+    Properties:
+      Description: Cluster parameter group
+      ParameterGroupFamily: redshift-1.0
+      Parameters:
+      - ParameterName: enable_user_activity_logging
+        ParameterValue: 'true'
+  
+  RedshiftClusterSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Cluster subnet group
+      SubnetIds: !If
+        - UsePrivateSubnet
+        - - Fn::ImportValue:
+              !Sub "${NetworkStackName}-PrivateSubnetId1"
+          - Fn::ImportValue:
+              !Sub "${NetworkStackName}-PrivateSubnetId2"
+        - - Fn::ImportValue:
+              !Sub "${NetworkStackName}-PublicSubnetId1"
+          - Fn::ImportValue:
+              !Sub "${NetworkStackName}-PublicSubnetId2"
+
+#######
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    Properties:
+      # AllowVersionUpgrade: Boolean
+      AutomatedSnapshotRetentionPeriod: !If [ IsProd, 35, 7]
+      # AvailabilityZone: String
+      # AvailabilityZoneRelocation: Boolean
+      # AvailabilityZoneRelocationStatus: String
+      # Classic: Boolean
+      ClusterIdentifier: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cluster]]
+      ClusterParameterGroupName: !Ref RedshiftClusterParameterGroup
+      VpcSecurityGroupIds: 
+        - !Ref RedshiftClusterSecurityGroup
+      ClusterSubnetGroupName: !Ref RedshiftClusterSubnetGroup
+      ClusterType: !Ref ClusterType
+      # ClusterVersion: String
+      DBName: !Ref DatabaseName
+      EnhancedVpcRouting: True
+      IamRoles: 
+        - !GetAtt RedshiftIamRole.Arn
+      # LoggingProperties: 
+      #   LoggingProperties
+      ManualSnapshotRetentionPeriod: -1
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !If
+        - HasDBRootPassword
+        - !Ref MasterUserPassword
+        - !GetAtt PasswordGenerator.DatabaseRootPassword
+      # MultiAZ: Boolean # If condition here
+      # NamespaceResourcePolicy: Json
+      NodeType: !Ref NodeType
+      NumberOfNodes: !Ref NumberOfNodes
+      PubliclyAccessible: !If [ UsePrivateSubnet, false, true]
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cluster]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  #By default, no inbound connection are allowed. The caller (AppServer / Lambda) will need to add itself to the allowed callers list.
+  RedshiftClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], redshift-cluster] ]
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+Outputs:
+
+  RedshiftSecurityGroupIdExport:
+    Description: The security group id of the Redshift
+    Value: !GetAtt RedshiftClusterSecurityGroup.GroupId
+    Export:
+      Name: !Sub ${AWS::StackName}-RedshiftSecurityGroupId
