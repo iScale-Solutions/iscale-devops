@@ -20,6 +20,7 @@ Metadata:
           - CodeDeployASGDesiredSize
           - CodeDeployDeploymentGroupName
           - EC2InstanceId
+          - RedshiftClusterName
       - Label:
           default: Schedules
         Parameters:
@@ -47,6 +48,8 @@ Metadata:
         default: DocumentDB Cluster ARN
       EC2InstanceId:
         default: EC2 Instance Id
+      RedshiftClusterName:
+        default: Redshift cluster name
       StartScheduleExpression:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
@@ -117,6 +120,10 @@ Parameters:
       - TRUE
       - FALSE
     Default: TRUE
+  RedshiftClusterName:
+    Description: The name of a redshift cluster
+    Type: String
+    Default: ''
 
 Mappings:
   Fn::Transform:
@@ -147,6 +154,9 @@ Conditions:
   HasCodeDeployAndStartSchedule: !And [Condition: HasCodeDeploy, Condition: HasStartSchedule]
   HasCodeDeployAndStopSchedule: !And [Condition: HasCodeDeploy, Condition: HasStopSchedule]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
+  HasRedshift: !Not [!Equals [!Ref RedshiftClusterName, ""]]
+  HasRedshiftAndStartSchedule: !And [Condition: HasRedshift, Condition: HasStartSchedule]
+  HasRedshiftAndStopSchedule: !And [Condition: HasRedshift, Condition: HasStopSchedule]
 
 Resources:
 
@@ -313,6 +323,37 @@ Resources:
                   - autoscaling:SetDesiredCapacity
                   #the auto scaling group name will change dynamically with blue green and needs to be made a bit wide here. However client name should still be there
                 Resource: !Join [":", ["arn:aws:autoscaling", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "autoScalingGroup", '*', !Join ['', ['autoScalingGroupName/', !Join ['', ['*', !Ref CodeDeployDeploymentGroupName, '*']]]]]]
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  LambdaScheduleRedshiftRole:
+    Condition: HasRedshift
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ScheduleRedshiftPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'redshift:PauseCluster'
+                  - 'redshift:ResumeCluster'
+                Resource: !Join [":", ["arn:aws:redshift", !Ref 'AWS::Region', !Ref 'AWS::AccountId', "cluster", !Ref RedshiftClusterName]]
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
@@ -902,6 +943,108 @@ Resources:
             Resource: !GetAtt StartDeploymentASGFunction.Arn
       PolicyName: AllowStartAutoScalingGroup
 
+  ###
+  # Redshift cluster
+  ###
+
+# start
+  StartRedshiftFunction:
+    Condition: HasRedshiftAndStartSchedule
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function starting Redshift cluster
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleRedshiftRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Environment:
+        Variables:
+          CLUSTER_ID: !Ref RedshiftClusterName
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            CLUSTER_ID = os.environ['CLUSTER_ID']
+
+            try:
+              redshift = boto3.client('redshift')
+
+              logger.info('Pausing Redshift Cluster : ' + str(CLUSTER_ID))
+              redshift.resume_cluster(ClusterIdentifier=CLUSTER_ID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StartRedshiftFunctionPermission:
+    Condition: HasRedshiftAndStartSchedule
+    Type: AWS::IAM::Policy
+    Properties:
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt StartRedshiftFunction.Arn
+      PolicyName: AllowStartRedshift
+
+# stop
+  StopRedshiftFunction:
+    Condition: HasRedshiftAndStopSchedule
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function stopping Redshift cluster
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleRedshiftRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Environment:
+        Variables:
+          CLUSTER_ID: !Ref RedshiftClusterName
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            CLUSTER_ID = os.environ['CLUSTER_ID']
+
+            try:
+              redshift = boto3.client('redshift')
+
+              logger.info('Pausing Redshift Cluster : ' + str(CLUSTER_ID))
+              redshift.pause_cluster(ClusterIdentifier=CLUSTER_ID)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopRedshiftFunctionPermission:
+    Condition: HasRedshiftAndStopSchedule
+    Type: AWS::IAM::Policy
+    Properties:
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt StopRedshiftFunction.Arn
+      PolicyName: AllowStopRedshift
+
 ####
 # CloudWatch Section
 ####
@@ -981,6 +1124,21 @@ Resources:
         - Arn: !GetAtt StartDeploymentASGFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscaling, start]]
 
+  StartScheduledRedshiftEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasRedshiftAndStartSchedule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, redshift, start]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ Start, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StartScheduleExpression]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StartRedshiftFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, redshift, start]]
+
   ScheduledEventPermissionToStartDBCluster:
     Condition: HasDBClusterAndStartSchedule
     Type: AWS::Lambda::Permission
@@ -1025,6 +1183,15 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt StartScheduledASGEventRule.Arn
+
+  ScheduledEventPermissionToStartRedshift:
+    Condition: HasRedshiftAndStartSchedule
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartRedshiftFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartScheduledRedshiftEventRule.Arn
 
   StopScheduledDocDBClusterEventRule:
     Type: AWS::Events::Rule
@@ -1101,6 +1268,21 @@ Resources:
         - Arn: !GetAtt StopDeploymentASGFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, autoscaling, stop]]
 
+  StopScheduledRedshiftEventRule:
+    Type: AWS::Events::Rule
+    Condition: HasRedshiftAndStopSchedule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, redshift, stop]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ Stop, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StopScheduleExpression]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StopRedshiftFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, redshift, stop]]
+
   ScheduledEventPermissionToStopDocDBCluster:
     Condition: HasDocDBClusterAndStopSchedule
     Type: AWS::Lambda::Permission
@@ -1145,6 +1327,15 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt StopScheduledASGEventRule.Arn
+
+  ScheduledEventPermissionToStopRedshift:
+    Condition: HasRedshiftAndStopSchedule
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopRedshiftFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopScheduledRedshiftEventRule.Arn
 
 Outputs:
 

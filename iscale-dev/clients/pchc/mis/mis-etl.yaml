@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: MIS ETL Resources (S3, Redshift)
+Description: MIS ETL Resources (S3, Redshift, Glue IAM Role)
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -172,22 +172,37 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
-  # SchedulerStack:
-  #   DependsOn:
-  #     - RedshiftStack
-  #   Condition: IsNotProd
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       StartScheduleExpression: !Ref StartScheduleExpression
-  #       StopScheduleExpression: !Ref StopScheduleExpression
-  #       UseFriendlyNames: FALSE
-  #       CodeDeployApplicationName:
-  #         Fn::GetAtt:
-  #           - DeployStack
-  #           - Outputs.CodeDeployApplicationName
-            
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM Role for Glue
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
+
+  SchedulerStack:
+    DependsOn:
+      - RedshiftStack
+    Condition: IsDev
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        RedshiftClusterName:
+          Fn::GetAtt:
+            - RedshiftStack
+            - Outputs.RedshiftClusterName
+
