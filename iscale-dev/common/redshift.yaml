@@ -21,6 +21,7 @@ Metadata:
           - MasterUserPassword
           - PortNumber
           - ClusterSubnet
+          - AllowVersionUpgrade
       - Label:
           default: Stack Configuration
         Parameters:
@@ -50,6 +51,8 @@ Metadata:
         default: Redshift port
       ClusterSubnet:
         default: Cluster Subnet
+      AllowVersionUpgrade:
+        default: Allow Version Upgrade
       NetworkStackName:
         default: Network Stack Name
       SNSStackName:
@@ -138,6 +141,13 @@ Parameters:
     AllowedValues:
       - public
       - private
+  AllowVersionUpgrade:
+    Description: Allow version upgrade
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
 
 Mappings:
   Fn::Transform:
@@ -152,7 +162,7 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasDBRootPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
   IsMultiNodeCluster: !Equals [!Ref ClusterType, 'multi-node']
-  UsePrivateSubnet: !Equals [!Ref ClusterSubnet, Private]
+  UsePrivateSubnet: !Equals [!Ref ClusterSubnet, private]
 
 Resources:
 
@@ -338,7 +348,7 @@ Resources:
   RedshiftCluster:
     Type: AWS::Redshift::Cluster
     Properties:
-      # AllowVersionUpgrade: Boolean
+      AllowVersionUpgrade: !Ref AllowVersionUpgrade
       AutomatedSnapshotRetentionPeriod: !If [ IsProd, 35, 7]
       # AvailabilityZone: String
       # AvailabilityZoneRelocation: Boolean
@@ -352,11 +362,16 @@ Resources:
       ClusterType: !Ref ClusterType
       # ClusterVersion: String
       DBName: !Ref DatabaseName
+      Encrypted: true
       EnhancedVpcRouting: True
       IamRoles: 
         - !GetAtt RedshiftIamRole.Arn
-      # LoggingProperties: 
-      #   LoggingProperties
+      LoggingProperties: 
+        LogDestinationType: cloudwatch
+        LogExports:
+          - connectionlog
+          - useractivitylog
+          - userlog
       ManualSnapshotRetentionPeriod: -1
       MasterUsername: !Ref MasterUsername
       MasterUserPassword: !If
@@ -366,7 +381,7 @@ Resources:
       # MultiAZ: Boolean # If condition here
       # NamespaceResourcePolicy: Json
       NodeType: !Ref NodeType
-      NumberOfNodes: !Ref NumberOfNodes
+      NumberOfNodes: !Ref NumberOfNodes # if multinode = many
       PubliclyAccessible: !If [ UsePrivateSubnet, false, true]
       Tags: 
         - Key: Name
