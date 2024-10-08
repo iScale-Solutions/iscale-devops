@@ -113,6 +113,7 @@ Parameters:
     Type: String
     Default: t3.medium
     AllowedValues:
+      - t3.micro
       - t3.small
       - t3.medium
       - t3.large
@@ -321,7 +322,7 @@ Resources:
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
         InstancePort: 80
-        InstanceSubnet: !If [IsDev, Public, Private]
+        InstanceSubnet: Private
         InstanceType: !Ref InstanceType
         LoadBalancerHostName: !Ref LoadBalancerHostName
         LoadBalancerPriority: 100
@@ -387,7 +388,7 @@ Resources:
 
 # Attach Policy to Appserver IAM Role (appserver stack)
 
-  EventSchedulerPolicy:
+  SchedulerAndLambdaPolicy:
     DependsOn:
       - ServerStack
     Description: Allow MIS app servers to create/delete cloudwatch event schedule
@@ -397,7 +398,7 @@ Resources:
         - Fn::GetAtt:
             - ServerStack
             - Outputs.AppServerIamRole
-      PolicyName: SchedulerPolicy
+      PolicyName: SchedulerAndLambdaPolicy # policy to create scheduler and invoker lambda
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -407,6 +408,40 @@ Resources:
               - scheduler:*
               - iam:PassRole
             Resource: "*"
+          - Sid: "LambdaPolicy"
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunctionUrl
+              - lambda:InvokeFunction
+            Resource: !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', pchc-mis-lambda*]]
+
+# create new role for eventbridge scheduler
+# EC2 need permission to invoke lambdas created by serverless yaml
+# eventbridge also need permission to invoke lambdas created by serverless yml
+# eventbridge scheduler need role attached, permission to invoke lambda and trust policy
+
+  EventSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: scheduler.amazonaws.com
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref 'AWS::AccountId'
+      Policies:
+        - PolicyName: InvokeLambdaMIS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', pchc-mis-lambda*]]
 
 # MIS Lambda Bref Deployment User Group
 
