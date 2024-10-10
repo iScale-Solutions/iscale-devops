@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Base Windows Image Builder PMMS
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Sharing Configuration
+        Parameters:
+          - ShareImage
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      ShareImage:
+        default: Share image with other account? If sharing, encryption will be disabled.
+      SNSStackName:
+        default: SNS Topic Stack Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: image-builder
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  ShareImage:
+    Description: Select true to not encrypt the image and share it with other accounts
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+    MinLength: 1
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml      
+  IsImageShared: !Equals [!Ref ShareImage, true]
+
+Resources:
+
+###
+# Common components
+###
+
+###
+# Windows Base Image
+###
+
+  Windows2019ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, 'windows2019']]
+      Version: 1.0.0
+      ParentImage: !Join [':', [arn:aws:imagebuilder, !Ref 'AWS::Region', aws:image/windows-server-2019-english-full-base-x86/2024.9.11]]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'windows2019']]
+      Components: #Max 20
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/amazon-cloudwatch-agent-windows/1.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-codedeploy-agent-windows/1.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/dotnet-hosting-bundle-lts-windows/8.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/dotnet-sdk-lts-windows/8.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-windows/1.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/windows-server-iis/1.0.1']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  Windows2019Builder: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters: 
+        Name: windows2019
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref Windows2019ImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
