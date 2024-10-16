@@ -52,7 +52,7 @@ Parameters:
     Type: String
     MinLength: 3
     MaxLength: 12
-    Default: mis
+    Default: mis-etl
   OrgName:
     Description: The name of the organization
     Type: String
@@ -258,6 +258,17 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
         - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
+      Policies:
+        - PolicyName: InvokeLambdaMIS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource: !Join ['-', ['arn:aws:s3:::aws-glue-assets', !Ref 'AWS::AccountId', !Ref 'AWS::Region', '*']]
+
+# Scheduler for Redshift
 
   SchedulerStack:
     DependsOn:
@@ -278,3 +289,151 @@ Resources:
             - RedshiftStack
             - Outputs.RedshiftClusterName
 
+###
+# Reports Queries section
+###
+
+  ReportsQueriesSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, reports-queries]]
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, reports-queries secrets]]
+      
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  ReportsQueriesUserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      Policies:
+        - PolicyName: ExecuteSSM
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Join ['',[!GetAtt EnvBucket.Arn, "/*"]]
+        - PolicyName: InstanceAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  Fn::GetAtt:
+                    - DBStack
+                    - Outputs.DBSecretManager
+
+  ReportsQueriesRunCommand: 
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: "2.2"
+        description: "Command Document to run queries to Redshift"
+        parameters:
+          SecretID:
+            type: "String"
+            description: "secrets manager ID"
+            default: !GetAtt ReportsQueriesSecret.Id
+          Region:
+            type: "String"
+            description: "region"
+            default: !Ref 'AWS::Region'
+        mainSteps:
+        - action: aws:runShellScript
+          name: "update_deploy"
+          inputs:
+            runCommand:
+            - |
+              cd /home/ec2-user/pchc-mis-report-queries/
+              git pull
+              cd /home/ec2-user/queries-deploy/
+              rsync -avz /home/ec2-user/pchc-mis-report-queries/ /home/ec2-user/queries-deploy/
+              export REDSHIFT_HOST=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_HOST`
+              export REDSHIFT_USER=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_USER`
+              export REDSHIFT_PASSWORD=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_PASSWORD`
+              export REDSHIFT_DATABASE=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_DATABASE`
+              mv update_deploy.sh update_deploy.sh.bak
+              envsubst < update_deploy.sh.bak > update_deploy.sh
+              ./update_deploy.sh
+      DocumentFormat: YAML
+      DocumentType: Command
+      Name: run-reports-queries
+      UpdateMethod: NewVersion
+
+###
+# EC2 for running SSM commands
+###
+
+  ReportQueriesInstance:
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: ami-079c0d2990b4033f4 # change depends on region
+      InstanceType: t3.nano
+      IamInstanceProfile: !Ref AppServerIamProfile
+      Monitoring: false
+      SourceDestCheck: false
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet: [!GetAtt ReportQueriesSecurityGroup.GroupId]
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId1'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 10
+      UserData:
+        Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            sudo yum install git postgresql -y
+            sudo mkdir /home/ec2-user/queries-deploy/
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, reports-queries]]
+
+  ReportsQueriesIamProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: ReportsQueriesIamRole
+        
+  ReportsQueriesIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  
+  ReportQueriesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, reports-queries]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+
+  AllowReportsQueriesToRedshift:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from reports-queries-instance
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - RedshiftStack
+          - Outputs.RedshiftSecurityGroupIdExport
+      FromPort: 5439
+      ToPort: 5439
+      SourceSecurityGroupId: !GetAtt ReportQueriesSecurityGroup.GroupId
