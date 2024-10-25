@@ -1,5 +1,7 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: DSAMISPP-CICS VPC Peering (UAT) - needed for AWS Glue
+Description: 'MIS VPC Peering for AWS Glue. Need to establish VPC peering from MIS for Glue to access RDS in different VPCs.
+  Attach security group to source Databases for AWS Glue to access.'
+
 Metadata:
   AWS::CloudFormation::Interface: 
     ParameterGroups:
@@ -14,14 +16,21 @@ Metadata:
         Parameters:
           - RequesterNetworkStackName
       - Label:
-          default: Target VPC
+          default: Target Network Stack Name (VPC)
         Parameters:
-          - TargetNetworkStackName
+          - TargetNetworkStackNameDsapp
+          - TargetNetworkStackNamePas6
+          - TargetNetworkStackNamePaygate
+          - TargetNetworkStackNamePddtseod
+          - TargetNetworkStackNamePddts
+          - TargetNetworkStackNamePesonet
+          - TargetNetworkStackNamePhilpass
+          - TargetNetworkStackNameCics
       - Label:
-          default: Stacks
+          default: Redshift Stack Names
         Parameters:
-          - MISStackName
-          - CICSStackName
+          - MisEtlStackName
+
     ParameterLabels:
       Name:
         default: Resource Name
@@ -29,20 +38,34 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
-      CICSStackName:
-        default: CICS Stack Name
-      MISStackName:
-        default: DSAPP Stack Name
       RequesterNetworkStackName:
         default: Requester VPC network stack name
-      TargetNetworkStackName:
-        default: Target VPC network stack name
+# Network Stack        
+      TargetNetworkStackNameDsapp:
+        default: DSAPP network stack name
+      TargetNetworkStackNamePas6:
+        default: PAS6 network stack name
+      TargetNetworkStackNamePaygate:
+        default: Paygate network stack name
+      TargetNetworkStackNamePddtseod:
+        default: PDDTS-EOD network stack name
+      TargetNetworkStackNamePddts:
+        default: PDDTS network stack name
+      TargetNetworkStackNamePesonet:
+        default: Pesonet network stack name
+      TargetNetworkStackNamePhilpass:
+        default: Philpass network stack name
+      TargetNetworkStackNameCics:
+        default: CICS network stack name
+# Resource Stacks
+      MisEtlStackName:
+        default: MIS stack name
 
 Parameters: 
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
-    Default: mis-cics
+    Default: mis # mis-cics = uat
     MinLength: 3
     MaxLength: 20
   OrgName:
@@ -62,24 +85,64 @@ Parameters:
       - Development
       - Test
   RequesterNetworkStackName:
-    Description: The name of the network stack for requester VPC
+    Description: The name of the network stack for requester VPC (MIS)
     Type: String
-    Default: pchc-test-uw2-mis-network
+    Default: pchc-prd-ase1-mis-network
     MinLength: 1
-  TargetNetworkStackName:
+# target vpc 1 - DSAPP
+  TargetNetworkStackNameDsapp:
     Description: The name of the network stack for target VPC
     Type: String
-    Default: pchc-test-uw2-cics-network
+    Default: pchc-prd-ase1-dsapp-network
     MinLength: 1
-  MISStackName:
+# target vpc 2 - PAS6
+  TargetNetworkStackNamePas6:
+    Description: The name of the network stack for target VPC
+    Type: String
+    Default: pchc-prd-ase1-pas6-network
+    MinLength: 1
+# target vpc 3 - PAYGATE
+  TargetNetworkStackNamePaygate:
+    Description: The name of the network stack for target VPC
+    Type: String
+    Default: pchc-prd-ase1-paygate-network
+    MinLength: 1
+# target vpc 4 - PDDTSEOD
+  TargetNetworkStackNamePddtseod:
+    Description: The name of the network stack for target VPC
+    Type: String
+    Default: pchc-prd-ase1-pddts-eod-network
+    MinLength: 1
+# target vpc 5 - PDDTS
+  TargetNetworkStackNamePddts:
+    Description: The name of the network stack for target VPC
+    Type: String
+    Default: pchc-prd-ase1-pddts-network
+    MinLength: 1
+# target vpc 6 - PESONET
+  TargetNetworkStackNamePesonet:
+    Description: The name of the network stack for target VPC
+    Type: String
+    Default: pchc-prd-ase1-pesonet-network
+    MinLength: 1
+# target vpc 7 - PHILPASS
+  TargetNetworkStackNamePhilpass:
+    Description: The name of the network stack for target VPC
+    Type: String
+    Default: pchc-prd-ase1-philpass-network
+    MinLength: 1
+# target vpc 8 - CICS
+  TargetNetworkStackNameCics:
+    Description: The name of the network stack for target VPC
+    Type: String
+    Default: pchc-prd-ase1-cics-network
+    MinLength: 1
+
+# Resource Stacks
+  MisEtlStackName:
     Description: The name of the MIS stack name
     Type: String
-    Default: pchc-test-uw2-mis
-    MinLength: 1
-  CICSStackName:
-    Description: The name of the CICS  stack name
-    Type: String
-    Default: pchc-test-uw2-cics
+    Default: pchc-prd-ase1-mis-etl
     MinLength: 1
 
 Mappings:
@@ -100,7 +163,10 @@ Resources:
 # VPC Peering
 ####
 
+# For CICS UAT Only
+
   VPCPeeringToCICSNetworkStack:
+    Condition: IsTest # test = uat
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
@@ -123,107 +189,450 @@ Resources:
 
         # Target VPC CICS
         TargetVpcId: !ImportValue
-          'Fn::Sub': '${TargetNetworkStackName}-VpcId'
+          'Fn::Sub': '${TargetNetworkStackNameCics}-VpcId'
         TargetCidr: !ImportValue
-          'Fn::Sub': '${TargetNetworkStackName}-VpcCidrBlock'
-        TargetPublicRouteTable: !ImportValue
-          'Fn::Sub': '${TargetNetworkStackName}-PublicRouteTable'
+          'Fn::Sub': '${TargetNetworkStackNameCics}-VpcCidrBlock'
+        # TargetPublicRouteTable: !ImportValue
+        #   'Fn::Sub': '${TargetNetworkStackNameCics}-PublicRouteTable'
         TargetInternalRouteTable1: !ImportValue
-          'Fn::Sub': '${TargetNetworkStackName}-InternalRouteTable1'
+          'Fn::Sub': '${TargetNetworkStackNameCics}-InternalRouteTable1'
         TargetPrivateRouteTable1: !ImportValue
-          'Fn::Sub': '${TargetNetworkStackName}-PrivateRouteTable1'
+          'Fn::Sub': '${TargetNetworkStackNameCics}-PrivateRouteTable1'
         TargetPrivateRouteTable2: !ImportValue
-          'Fn::Sub': '${TargetNetworkStackName}-PrivateRouteTable2'
+          'Fn::Sub': '${TargetNetworkStackNameCics}-PrivateRouteTable2'
         TargetPrivateRouteTable3: !ImportValue
-          'Fn::Sub': '${TargetNetworkStackName}-PrivateRouteTable3'
+          'Fn::Sub': '${TargetNetworkStackNameCics}-PrivateRouteTable3'
 
-##
-# MIS - CICS connection update secgroup
-##
+  AllowRedshifToCicsUAT:
+    Condition: IsTest # test = uat
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-0b5c513e970445c58 # cics uat db secgroup
+      IpProtocol: TCP
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
 
-  # Allow DSAPP App Servers to connect to CICS RDS
-  # CICSDBFromDSAPPServerStackSecurityGroupIngress:
-  #   Description: Allow DSAPP to cics DB
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     Description: Allow DSAPP to cics DB
-  #     GroupId: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBSecurityGroup'
-  #     IpProtocol: TCP
-  #     FromPort: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBPort'
-  #     ToPort: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBPort'
-  #     SourceSecurityGroupId: !ImportValue
-  #       'Fn::Sub': '${DSAPPStackName}-ServerStackSecurityGroup'
-  
-  # CICSDBFromDSAPPSidekiqServerStackSecurityGroupSecurityGroupIngress:
-  #   Description: Allow DSAPP sidekiq to cics DB
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     Description: Allow DSAPP sidekiq to cics DB
-  #     GroupId: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBSecurityGroup'
-  #     IpProtocol: TCP
-  #     FromPort: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBPort'
-  #     ToPort: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBPort'
-  #     SourceSecurityGroupId: !ImportValue
-  #       'Fn::Sub': '${DSAPPStackName}-SidekiqServerStackSecurityGroup'
+##############################################
+## PRODUCTION SECTION
 
-  # # Allow DSAPP App Servers to connect to CICS RDS 2 (cross region enabled DB)
-  # CICSDBFromDSAPPServerStackSecurityGroupIngress2:
-  #   Condition: IsNotProd
-  #   Description: Allow DSAPP to cics DB 2
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     Description: Allow DSAPP to cics DB 2
-  #     GroupId: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBSecurityGroup2'
-  #     IpProtocol: TCP
-  #     FromPort: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBPort'
-  #     ToPort: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBPort'
-  #     SourceSecurityGroupId: !ImportValue
-  #       'Fn::Sub': '${DSAPPStackName}-ServerStackSecurityGroup'
-  
-  # CICSDBFromDSAPPSidekiqServerStackSecurityGroupSecurityGroupIngress2:
-  #   Condition: IsNotProd
-  #   Description: Allow DSAPP sidekiq to cics DB 2
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     Description: Allow DSAPP sidekiq to cics DB 2
-  #     GroupId: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBSecurityGroup2'
-  #     IpProtocol: TCP
-  #     FromPort: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBPort'
-  #     ToPort: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-DBPort'
-  #     SourceSecurityGroupId: !ImportValue
-  #       'Fn::Sub': '${DSAPPStackName}-SidekiqServerStackSecurityGroup'        
-  
-  # # Allow DSAPP App Servers to connect to CICS Fileshare
-  # CICSShareFromDSAPPServerStackSecurityGroupIngress:
-  #   Description: Allow DSAPP to cics fileshare
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     Description: Allow DSAPP to cics fileshare
-  #     GroupId: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-CICSAPPSVRSecurityGroup'
-  #     IpProtocol: -1
-  #     SourceSecurityGroupId: !ImportValue
-  #       'Fn::Sub': '${DSAPPStackName}-ServerStackSecurityGroup'
+###
+# VPC Peering 1
+# MIS - DSAPP
+###
 
-  # CICSShareFromDSAPPSidekiqServerStackSecurityGroupSecurityGroupIngress:
-  #   Description: Allow DSAPP sidekiq to cics fileshare
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:  
-  #     Description: Allow DSAPP sidekiq to cics fileshare
-  #     GroupId: !ImportValue
-  #       'Fn::Sub': '${CICSStackName}-CICSAPPSVRSecurityGroup'
-  #     IpProtocol: -1
-  #     SourceSecurityGroupId: !ImportValue
-  #       'Fn::Sub': '${DSAPPStackName}-SidekiqServerStackSecurityGroup'
+  VPCPeeringToDsapp:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: mis-dsapp
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+
+        # Requester VPC MIS
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+
+        # Target VPC DSAPP
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameDsapp}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameDsapp}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameDsapp}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameDsapp}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameDsapp}-PrivateRouteTable2'
+        # TargetInternalRouteTable1: !ImportValue
+        #   'Fn::Sub': '${TargetNetworkStackNameDsapp}-InternalRouteTable1'
+
+  AllowRedshifToDsapp:
+    Condition: IsProd
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-0e4d827d7e29b46d5 # dsapp db secgroup
+      IpProtocol: TCP
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
+
+###
+# VPC Peering 2
+# MIS - PAS6
+###
+
+  VPCPeeringToPas6:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: mis-pas6
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+
+        # Requester VPC MIS
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+
+        # Target VPC DSAPP
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePas6}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePas6}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePas6}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePas6}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePas6}-PrivateRouteTable2'
+        # TargetInternalRouteTable1: !ImportValue
+        #   'Fn::Sub': '${TargetNetworkStackNamePas6}-InternalRouteTable1'
+
+  AllowRedshifToPas6:
+    Condition: IsProd
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-0218e58eb95ad7847 # pas6 db secgroup
+      IpProtocol: TCP
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
+
+###
+# VPC Peering 3
+# MIS - PAYGATE
+###
+
+  VPCPeeringToPaygate:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: mis-paygate
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+
+        # Requester VPC MIS
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+
+        # Target VPC DSAPP
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePaygate}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePaygate}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePaygate}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePaygate}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePaygate}-PrivateRouteTable2'
+        # TargetInternalRouteTable1: !ImportValue
+        #   'Fn::Sub': '${TargetNetworkStackNamePaygate}-InternalRouteTable1'
+
+  AllowRedshifToPaygate:
+    Condition: IsProd
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-0c039b1e8eda3078f # paygate db secgroup
+      IpProtocol: TCP
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
+
+###
+# VPC Peering 4
+# MIS - PDDTSEOD
+###
+
+  VPCPeeringToPddtseod:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: mis-pddtseod
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+
+        # Requester VPC MIS
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+
+        # Target VPC DSAPP
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddtseod}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddtseod}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddtseod}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddtseod}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddtseod}-PrivateRouteTable2'
+        # TargetInternalRouteTable1: !ImportValue
+        #   'Fn::Sub': '${TargetNetworkStackNamePddtseod}-InternalRouteTable1'
+
+  AllowRedshifToPddtseod:
+    Condition: IsProd
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-071067b9192fcf9f5 # pddtseod db secgroup
+      IpProtocol: TCP
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
+
+###
+# VPC Peering 5
+# MIS - PDDTS
+###
+
+  VPCPeeringToPddts:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: mis-pddts
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+
+        # Requester VPC MIS
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+
+        # Target VPC DSAPP
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddts}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddts}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddts}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddts}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePddts}-PrivateRouteTable2'
+        # TargetInternalRouteTable1: !ImportValue
+        #   'Fn::Sub': '${TargetNetworkStackNamePddts}-InternalRouteTable1'
+
+  AllowRedshifToPddts:
+    Condition: IsProd
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-02c616e87572b0a3f # pddts db secgroup
+      IpProtocol: TCP
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
+
+###
+# VPC Peering 6
+# MIS - PESONET
+###
+
+  VPCPeeringToPesonet:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: mis-pesonet
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+
+        # Requester VPC MIS
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+
+        # Target VPC DSAPP
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet}-PrivateRouteTable2'
+        # TargetInternalRouteTable1: !ImportValue
+        #   'Fn::Sub': '${TargetNetworkStackNamePesonet}-InternalRouteTable1'
+
+  AllowRedshifToPesonet:
+    Condition: IsProd
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-0a9388d5c0fe470c9 # pesonet db secgroup
+      IpProtocol: TCP
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
+
+###
+# VPC Peering 7
+# MIS - PHILPASS
+###
+
+  VPCPeeringToPhilpass:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: mis-philpass
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+
+        # Requester VPC MIS
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+
+        # Target VPC DSAPP
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePhilpass}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePhilpass}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePhilpass}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePhilpass}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePhilpass}-PrivateRouteTable2'
+        # TargetInternalRouteTable1: !ImportValue
+        #   'Fn::Sub': '${TargetNetworkStackNamePhilpass}-InternalRouteTable1'
+
+  AllowRedshifToPhilpass:
+    Condition: IsProd
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-0f16c1c6e4c0953b9 # philpass db secgroup
+      IpProtocol: TCP
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
+
+###
+# VPC Peering 8
+# MIS - CICS
+###
+
+  VPCPeeringToCics:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: mis-cics
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+
+        # Requester VPC MIS
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+
+        # Target VPC DSAPP
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameCics}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameCics}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameCics}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameCics}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameCics}-PrivateRouteTable2'
+        TargetPrivateRouteTable3: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNameCics}-PrivateRouteTable3'
+        # TargetInternalRouteTable1: !ImportValue
+        #   'Fn::Sub': '${TargetNetworkStackNameCics}-InternalRouteTable1'
+
+  AllowRedshifToCics:
+    Condition: IsProd
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-08b8edf44871e7195 # philpass db secgroup
+      IpProtocol: TCP
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
