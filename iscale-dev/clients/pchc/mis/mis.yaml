@@ -188,7 +188,7 @@ Resources:
       Parameters:
         Name: !Ref Name
         DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
-        AllocatedStorage: 20
+        AllocatedStorage: !If [IsProd, 50, 20]
         BackupRetentionPeriod: !If [IsProd, 30, 7]
         DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
         EnableEnhancedMonitoring: !If [IsProd, true, false]
@@ -204,6 +204,7 @@ Resources:
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
+        StorageType: !If [IsProd, gp3, gp2] # more IOPS
 
   AllowJumpHostIntoDB:
     Type: AWS::EC2::SecurityGroupIngress
@@ -225,56 +226,6 @@ Resources:
       SourceSecurityGroupId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
-
-# Reports DB
-
-  # ReportsDBStack: # acting as redshift for dev
-  #   Condition: IsDev
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
-  #     Parameters:
-  #       Name: mis-reports
-  #       DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], reportsdb]]
-  #       AllocatedStorage: 20
-  #       BackupRetentionPeriod: !If [IsProd, 30, 7]
-  #       DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
-  #       EnableEnhancedMonitoring: !If [IsProd, true, false]
-  #       EnablePerformanceInsights: !If [IsProd, true, false]
-  #       EnvName: !Ref EnvName
-  #       Engine: postgres
-  #       EngineVersion: 16.3
-  #       Family: postgres16
-  #       InstanceType: !If [IsProd, db.t4g.large, db.t4g.micro]
-  #       Port: 5432
-  #       MasterUser: root
-  #       MultiAz: !If [IsProd, true, false]
-  #       NetworkStackName: !Ref NetworkStackName
-  #       OrgName: !Ref OrgName
-  #       SNSStackName: !Ref SNSStackName
-  #       StorageEncrypted: true
-
-  # AllowJumpHostIntoReportsDB:
-  #   Condition: IsDev
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     Description: Allow connection from jump host
-  #     IpProtocol: TCP
-  #     GroupId:
-  #       Fn::GetAtt:
-  #         - ReportsDBStack
-  #         - Outputs.SecurityGroupId
-  #     FromPort:
-  #       Fn::GetAtt:
-  #         - ReportsDBStack
-  #         - Outputs.DBInstancePort
-  #     ToPort:
-  #       Fn::GetAtt:
-  #         - ReportsDBStack
-  #         - Outputs.DBInstancePort
-  #     SourceSecurityGroupId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
 ##
 # Codedeploy
@@ -406,6 +357,8 @@ Resources:
             - Outputs.DBInstanceName
 
 # Attach Policy to Appserver IAM Role (appserver stack)
+# EC2 need permission to invoke lambdas created by serverless yaml
+# EC2 need permission to create/delete scheduler that will trigger lambda/step functions
 
   SchedulerAndLambdaPolicy:
     DependsOn:
@@ -434,10 +387,8 @@ Resources:
               - lambda:InvokeFunction
             Resource: !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', pchc-mis-lambda*]]
 
-# create new role for eventbridge scheduler
-# EC2 need permission to invoke lambdas created by serverless yaml
-# eventbridge also need permission to invoke lambdas created by serverless yml
-# eventbridge scheduler need role attached, permission to invoke lambda and trust policy
+# create new role for eventbridge scheduler, this role will be attached by EC2 to schedulers
+# eventbridge scheduler needs role attached, permission to invoke lambda and step functions created by serverless.yml
 
   EventSchedulerRole:
     Type: AWS::IAM::Role
@@ -470,7 +421,7 @@ Resources:
                   - states:StartExecution
                 Resource: "*" # need to update naming of serverless step functions
 
-# MIS Lambda Bref Deployment User Group
+# MIS Lambda Section (for serverless)
 
   EnvBucket:
     Type: AWS::S3::Bucket
@@ -504,6 +455,9 @@ Resources:
           Value: !Ref EnvName
         - Key: Organization
           Value: !Ref OrgName
+
+# MIS Lambda Bref Deployment User Group
+# permissions to deploy lambda using serverless.yml
 
   LambdaDeploymentUserGroup:
     Type: AWS::IAM::Group
@@ -553,7 +507,6 @@ Resources:
                   - cloudformation:ValidateTemplate
                   - iam:CreateRole
                   - iam:PassRole
-                  - lambda:*
                   - logs:CreateLogGroup
                   - logs:DeleteLogGroup
                   - logs:DescribeLogGroups
@@ -565,12 +518,7 @@ Resources:
                   - logs:DeleteSubscriptionFilter
                   - s3:CreateBucket
                   - s3:ListAllMyBuckets
-                  - states:CreateStateMachine
-                  - states:DeleteStateMachine
-                  - states:TagResource
                   - iam:TagRole
-                  - states:DescribeStateMachine
-                  - states:UpdateStateMachine
                   - ec2:DescribeSecurityGroups
                   - ec2:DescribeSubnets
                   - ec2:DescribeVpcs
@@ -609,6 +557,19 @@ Resources:
               #   Action:
               #     - events:* # ?????? 
               #   Resource: !Join ['', ['arn:aws:events:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':rule/', pchc-mis-lambda*]]
+              - Effect: Allow
+                Action:
+                  - lambda:*
+                Resource: !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', pchc-mis-lambda*]]
+              - Effect: Allow
+                Action:
+                  - states:CreateStateMachine
+                  - states:DeleteStateMachine
+                  - states:TagResource
+                  - states:DescribeStateMachine
+                  - states:UpdateStateMachine
+                Resource: "*" # need to update naming of serverless step functions
+
 # secgroup for lambda
   MisLambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -644,30 +605,32 @@ Resources:
           - Outputs.DBInstancePort
       SourceSecurityGroupId: !GetAtt MisLambdaSecurityGroup.GroupId
 
-#   BackupStack:
-#     Condition: IsProd
-#     DependsOn:
-#       - DBStack
-#       - ServerStack
-#     Type: AWS::CloudFormation::Stack
-#     Properties:
-#       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
-#       Parameters:
-#         Name: !Ref Name
-#         EnvName: !Ref EnvName
-#         OrgName: !Ref OrgName
-#         BackupARNList: !Join
-#           - ','
-#           - - Fn::GetAtt:
-#               - DBStack
-#               - Outputs.DBInstanceARN
-#             - Fn::GetAtt:
-#               - ServerStack
-#               - Outputs.AppServerEFSArn
-#         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
-#         DailyExpiration: 60 #60 days
-#         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
-#         MonthlyExpiration: 3650 # 10 years
+# Backup Section
+
+  BackupStack:
+    Condition: IsProd
+    DependsOn:
+      - DBStack
+      - ServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstanceARN
+            - Fn::GetAtt:
+              - ServerStack
+              - Outputs.AppServerEFSArn
+        BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
+        DailyExpiration: 60 #60 days
+        WeeklyExpiration: 180 #6 months but requirement is 4 weeks
+        MonthlyExpiration: 3650 # 10 years
 
 #   Dashboard:
 #     Condition: IsProd
@@ -896,3 +859,9 @@ Outputs:
     Value: !GetAtt MisLambdaSecurityGroup.GroupId
     Export: 
       Name: !Sub ${AWS::StackName}-MisLambdaSecurityGroupId
+
+  MisServerStackSecurityGroupId:
+    Description: MIS Serverstack Secgroup ID
+    Value: !GetAtt MisLambdaSecurityGroup.GroupId
+    Export: 
+      Name: !Sub ${AWS::StackName}-MisServerStackSecurityGroupId
