@@ -20,6 +20,7 @@ Metadata:
           - AccepterVpcId
           - AccepterCidr
           - AccepterRegion
+          - CicsStackNameDR
       - Label:
           default: Accepter VPC (Leave default if not an accepter)
         Parameters:
@@ -47,7 +48,8 @@ Metadata:
         default: Accepter VPC CIDR block (network address)
       AccepterRegion:
         default: Accepter VPC Region
-      
+      CicsStackNameDR:
+        default: CICS stack name in DR
 
       TargetNetworkStackName:
         default: Target VPC network stack name
@@ -81,7 +83,7 @@ Parameters:
       - Development
       - Test
   RequesterOrAccepter:
-    Description: This VPC is a Requester or accepter
+    Description: This VPC is a Requester or accepter. (Main VPC is the requester)
     Type: String
     MinLength: 1
     AllowedValues:
@@ -89,16 +91,16 @@ Parameters:
       - Accepter
 
   RequesterNetworkStackName:
-    Description: The name of the network stack for requester VPC
+    Description: The name of the network stack for requester VPC (ignore if this template is deployed in DR)
     Type: String
     Default: pchc-prd-ase1-cics
     MinLength: 1
   AccepterVpcId:
-    Description: The VPC ID of the target/accepting of VPC peering connection. (VPC should be existing)
+    Description: The VPC ID of the target/accepting of VPC peering connection. (VPC should be existing, ignore if this template is deployed in DR)
     Type: String
     Default: vpc-0000
   AccepterCidr:
-    Description: The CIDR block for the target/accepter VPC (e.g. 10.0.0.0/23)
+    Description: The CIDR block for the target/accepter VPC (e.g. 10.0.0.0/23 , ignore if this template is deployed in DR)
     Type: String
     AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
     Default: 10.0.0.0/8
@@ -106,7 +108,12 @@ Parameters:
     Description: The Region code for the accepter VPC (e.g. us-west-1, us-west-2, etc.)
     Type: String
     Default: ''
-  
+
+  CicsStackNameDR:
+    Description: CICS Stack name of accepter (DR stack)
+    Type: String
+    Default: pchc-test-uw1-cics-dr
+
   TargetNetworkStackName:
     Description: The name of the network stack for accepter/target VPC
     Type: String
@@ -206,3 +213,15 @@ Resources:
           - !ImportValue
               'Fn::Sub': '${TargetNetworkStackName}-PrivateRouteTable3'
           - ''
+
+# Security group
+
+  AllowMainCicsToDrResources:
+    Description: Self referencing secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: allow connection from CICS in main region
+      GroupId: !ImportValue
+        'Fn::Sub': '${CicsStackNameDR}-CICSAPPSVRSecurityGroup'
+      IpProtocol: -1
+      CidrIp: !Ref RequesterCidrBlock
