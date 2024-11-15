@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: MIS AWS Glue ETL jobs email alert.
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - OrgName
+          - EnvName
+      - Label:
+          default: Email Configuration
+        Parameters:
+          - Email
+          - EnableEmailSubscription
+
+    ParameterLabels:
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      Email:
+        default: Recipient Email Address
+      EnableEmailSubscription:
+        default: Enable Email Subscription
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 11
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  Email:
+    Description: The email address where to send the notifications.
+    Type: String
+    Default: ""
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+  SnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Join [' ',[!Ref OrgName, !Ref EnvName, !Ref 'AWS::Region', SNS Topic]]
+      TopicName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], elt-job]]
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref Email
+      Protocol: email
+      TopicArn: !Ref SnsTopic
+
+  EventBridgeSNSPermission:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SnsTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "events.amazonaws.com"
+            Action: "sns:Publish"
+            Resource: !Ref SnsTopic
+
+  EtlJobEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern: >-
+        {
+          "detail-type": [
+            "Glue Job State Change", 
+            "Glue Job Run Status"
+            ],
+          "source": [
+            "aws.glue"
+            ],
+          "detail": {
+            "state": [
+              "FAILED", 
+              "SUCCEEDED"
+            ]
+          }
+        }
+      State: ENABLED
+      EventBusName: default
+      Targets:
+        - Id: EtlJobStatusNotification
+          Arn: !GetAtt SnsTopic.TopicArn
