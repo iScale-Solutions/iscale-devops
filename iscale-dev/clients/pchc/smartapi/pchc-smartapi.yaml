@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: ECS Fargate for PCHC API
+Description: ECS Fargate for PCHC API (SMARTAPI BACKEND)
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -37,7 +37,6 @@ Metadata:
           - Image
           - EnvBucket
           - ContainerPort
-          - EcrName
       - Label:
           default: Scheduler Configuration
         Parameters:
@@ -84,7 +83,7 @@ Parameters:
     Type: String
     MinLength: 3
     MaxLength: 9
-    Default: 'smart'
+    Default: 'smartapi'
   OrgName:
     Description: The name of the organization.
     Type: String
@@ -242,7 +241,7 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
 ###
-# ECS Section
+# SMARTAPI BACKEND SECTION
 ###
 
   # Role needed by ECS - task execution role
@@ -271,7 +270,14 @@ Resources:
                 Action: 
                   - s3:*
                   - s3-object-lambda:*
-                Resource: !Ref EnvBucket
+                Resource: !Join ['',['arn:aws:s3:::', !Ref EnvBucket]]
+              - Effect: Allow
+                Action: 
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
       ManagedPolicyArns:
         - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
         - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
@@ -410,6 +416,22 @@ Resources:
       SourceSecurityGroupId: !GetAtt ContainerSecurityGroup0.GroupId
 
 # allow jumpserver to docuDB
+
+  AllowJumphostToDocumentDB:
+    Condition: IsNotProd
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from Jumphost to Document DB
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - DocumentDBStack
+          - Outputs.DocuDBElasticSecurityGroup
+      FromPort: 27017
+      ToPort: 27017
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
 ###
 # Auto scaling Section
@@ -560,6 +582,12 @@ Outputs:
     Description: Endpoint URL
     Value: !Join ['', ['https://', !Ref DNSRecord]]
   
+  ECSCluster:
+    Description: Smartapi ECS Cluster
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub ${AWS::StackName}-EcsCluster
+
   EcsService:
-    Description: ecs service output
+    Description: Back end ECS service
     Value: !Ref ECSService

@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: PCHC Portal Amplify App
+Description: ECS Fargate for PCHC Portal (SMARTAPI FRONTEND)
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -10,6 +10,27 @@ Metadata:
           - Name
           - OrgName
           - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - SmartApiStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerHostName
+          - LoadBalancerCertificateArn
+      - Label:
+          default: Containers Configuration
+        Parameters:
+          - MinContainers
+          - MaxContainers
+          - AutoScalingTargetValue
+          - Image
+          - EnvBucket
+          - ContainerPort
 
     ParameterLabels:
       Name:
@@ -18,14 +39,38 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      SmartApiStackName:
+        default: Smartapi Stack Name
+      ClientDomainName:
+        default: Domain Name
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
+      LoadBalancerCertificateArn:
+        default: Load Balancer SSL Certificate ARN
+      MinContainers:
+        default: Minimum Running Containers
+      MaxContainers:
+        default: Maximum Running Containers
+      AutoScalingTargetValue:
+        default: Target Scaling Value
+      Image:
+        default: Container Image URI
+      EnvBucket:
+        default: Env Bucket Name
+      ContainerPort:
+        default: Container Port
 
 Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
     Type: String
     MinLength: 3
-    MaxLength: 12
-    Default: 'smart'
+    MaxLength: 9
+    Default: 'smartportal'
   OrgName:
     Description: The name of the organization.
     Type: String
@@ -42,6 +87,59 @@ Parameters:
       - Staging #Pre-production
       - Development #Regular day to day commit / deplay
       - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: 'pchc-test-uw2-smartapi-network'
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack.
+    Type: String
+    Default: 'pchc-test-uw2-sns'
+    MinLength: 1
+  SmartApiStackName:
+    Description: The name of the Smartapi stack.
+    Type: String
+    Default: 'pchc-test-uw2-smartapi'
+    MinLength: 1
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: pchcdev.com
+    MinLength: 1
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: ''
+    MaxLength: 12
+  LoadBalancerCertificateArn:
+    Description: SSL Certificate ARN for the ELB
+    Type: String
+    Default: arn:aws:acm:us-west-2:050821737631:certificate/715bd527-40f0-4b1c-9da6-5880131ac2a9
+  MinContainers:
+    Description: Minimum running containers. 
+    Type: Number
+    Default: 2
+  MaxContainers:
+    Description: Maximum running containers. 
+    Type: Number
+    Default: 40
+  AutoScalingTargetValue:
+    Description: Target percentage value for scaling. 
+    Type: Number
+    Default: 60
+  Image:
+    Type: String
+    Description: URI of image of the api pushed to ECR
+    Default: '050821737631.dkr.ecr.us-west-2.amazonaws.com/pchc-test-uw2-smartapi-s3-ecr-ecr:latest'
+  EnvBucket:
+    Type: String
+    Description: Bucket name where env file is stored
+    Default: 'pchc-test-uw2-smartapi-s3-ecr-ecr-env-var'
+  ContainerPort:
+    Type: Number
+    Default: 80    
 
 Mappings: 
   Fn::Transform:
@@ -58,20 +156,266 @@ Conditions:
 Resources:
 
 ###
-# AWS Amplify App
+# Load Balancer Stack
 ###
 
-  AmplifyApp:
-    Type: AWS::Amplify::App
+  ELBStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      Description: PCHC Portal Amplify App
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, app]]
-      Tags: 
-        - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, app]]      
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+        HealthCheckTimeoutSeconds: 3
+        HealthyThresholdCount: 2
+        UnhealthyThresholdCount: 2
+        HealthCheckIntervalSeconds: 5
+        TargetType: ip
+        HealthCheckPath: /
+        IdleTimeout: 60
+        XForwardedForHeader: preserve
+        PreserveHostHeader: true
+        TgStickinessEnable: true
+        TgStickinessType: app_cookie
+        TgStickinessAppCookieName: pchc
+        TgStickinessAppCookieDuration: 86400
+        TgDeregistrationDelay: 5
+
+###
+# SMARTAPI FRONTEND SECTION (SMARTAPI PORTAL)
+###
+
+# Role needed by ECS
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["", [!Ref Name, ExecutionRole]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: EnvBucketAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - s3:*
+                  - s3-object-lambda:*
+                Resource: !Join ['',['arn:aws:s3:::', !Ref EnvBucket]]
+              - Effect: Allow
+                Action: 
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
+
+# ECS Task Role for containers
+# attach permissions if containers/tasks need to access to some AWS services like s3, sqs, etc.
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+
+# ECS Task Definition
+  ECSTaskDefinition:
+    DependsOn:
+      - ELBStack
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, taskdef]]
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Memory: 2048
+      Cpu: 1024
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: !Join ['-', [!Ref Name, container]]
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          Essential: true
+          Image: !Ref Image
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: ecs
+
+  # ECS Fargate Service
+  ECSService:
+    DependsOn:
+      - ELBStack
+    Type: AWS::ECS::Service
+    Properties: 
+      ServiceName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, service]]
+      Cluster:
+        - Fn::ImportValue:
+            !Sub '${SmartApiStackName}-EcsCluster'
+      TaskDefinition: !GetAtt ECSTaskDefinition.TaskDefinitionArn
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+      DesiredCount: 1
+      # This may need to be adjusted if the container takes a while to start up
+      HealthCheckGracePeriodSeconds: 10
+      LaunchType: FARGATE
+      NetworkConfiguration: 
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - Fn::ImportValue:
+                !Sub "${NetworkStackName}-PrivateSubnetId1"
+            - Fn::ImportValue:
+                !Sub "${NetworkStackName}-PrivateSubnetId2"
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup0
+      LoadBalancers:
+        - ContainerName: !Join ['-',[!Ref Name, container]]
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn:
+            Fn::GetAtt:
+              - ELBStack
+              - Outputs.ApplicationTargetGroup
+
+  # Container security group
+  ContainerSecurityGroup0:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SecurityGroup for ECS Frontend
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, container-sg]]
+      VpcId: 
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      SecurityGroupIngress:
+        - FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort  
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+
+###
+# Auto scaling Section
+###
+
+  # Auto scaling role
+  ECSAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [application-autoscaling.amazonaws.com]
+            Action: ["sts:AssumeRole"]
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole"
+
+  # Auto scaling targets
+  ECSAutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref MinContainers
+      MaxCapacity: !Ref MaxContainers
+      ResourceId: 
+        Fn::Join:
+          - '/'
+          - - service
+            - Fn::ImportValue:
+                !Sub '${SmartApiStackName}-EcsCluster'
+            - GetAtt: ECSService.Name
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !GetAtt ECSAutoScalingRole.Arn
+
+  # Auto scaling policy
+  ECSAutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Join ['', [!Ref Name, AutoScalingPolicy]]
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSAutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 10
+        ScaleOutCooldown: 10
+        TargetValue: !Ref AutoScalingTargetValue
+
+###
+# CloudWatch Section
+###
+
+  # ECS Log group
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', [/ecs/, !Ref Name, taskdef]]
+
+###
+# Route53 Section
+###
+
+  # Add DNS record for the frontend portal
+  DNSRecord:
+    DependsOn:
+      - ELBStack
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']]
+      Comment: !Join ['', [Domain Name Record for, !Ref Name]]
+      RecordSets:
+        - Name: !If
+            - IsProd
+            - !Join ['.', [!Ref Name, !Ref ClientDomainName]]
+            - !Join ['', [!Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName]]
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::GetAtt:
+                - ELBStack
+                - Outputs.CanonicalHostedZoneID
+            DNSName:
+              Fn::GetAtt:
+                - ELBStack
+                - Outputs.DNSName
 
 Outputs:
+  ApplicationLoadBalancerDNSName:
+    Description: DNS name of the Application Load Balancer
+    Value:
+      Fn::GetAtt:
+        - ELBStack
+        - Outputs.DNSName
 
-  AmplifyAppId:
-    Description: Unique Id for the Amplify App
-    Value: !GetAtt AmplifyApp.AppId
+  Endpoint:
+    Description: Endpoint URL
+    Value: !Join ['', ['https://', !Ref DNSRecord]]
+  
+  EcsService:
+    Description: ecs service output
+    Value: !Ref ECSService
