@@ -24,6 +24,13 @@ Metadata:
           - InstancePort
           - UseFriendlyNames
           - TargetType
+          - XForwardedForHeader
+          - PreserveHostHeader
+          - TgStickinessEnable
+          - TgStickinessType
+          - TgStickinessAppCookieName
+          - TgStickinessAppCookieDuration
+          - TgDeregistrationDelay
       - Label:
           default: Network Configuration
         Parameters:
@@ -63,6 +70,20 @@ Metadata:
         default: Target type
       IdleTimeout:
         default: Idle Timeout
+      XForwardedForHeader:
+        default: X-Forwarded-For header
+      PreserveHostHeader:
+        default: Preserve host header
+      TgStickinessEnable:
+        default: Stickiness
+      TgStickinessType:
+        default: Stickiness Type
+      TgStickinessAppCookieName:
+        default: App cookie name
+      TgStickinessAppCookieDuration:
+        default: App cookie stickiness duration
+      TgDeregistrationDelay:
+        default: Target deregistration delay
       InstancePort:
         default: Instance Port
       CertificateId:
@@ -191,6 +212,47 @@ Parameters:
     Description: The number of Idle seconds before timeout
     Type: Number
     Default: 300
+  XForwardedForHeader:
+    Description: Preserve or remove the X-Forwarded-For header in the HTTP request before the ALB sends the request to the target
+    Type: String
+    Default: append
+    AllowedValues:
+      - append
+      - preserve
+      - remove
+  PreserveHostHeader:
+    Description: Indicates whether the ALB should preserve the Host header in the HTTP request and send it to the target without any change
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  TgStickinessEnable:
+    Description: Enable target stickiness or not
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  TgStickinessType:
+    Description: Stickiness Type
+    Type: String
+    Default: app_cookie
+    AllowedValues:
+      - app_cookie
+      - lb_cookie
+  TgStickinessAppCookieName:
+    Description: Name of the application-based cookie
+    Type: String
+    Default: ''
+  TgStickinessAppCookieDuration:
+    Description: Timeout seconds which requests from a client should be routed to the same target. After this time period expires, the application-based cookie is considered stale.
+    Type: Nunmber
+    Default: 86400 # 1 day
+  TgDeregistrationDelay:
+    Description: Target deregistration delay (seconds)
+    Type: Nunmber
+    Default: 300
   InstancePort:
     Description: The port on which the targets receive traffic.
     Type: Number
@@ -264,6 +326,7 @@ Conditions:
   IsEnableWebAcl: !Equals [!Ref EnableWebAcl, true]
   IsEnableAlarm: !Equals [!Ref EnableAlarm, true]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, true]
+  IsStickinessEnabled: !Equals [!Ref TgStickinessEnable, true]
 
 Resources: 
 
@@ -404,6 +467,10 @@ Resources:
             Value: true
           - Key: access_logs.s3.bucket
             Value: !Ref LoadBalancerAccessLogsBucket
+          - Key: routing.http.xff_header_processing.mode
+            Value: !Ref XForwardedForHeader
+          - Key: routing.http.preserve_host_header.enabled
+            Value: !Ref PreserveHostHeader
       Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name]]
       # Name: !If
       #   - UseFriendlyNames
@@ -530,6 +597,20 @@ Resources:
       VpcId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-VpcId'
+      TargetGroupAttributes: !If
+        - IsStickinessEnabled
+        - - Key: stickiness.enabled
+            Value: !Ref TgStickinessEnable
+          - Key: stickiness.type
+            Value: !Ref TgStickinessType
+          - Key: stickiness.app_cookie.cookie_name
+            Value: !Ref TgStickinessAppCookieName
+          - Key: stickiness.app_cookie.duration_seconds
+            Value: !Ref TgStickinessAppCookieDuration
+          - Key: deregistration_delay.timeout_seconds
+            Value: !Ref TgDeregistrationDelay
+        - - Key: deregistration_delay.timeout_seconds
+            Value: !Ref TgDeregistrationDelay
       Tags:
         - Key: Name
           Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name]]
