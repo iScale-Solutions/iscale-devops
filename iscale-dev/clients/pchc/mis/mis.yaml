@@ -287,8 +287,110 @@ Resources:
         UseFriendlyNames: FALSE
         LaunchTemplate: True
   
-  # added version strategy policy
+  # UPDATE (02/23) Apply S3 bucket policy and cors for mis-bucket
+  PortalS3BucketCors:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !GetAtt ServerStack.Outputs.AppServerS3BucketName
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - "https://mis-test.pchcdev.com"
+            AllowedMethods:
+              - GET
+              - POST
+              - PUT
+            AllowedHeaders:
+              - "*"
+            ExposedHeaders:
+              - ""
+  PortalS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !GetAtt ServerStack.Outputs.AppServerS3BucketName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Allow Xlsx GetObject to Microsoft URLs https://learn.microsoft.com/en-us/microsoft-365/enterprise/urls-and-ip-address-ranges?view=o365-worldwide#microsoft-365-common-and-office-online
+          - Sid: "AllowGetObjectXlsxToMicrosoftIps"
+            Effect: "Allow"
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource:
+              - !Sub "arn:aws:s3:::${ServerStack.Outputs.AppServerS3BucketName}/*.xlsx"
+            Condition:
+              IpAddress:
+                aws:SourceIp:
+                  - "13.107.6.171/32"
+                  - "13.107.18.15/32"
+                  - "13.107.140.6/32"
+                  - "52.108.0.0/14"
+                  - "52.244.37.168/32"
+                  - "20.20.32.0/19"
+                  - "20.190.128.0/18"
+                  - "20.231.128.0/19"
+                  - "40.126.0.0/18"
+                  - "13.107.6.192/32"
+                  - "13.107.9.192/32"
+                  - "2603:1006:1400::/40"
+                  - "2603:1016:2400::/40"
+                  - "2603:1026:2400::/40"
+                  - "2603:1036:2400::/40"
+                  - "2603:1046:1400::/40"
+                  - "2603:1056:1400::/40"
+                  - "2603:1063:2000::/38"
+                  - "2620:1ec:c::15/128"
+                  - "2620:1ec:8fc::6/128"
+                  - "2620:1ec:a92::171/128"
+                  - "2a01:111:f100:2000::a83e:3019/128"
+                  - "2a01:111:f100:2002::8975:2d79/128"
+                  - "2a01:111:f100:2002::8975:2da8/128"
+                  - "2a01:111:f100:7000::6fdd:6cd5/128"
+                  - "2a01:111:f100:a004::bfeb:88cf/128"
+                  - "2603:1006:2000::/48"
+                  - "2603:1007:200::/48"
+                  - "2603:1016:1400::/48"
+                  - "2603:1017::/48"
+                  - "2603:1026:3000::/48"
+                  - "2603:1027:1::/48"
+                  - "2603:1036:3000::/48"
+                  - "2603:1037:1::/48"
+                  - "2603:1046:2000::/48"
+                  - "2603:1047:1::/48"
+                  - "2603:1056:2000::/48"
+                  - "2603:1057:2::/48"
+                  - "2620:1ec:4::192/128"
+                  - "2620:1ec:a92::192/128"
+                  - "20.0.0.0/8" #Microsoft Whole CIDR
+          # Allow GetObject user photos via Referer
+          - Sid: "AllowGetObjectUserPhotosUsingReferer"
+            Effect: "Allow"
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource: 
+              - !Sub "arn:aws:s3:::${ServerStack.Outputs.AppServerS3BucketName}/user-photos/*.jpg"
+            Condition:
+              StringLike:
+                aws:Referer: !If [ IsProd, "https://mis.pchc.com.ph/*", "https://mis-test.pchcdev.com/*" ]
+          # Allow GetObject All files to the EC2 instance
+          - Sid: "AllowGetObjectAllFilesToMisServer"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/${ServerStack.Outputs.AppServerIamRole}"
+            Action: "s3:GetObject"
+            Resource: !Sub "arn:aws:s3:::${ServerStack.Outputs.AppServerS3BucketName}/*"
+          # Allow GetObject Logo to public
+          - Sid: "AllowGetObjectLogoToPublic"
+            Effect: "Allow"
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource: !Sub "arn:aws:s3:::${ServerStack.Outputs.AppServerS3BucketName}/assets/logo.svg"
+          
+              
+  # UPDATE (02/13) added version strategy IAM policy
   VersionStrategyUserGroup:
+    DependsOn:
+      - ServerStack
     Type: AWS::IAM::Group
     Properties:
       Policies:
@@ -890,3 +992,16 @@ Outputs:
         - Outputs.AppServerSecurityGroup
     Export: 
       Name: !Sub ${AWS::StackName}-MisServerStackSecurityGroupId
+
+  # PortalS3BucketCors:
+  #   Description: This is the MIS Portal's CORS policy
+  #   Value: !Ref PortalS3BucketCors
+  
+  # PortalS3BucketPolicy:
+  #   Descirption: This is the MIS Portal's S3 bucket policy
+  #   Value: !Ref PortalS3BucketPolicy
+
+  # VersionStrategyUserGroup:
+  #   Description: Add the bitbucket user into this group (Allow GetObject to MIS Portal's S3 bucket)
+  #   Value: !Ref VersionStrategyUserGroup
+  
