@@ -1,0 +1,917 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Pesonet20 Resources
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - DeletionProtection
+          - LoadBalancerCertificateArn
+          - LoadBalancerHostName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+      - Label:
+          default: StrongSwan Configuration
+        Parameters:
+          - StrongswanPPPPSK
+          - Strongswan3RDPSK
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DeletionProtection:
+        default: ELB deletion protection
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      LoadBalancerCertificateArn:
+        default: Load Balancer SSL Certificate ARN
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+      StrongswanPPPPSK:
+        default: StrongSwan PhilPassPlus Shared Key
+      Strongswan3RDPSK:
+        default: StrongSwan 3rd Party Shared Key
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: pesonet20
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com)
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: pchcdev.com
+    MinLength: 1
+  DeletionProtection:
+    Description: Set to true to enable deletion protection (for production only)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-00b8d9cb8a7161e41 #Default Amazon Linux 2 for Singapore
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: ''
+    MaxLength: 12
+  LoadBalancerCertificateArn:
+    Description: SSL Certificate for the ELB
+    Type: String
+    Default: arn:aws:acm:ap-southeast-1:470455329885:certificate/9f713d5d-cb7c-4e8e-acc2-46862d610ec8
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: pchc-dev-ase1-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: pchc-dev-ase1-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+##
+# Application Resources
+##
+
+# Database
+
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: 1000
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: mysql
+        EngineVersion: 8.0.40
+        Family: mysql8.0
+        InstanceType: !If [IsProd, db.t4g.2xlarge, db.t4g.micro]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+        StorageType: gp3 # more IOPS
+
+  DBSchedulerStack:
+    DependsOn:
+      - DBStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
+
+  AllowJumpHostIntoDB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.SecurityGroupId
+      FromPort:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.DBInstancePort
+      ToPort:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.DBInstancePort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  CacheStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        EncryptInTransit: TRUE
+        NodeType: cache.t3.micro
+        NumCacheClusters: 1
+        OrgName: !Ref OrgName
+        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: TRUE
+
+# ####
+# # Application - retired
+# ####
+
+#   NetworkAppELBStack:
+#     Type: AWS::CloudFormation::Stack
+#     Properties:
+#       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+#       Parameters:
+#         Name: !Join ['-', [!Ref Name, app]]
+#         EnvName: !Ref EnvName
+#         OrgName: !Ref OrgName
+#         CertificateArn: !Ref LoadBalancerCertificateArn
+#         DeletionProtection: !Ref DeletionProtection
+#         ElbProtocol: TCP
+#         ElbType: network
+#         InstancePort: 443
+#         NetworkStackName: !Ref NetworkStackName
+#         SNSStackName: !Ref SNSStackName
+
+# need to retain this stack because the EFS is shared to all applications.
+# no need to run any instances, set auto-scaling to 0
+
+  # ServerStack:
+  #   DependsOn:
+  #     - DBStack
+  #     # - AppServerDeployStack
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+  #     Parameters:
+  #       Name: !Join ['-', [!Ref Name,app]]
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       ASGMaxSize: 0
+  #       ASGMinSize: 0
+  #       ASGDesiredSize: 0
+  #       ClientDomainName: !Ref ClientDomainName
+  #       DatabaseEndpoint:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstanceAddress
+  #       DatabasePort:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBInstancePort
+  #       DatabaseSecurityGroupId:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.SecurityGroupId
+  #       InstanceAMI: !Ref InstanceAMI
+  #       InstanceKeyName: !Ref InstanceKeyName
+  #       InstancePort: 443
+  #       InstanceSubnet: Private
+  #       InstanceType: !If [IsProd, t3.large, t3.medium]
+  #       LoadBalancerPriority: 100
+  #       LoadBalancerHostName: !If [IsTest, pesonet20mbsuat, pesonet20mbs]
+  #       # LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkAppELBStack]]
+  #       LoadBalancerStackType: Network
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SharedSecretId:
+  #         Fn::GetAtt:
+  #           - DBStack
+  #           - Outputs.DBSecretManagerKeyId
+  #       SNSStackName: !Ref SNSStackName
+  #       UseFriendlyNames: FALSE
+
+###
+# App Server Treasury
+###
+
+  TreasuryELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, tre]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        DeletionProtection: !Ref DeletionProtection
+        InstancePort: 80
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  TreasuryDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, tre]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  TreasuryServerStack:
+    DependsOn:
+      - DBStack
+      - TreasuryDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, tre]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGMaxSize: 3
+        ASGDesiredSize: 3
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 80
+        #InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
+        InstanceSubnet: Private
+        InstanceType: t3.medium
+        LoadBalancerHostName: !If [IsTest, pesonet20-test, pesonet20]
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref TreasuryELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
+        VolumeSize: 15 #GB 
+        VolumeType: gp2
+        LaunchTemplate: True
+
+  TreasurySchedulerStack:
+    DependsOn:
+      - DBStack
+      - TreasuryServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - TreasuryDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - TreasuryDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+###
+# API
+###
+
+  NetworkAPIELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, api]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        DeletionProtection: !Ref DeletionProtection
+        ElbProtocol: TCP
+        ElbType: network
+        InstancePort: 443
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  APIServerDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,api]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  APIServerStack:
+    DependsOn:
+      - DBStack
+      - APIServerDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,api]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGMaxSize: 3
+        ASGDesiredSize: 3
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        ExternalEFSID:
+          Fn::GetAtt:
+            - TreasuryServerStack
+            - Outputs.AppServerEFS
+        ExternalEFSSecurityGroup:
+          Fn::GetAtt:
+            - TreasuryServerStack
+            - Outputs.AppServerEFSSecurityGroup
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 443
+        #InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
+        InstanceSubnet: Private
+        InstanceType: t3.medium
+        LoadBalancerHostName: !If [IsTest, 'api-pesonet20-test', api-pesonet20]
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkAPIELBStack]]
+        LoadBalancerStackType: Network
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
+        VolumeSize: 15 #GB 
+        VolumeType: gp2
+        LaunchTemplate: True
+
+  AllowHTTPtoPesonetAPIAppServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow HTTP
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - APIServerStack
+          - Outputs.AppServerSecurityGroup
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  APIServerSchedulerStack:
+    DependsOn:
+      - DBStack
+      - APIServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - APIServerDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - APIServerDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+###
+# Sidekiq
+###
+
+  NetworkSidekiqELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, kiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        DeletionProtection: !Ref DeletionProtection
+        ElbProtocol: TCP
+        ElbType: network
+        InstancePort: 443
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  SidekiqServerDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,skiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  SidekiqServerStack:
+    DependsOn:
+      - DBStack
+      - SidekiqServerDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,skiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGMaxSize: 1
+        ASGDesiredSize: 1
+        CacheEndpoint:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.CachePrimaryEndpoint
+        CachePort:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.ClusterPort
+        CacheSecurityGroupId:
+          Fn::GetAtt:
+            - CacheStack
+            - Outputs.SecurityGroupId
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        ExternalEFSID:
+          Fn::GetAtt:
+            - TreasuryServerStack
+            - Outputs.AppServerEFS
+        ExternalEFSSecurityGroup:
+          Fn::GetAtt:
+            - TreasuryServerStack
+            - Outputs.AppServerEFSSecurityGroup
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 443
+        #InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
+        InstanceSubnet: Private
+        InstanceType: !If [IsProd, t3.2xlarge, t3.medium]
+        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkSidekiqELBStack]]
+        LoadBalancerStackType: Network
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
+        VolumeSize: 15 #GB 
+        VolumeType: gp2
+        LaunchTemplate: True
+
+  SidekiqServerSchedulerStack:
+    DependsOn:
+      - DBStack
+      - SidekiqServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - SidekiqServerDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - SidekiqServerDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+  BackupStack:
+    DependsOn:
+      - DBStack
+      - TreasuryServerStack
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstanceARN
+            - Fn::GetAtt:
+              - TreasuryServerStack
+              - Outputs.AppServerEFSArn
+        BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
+
+  Dashboard:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+        DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        DashboardBody: !Sub
+          - |
+            {
+              "widgets": [
+                {
+                  "height": 12,
+                  "width": 6,
+                  "y": 0,
+                  "x": 0,
+                  "type": "alarm",
+                  "properties": {
+                    "title": "Alarms",
+                    "alarms": [
+                      "${CACHE_HIGH_CPU}",
+                      "${CACHE_LOW_MEM}",
+                      "${DB_HIGH_CPU}",
+                      "${DB_LOW_STORAGE}",
+                      "${DB_LOW_CPU_CREDIT}",
+                      "${DB_ERRORS}",
+                      "${DB_ERROR_DENIED}",
+                      "${TG_UNHEALTHY}",
+                      "${TG_SLOW}"
+                    ]
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 6,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS" } ],
+                      [ "AWS/ElastiCache", "CPUUtilization", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis" } ],
+                      [ "AWS/EC2", "CPUUtilization", "ImageId", "${APP_SERVER_AMI}" , { "label": "App Servers" }]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "CPU",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "label": "Utilization"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 6,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ { "expression": "100-((m4/(16*1024*1000000))*100)", "label": "RDS (memory)", "id": "e1", "region": "${REGION}" } ],
+                      [ "AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m4", "visible": false } ],
+                      [ "AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis (memory)" } ],
+                      [ "CWAgent", "mem_used_percent", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "${APP_SERVER_TYPE}" , { "label": "App Servers (memory)" }],
+                      [ { "expression": "100-(m1/(20*1024*1000000)*100)", "label": "RDS (disk)", "id": "e2", "region": "${REGION}" } ],
+                      [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m1", "visible": false } ],
+                      [ "CWAgent", "disk_used_percent", "path", "/", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "${APP_SERVER_TYPE}", "device", "nvme0n1p1", "fstype", "xfs" , { "label": "App Servers (disk)" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "Memory / Storage",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "label": "Utilization"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 12,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
+                      [ "AWS/RDS", "ReadLatency", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" } ],
+                      [ ".", "WriteLatency", ".", ".", { "label": "RDS Write" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "Performance",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "showUnits": true,
+                        "label": "Time"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 18,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/EC2", "NetworkIn", "ImageId", "${APP_SERVER_AMI}", { "label": "App Servers (In)" }],
+                      [ ".", "NetworkOut", ".", ".", { "label": "App Servers (out)" }],
+                      [ "AWS/ApplicationELB", "ProcessedBytes", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
+                      [ "AWS/RDS", "NetworkReceiveThroughput", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS (In)" }],
+                      [ ".", "NetworkTransmitThroughput", ".", ".", { "label": "RDS (Out)" }],
+                      [ "AWS/ElastiCache", "NetworkBytesIn", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis (In)" }],
+                      [ ".", "NetworkBytesOut", ".", ".", { "label": "Redis (Out)" }]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "title": "Network",
+                    "region": "${REGION}",
+                    "period": 300,
+                    "stat": "Average",
+                    "legend": {
+                      "position": "bottom"
+                    },
+                    "yAxis": {
+                      "left": {
+                        "label": "Volume"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 12,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/RDS", "ReadThroughput", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" }],
+                      [ ".", "WriteThroughput", ".", ".", { "label": "RDS Write" }],
+                      [ "AWS/EFS", "DataReadIOBytes", "FileSystemId", "${EFS_ID}", { "label": "EFS Read" }],
+                      [ ".", "DataWriteIOBytes", ".", ".", { "label": "EFS Write" }]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "I/O",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "label": "Count",
+                        "showUnits": false
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 18,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB HTTP 5XX_Count" } ],
+                      [ ".", "HTTPCode_ELB_4XX_Count", ".", ".", { "label": "ELB HTTP 4XX_Count" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "title": "Error Count",
+                    "period": 300,
+                    "stat": "Average"
+                  }
+                }
+              ]
+            }
+          - CACHE_HIGH_CPU: !GetAtt [CacheStack, Outputs.HighCPUAlarm]
+            CACHE_LOW_MEM: !GetAtt [CacheStack, Outputs.LowMemoryAlarm]
+            DB_HIGH_CPU: !GetAtt [DBStack, Outputs.DBHighCPUAlarm]
+            DB_LOW_STORAGE: !GetAtt [DBStack, Outputs.DBLowStorageAlarm]
+            DB_LOW_CPU_CREDIT: !GetAtt [DBStack, Outputs.CPUCreditBalanceAlarm]
+            DB_ERRORS: !GetAtt [DBStack, Outputs.DBErrorsAlarm]
+            DB_ERROR_DENIED: !GetAtt [DBStack, Outputs.DBErrorDeniedAlarm]
+            TG_SLOW: !GetAtt [APIServerStack, Outputs.AppServerSlowTargetGroupAlarm]
+            TG_UNHEALTHY: !GetAtt [APIServerStack, Outputs.UnhealthyTargetGroupAlarm]
+            DB_INSTANCE_ID: !GetAtt [DBStack, Outputs.DBInstanceName]
+            CACHE_INSTANCE_ID: !Join ['-', [!GetAtt [CacheStack, Outputs.ElasticacheReplicationGroup], '001']]
+            REGION: !Ref 'AWS::Region'
+            ELB_FULL_NAME: !GetAtt [TreasuryELBStack, Outputs.LoadBalancerFullName]
+            ASG_GROUP_NAME: "CodeDeploy_pchc-prd-ase1-pesonet-APIServerDeployStack-1QYHN20GUEB0A-CodeDeployDeploymentGroup-1VK61UCQ8GMCY_d-KRKVJ95SJ" #First time, it will be empty, that's OK
+            APP_SERVER_AMI: !Ref InstanceAMI
+            APP_SERVER_ID: i-0d6e53ff58d0902e6 #Hardcoded for now
+            APP_SERVER_TYPE: t3.medium
+            EFS_ID: !GetAtt [APIServerStack, Outputs.AppServerEFS]
+
+# Outputs:
+
+#   DeploymentUserGroup:
+#     Description: Add the BitBucket user into this group
+#     Value:
+#       Fn::GetAtt:
+#         - AppServerDeployStack
+#         - Outputs.DeploymentUserGroup

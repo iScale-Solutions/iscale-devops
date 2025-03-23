@@ -1,0 +1,432 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template to deploy EC2 with SonarQube and PostgreSQL using Docker Compose
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 16
+    Default: sonarqube
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers, and hyphens
+    MaxLength: 16
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  S3BucketPath:
+    Description: S3 bucket name where SQL dump is stored
+    Type: String
+    Default: "iscale-devops/iscale-internal-infra/sonarqubev2"
+    MinLength: 3
+    MaxLength: 63
+  SQLDumpFileName:
+    Description: SQL dump file name in S3 bucket
+    Type: String
+    Default: sonarqube_20250317_004159.sql
+    MinLength: 3
+    MaxLength: 63
+  NetworkStackName:
+    Description: Name of the network stack to reference VPC and Subnets
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 3
+    MaxLength: 63 
+  AmiId:
+    Description: Amazon Machine Image ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0b6d6dacf350ebc82  # Amazon Linux 2023 AMI
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: "jana-key | RSA" 
+  InstanceSize:
+    Description: Size of the EC2 instance
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Resources:
+  SonarQubeEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceSize
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyName        
+      SubnetId: 
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId1'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+      SecurityGroupIds:
+        - !Ref EC2InstanceSecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y docker amazon-ssm-agent awscli jq
+          systemctl start amazon-ssm-agent docker
+          systemctl enable amazon-ssm-agent docker
+          curl -L https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose
+          chmod ug+x /usr/local/bin/docker-compose
+
+          # Add ec2-user to docker group
+          usermod -aG docker ec2-user
+
+          # Fetch secrets from Secrets Manager
+          SECRET=$(aws secretsmanager get-secret-value --secret-id ${GeneratedSecret} --region ${AWS::Region} --query 'SecretString' --output text)
+          DB_NAME=$(echo $SECRET | jq -r '.SONARQUBE_DB_NAME')
+          DB_USERNAME=$(echo $SECRET | jq -r '.SONARQUBE_DB_USERNAME')
+          DB_PASSWORD=$(echo $SECRET | jq -r '.SONARQUBE_DB_PASSWORD')
+          DB_HOST=$(echo $SECRET | jq -r '.SONARQUBE_DB_HOST')
+          ROOT_USER=$(echo $SECRET | jq -r '.ROOT_USER')
+
+          # Create docker-compose.yml
+          mkdir -p /opt/sonarqube
+          cat <<EOF > /opt/sonarqube/docker-compose.yml
+          services:
+            sonarqube:
+              image: sonarqube:latest
+              ports:
+                - "9000:9000"
+              environment:
+                - SONAR_JDBC_URL=jdbc:postgresql://postgres:5432/sonarqube
+                - SONAR_JDBC_USERNAME=$DB_USERNAME
+                - SONAR_JDBC_PASSWORD=$DB_PASSWORD
+              depends_on:
+                - postgres  # This will handle startup order but not full readiness
+              restart: always
+              ulimits:
+                nproc: 8192
+                nofile:
+                  soft: 131072
+                  hard: 131072
+
+            postgres:
+              image: postgres:14
+              environment:
+                - POSTGRES_USER=$DB_USERNAME
+                - POSTGRES_PASSWORD=$DB_PASSWORD
+                - POSTGRES_DB=$DB_NAME
+              volumes:
+                - pg_data:/var/lib/postgresql/data
+              restart: always
+
+          volumes:
+            pg_data:
+          EOF
+
+          # Start ONLY PostgreSQL first
+          cd /opt/sonarqube
+          docker-compose up -d postgres
+
+          # Wait until PostgreSQL is ready
+          echo "Waiting for PostgreSQL to be ready..."
+          until docker exec $(docker ps -qf "name=postgres") pg_isready -U sonarqube; do
+            sleep 5
+          done
+          echo "PostgreSQL is ready!"
+
+          # Download pg_dump.sql from S3
+          echo "Downloading SQL dump from S3..."
+          aws s3 cp s3://${S3BucketPath}/${SQLDumpFileName} /opt/sonarqube/pg_dump.sql
+          #aws s3 cp s3://iscale-devops/iscale-internal-infra/sonarqubev2/sonarqube_20250317_004159.sql /opt/sonarqube/pg_dump.sql
+
+          # Check if database is empty
+          echo "Checking if database is empty..."
+          TABLE_COUNT=$(docker exec $(docker ps -qf "name=postgres") psql -U sonarqube -d sonarqube -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" | xargs)
+
+          if [ "$TABLE_COUNT" -eq "0" ]; then
+            echo "Database is empty. Restoring backup..."
+            docker exec -i $(docker ps -qf "name=postgres") psql -U sonarqube -d sonarqube < /opt/sonarqube/pg_dump.sql
+            echo "Database restore complete."
+          else
+            echo "Database already contains tables. Skipping restore."
+          fi
+
+          # Increase system limits for SonarQube
+          sysctl -w vm.max_map_count=524288
+          sysctl -w fs.file-max=131072
+          sudo tee -a /etc/sysctl.conf <<EOF
+          vm.max_map_count=524288
+          fs.file-max=131072
+          EOF
+          sudo sysctl -p
+
+          # Start SonarQube now that DB is ready and restored
+          echo "Starting SonarQube..."
+          cd /opt/sonarqube
+          docker-compose up -d sonarqube
+          echo "SonarQube started successfully."
+
+          systemctl is-enabled crond &>/dev/null \
+            && echo "skipping installation since crond is enabled" \
+            || echo "installing cronie" && yum install -y cronie && systemctl enable crond && systemctl start crond && echo "cronie installed and enabled"
+
+          # Adding cron job to backup database daily at 1:00 AM, upload to S3, and cleanup old backups
+          echo "Adding cron job to backup database daily at 1:00 AM and upload to S3..."
+          echo "0 1 * * * root /opt/sonarqube/backup.sh" > /etc/cron.d/sonarqube-backup
+          cat <<EOF > /opt/sonarqube/backup.sh
+          #!/bin/bash
+          docker exec $(docker ps -qf "name=postgres") pg_dump -U sonarqube -d sonarqube > /opt/sonarqube/sonarqube_db_backup_$(date +%F-%H%M%S).sql
+          aws s3 cp /opt/sonarqube/sonarqube_db_backup_*.sql s3://${S3BucketPath}/backups/
+          rm -f /opt/sonarqube/sonarqube_db_backup_*.sql
+          EOF
+          chmod ug+x /opt/sonarqube/backup.sh
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+# Generate a random password for PostgreSQL
+  GeneratedSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: "Auto-generated secret for SonarQube"
+      GenerateSecretString:
+        SecretStringTemplate: |
+          {
+            "ROOT_USER": "root",
+            "SONARQUBE_DB_NAME": "sonarqube",
+            "SONARQUBE_DB_USERNAME": "sonarqube",
+            "SONARQUBE_DB_HOST": "localhost"
+          }
+        GenerateStringKey: SONARQUBE_DB_PASSWORD 
+        PasswordLength: 30
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'ec2-role']] 
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'EC2S3AccessPolicy']] 
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:List*
+                Resource:
+                  - arn:aws:s3:::iscale-devops/iscale-internal-infra/sonarqubev2/*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  # - s3:GetObject (uncomment if needed)
+                Resource:
+                  - arn:aws:s3:::iscale-devops/iscale-internal-infra/sonarqubev2/backups/*
+        - PolicyName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'SecretsManagerAccess']] 
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref GeneratedSecret
+          
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'ec2-profile']] 
+      Roles:
+        - !Ref EC2Role
+
+  EC2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access for SonarQube
+      VpcId:         
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          Description: SonarQube SSH access (need jump host)
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: tcp
+          Description: SonarQube HTTP access
+          FromPort: 9000
+          ToPort: 9000
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+  
+  SonarQubeTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]] 
+      VpcId: 
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-VpcId
+      Protocol: HTTP
+      Port: 9000
+      TargetType: instance
+      Targets:
+           - Id: !Ref SonarQubeEC2Instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckPort: traffic-port
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  # once the application is stable, we can comment out the following: HTTPSListenerRule and DNSRecord
+  HTTPSListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: arn:aws:elasticloadbalancing:us-west-2:338284463834:listener/app/iscale-dev-stg-uw2-alb-loadbal/df36d54b3af513a9/3192c85b49bab3eb
+      Priority: 10
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - sonarqubev2.iscale-software.com
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref SonarQubeTargetGroup
+  
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: "Z3IVOZ67OCE9RL"
+      Name: "sonarqubev2.iscale-software.com." 
+      Type: "A"
+      AliasTarget:
+        HostedZoneId: "Z1H1FL5HABSF5"
+        DNSName: "dualstack.iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com"
+        EvaluateTargetHealth: false
+
+
+Outputs:
+  EC2InstanceId:
+    Description: Instance ID of the EC2 Instance running SonarQube
+    Value: !Ref SonarQubeEC2Instance
+    Export:
+      Name: !Sub "${AWS::StackName}-SonarQubeInstanceId"
+  EC2PrivateIP:
+    Description: Private IP of EC2 Instance running SonarQube
+    Value: !GetAtt SonarQubeEC2Instance.PrivateIp
+    Export:
+      Name: !Sub "${AWS::StackName}-SonarQubePrivateIP"
+  DNSRecord:
+    Description: DNS Record for SonarQube
+    Value: !Ref DNSRecord
+    Export:
+      Name: !Sub "${AWS::StackName}-SonarQubeDNSRecord"
+  TargetGroup:
+    Description: Target Group for SonarQube
+    Value: !Ref SonarQubeTargetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-SonarQubeTargetGroup"
+  SecurityGroup:
+    Description: Security Group for SonarQube
+    Value: !Ref EC2InstanceSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-SonarQubeSecurityGroup"
+  InstanceProfile:
+    Description: Instance Profile for SonarQube
+    Value: !Ref EC2InstanceProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-SonarQubeInstanceProfile"
+  Role:
+    Description: Role for SonarQube
+    Value: !Ref EC2Role
+    Export:
+      Name: !Sub "${AWS::StackName}-SonarQubeRole"
+  Secret:
+    Description: Secret for SonarQube
+    Value: !Ref GeneratedSecret
+    Export:
+      Name: !Sub "${AWS::StackName}-SonarQubeSecret"
+
+  
+
+
+# step 1) create the stack
+# aws cloudformation create-stack \
+#     --stack-name iscale-dev-uw2-sonarqubev2 \
+#     --template-body file://sonarqubev2.yaml \
+#     --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+#     --parameters \
+#       ParameterKey=Name,ParameterValue=sonarqubev2 \
+#       ParameterKey=OrgName,ParameterValue=iscale \
+#       ParameterKey=EnvName,ParameterValue=Staging
