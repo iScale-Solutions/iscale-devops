@@ -22,6 +22,14 @@ Metadata:
           - CreatePrivate
           - NatInstanceOrGateway
           - CreateMultipleNatGateway
+          - CreateInternal
+      - Label:
+          default: Jump Host
+        Parameters:
+          - CreateJumpHost
+          - JumpHostAMI
+          - JumpHostHostname
+          - Keyname
 
     ParameterLabels:
       Name:
@@ -46,6 +54,14 @@ Metadata:
         default: "Create NAT Instance or NAT Gateway for internet access"
       CreateMultipleNatGateway:
         default: "Create Multiple Nat Gateways"
+      CreateInternal:
+        default: "Create Internal Subnets"
+      CreateJumpHost:
+        default: Create Jump Host
+      JumpHostAMI:
+        default: Jump host AMI
+      JumpHostHostname:
+        default: Jump host hostname (e.g. jump)
 
 Parameters: 
   Name:
@@ -100,6 +116,13 @@ Parameters:
     AllowedValues:
       - true
       - false
+  CreateInternal:
+    Description: Set to true if creation of internal subnet is enabled. Otherwise, disabled.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
   NatInstanceOrGateway:
     Description: |
       Select NAT instance if you need to cut cost and expects low outgoing internet traffic. This only creates 1 NAT instance for all AZ.
@@ -119,6 +142,26 @@ Parameters:
     AllowedValues:
       - true
       - false
+  CreateJumpHost:
+    Description: Creates resources for a jump host into the private network
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  JumpHostAMI:
+    Description: Jump host AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0520f976ad2e6300c # change to your AMI depends on region | AL2
+  JumpHostname:
+    Description: Jump host hostname (optional)
+    Type: String
+    Default: ''
+  Keyname:
+    Description: The name of the EC2 key pair to allow SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: ''
+  
 
 Conditions: 
   IsUsEast: !Equals [!Ref 'AWS::Region', us-east-1]
@@ -134,6 +177,11 @@ Conditions:
   IsMultiAzPrivateAndCreateMultipleNatGateway: !And [Condition: IsMultiAzAndPrivate, Condition: IsNatGateway, Condition: IsCreateMultipleNatGateway] # create multiple nat gateway
 
   IsEitherMultiAzOrPrivate: !Or [Condition: IsMultiAz, Condition: IsCreatePrivate]
+
+  IsCreateInternal: !Equals [!Ref CreateInternal, true]
+  IsMultiAzandInternal: !And [Condition: IsMultiAz, Condition: IsCreateInternal] 
+
+  IsCreateJumpHost: !Equals [!Ref CreateJumpHost, true]
 
 Mappings: 
   EnvShort:
@@ -297,13 +345,14 @@ Resources:
 
   InternalSubnetNetworkAclAssociation1:
     Type: AWS::EC2::SubnetNetworkAclAssociation
+    Condition: IsCreateInternal
     Properties: 
       NetworkAclId: !Ref DefaultNetworkAcl
       SubnetId: !Ref InternalSubnet1
 
   InternalSubnetNetworkAclAssociation2:
     Type: AWS::EC2::SubnetNetworkAclAssociation
-    Condition: IsMultiAz
+    Condition: IsMultiAzandInternal
     Properties: 
       NetworkAclId: !Ref DefaultNetworkAcl
       SubnetId: !Ref InternalSubnet2
@@ -386,6 +435,7 @@ Resources:
 
 # Internal Subnet (AZ1)
   InternalSubnet1:
+    Condition: IsCreateInternal
     Type: AWS::EC2::Subnet
     Properties:
       AvailabilityZone: !Select
@@ -400,7 +450,7 @@ Resources:
 # Internal Subnet (AZ2)
   InternalSubnet2:
     Type: AWS::EC2::Subnet
-    Condition: IsMultiAz
+    Condition: IsMultiAzandInternal
     Properties:
       AvailabilityZone: !Select
         - 1
@@ -644,13 +694,14 @@ Resources:
 
   InternalSubnetRouteTableAssociation1:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: IsCreateInternal
     Properties:
       SubnetId: !Ref InternalSubnet1
       RouteTableId: !Ref DefaultRoutTable
 
   InternalSubnetRouteTableAssociation2:
     Type: AWS::EC2::SubnetRouteTableAssociation
-    Condition: IsMultiAz
+    Condition: IsMultiAzandInternal
     Properties:
       SubnetId: !Ref InternalSubnet2
       RouteTableId: !Ref DefaultRoutTable
@@ -710,6 +761,67 @@ Resources:
                   # - logs:DescribeLogStreams
                 Resource: "*"
 
+
+###
+# Jump Host
+###
+
+  JumpHostRole:
+    Condition: IsCreateJumpHost
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  JumpHostInstanceProfile:
+    Condition: IsCreateJumpHost
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+        - !Ref JumpHostRole
+
+  JumpHostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref DefaultVPC
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump, host, security, group]]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump, host, security, group]]
+
+  JumpHost:
+    Condition: IsCreateJumpHost
+    Type: AWS::EC2::Instance
+    Properties:
+      KeyName: !Ref Keyname
+      InstanceType: t3.nano
+      ImageId: !Ref JumpHostAMI
+      IamInstanceProfile: !Ref JumpHostInstanceProfile
+      DisableApiTermination: false
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          GroupSet: 
+            - !Ref JumpHostSecurityGroup
+          SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump, host]]
+
+
 Outputs:
   VpcId: 
     Description: The ID of the VPC
@@ -765,20 +877,21 @@ Outputs:
       Name: !Sub "${AWS::StackName}-PrivateSubnetIds"
 
   InternalSubnetId1: 
+    Condition: IsCreateInternal
     Description: Internal Subnet ID for AZ1
     Value: !Ref InternalSubnet1
     Export:
       Name: !Sub "${AWS::StackName}-InternalSubnetId1"
 
   InternalSubnetId2: 
-    Condition: IsMultiAz
+    Condition: IsMultiAzandInternal
     Description: Internal Subnet ID for AZ2
     Value: !Ref InternalSubnet2
     Export:
       Name: !Sub "${AWS::StackName}-InternalSubnetId2"
 
   InternalSubnetIds:
-    Condition: IsMultiAz
+    Condition: IsMultiAzandInternal
     Description: Internal Subnet Ids
     Value: !Join [',', [!Ref InternalSubnet1, !Ref InternalSubnet2]]
     Export:
