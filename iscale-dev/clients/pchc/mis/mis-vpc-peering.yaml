@@ -24,6 +24,7 @@ Metadata:
           - TargetNetworkStackNamePddtseod
           - TargetNetworkStackNamePddts
           - TargetNetworkStackNamePesonet
+          - TargetNetworkStackNamePesonet20
           - TargetNetworkStackNamePhilpass
           - TargetNetworkStackNameCics
       - Label:
@@ -53,6 +54,8 @@ Metadata:
         default: PDDTS network stack name
       TargetNetworkStackNamePesonet:
         default: Pesonet network stack name
+      TargetNetworkStackNamePesonet20:
+        default: Pesonet20 network stack name
       TargetNetworkStackNamePhilpass:
         default: Philpass network stack name
       TargetNetworkStackNameCics:
@@ -119,11 +122,17 @@ Parameters:
     Type: String
     Default: pchc-prd-ase1-pddts-network
     MinLength: 1
-# target vpc 6 - PESONET
+# target vpc 6a - PESONET
   TargetNetworkStackNamePesonet:
     Description: The name of the network stack for target VPC
     Type: String
     Default: pchc-prd-ase1-pesonet-network
+    MinLength: 1
+# target vpc 6b - PESONET20
+  TargetNetworkStackNamePesonet20:
+    Description: The name of the network stack for target VPC
+    Type: String
+    Default: pchc-prd-ase1-pesonet20-network
     MinLength: 1
 # target vpc 7 - PHILPASS
   TargetNetworkStackNamePhilpass:
@@ -540,7 +549,7 @@ Resources:
       SourceSecurityGroupId: sg-02c616e87572b0a3f
 
 ###
-# VPC Peering 6
+# VPC Peering 6a
 # MIS - PESONET
 ###
 
@@ -602,6 +611,71 @@ Resources:
       FromPort: 0
       ToPort: 65535
       SourceSecurityGroupId: sg-0a9388d5c0fe470c9
+
+
+###
+# VPC Peering 6b
+# MIS - PESONET20
+###
+
+  VPCPeeringToPesonet20:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: mis-pesonet20
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+
+        # Requester VPC MIS
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable1'
+        RequesterPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-PrivateRouteTable2'
+
+        # Target VPC PESONET20
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet20}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet20}-VpcCidrBlock'
+        TargetPublicRouteTable: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet20}-PublicRouteTable'
+        TargetPrivateRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet20}-PrivateRouteTable1'
+        TargetPrivateRouteTable2: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet20}-PrivateRouteTable2'
+        TargetInternalRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackNamePesonet20}-InternalRouteTable1'
+
+  AllowRedshifToPesonet20:
+    Condition: IsProd
+    Description: Allow MIS-Redshift secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Allow MIS-Redshift secgroup
+      GroupId: sg-0384ef295e8248121 # pesonet20 db secgroup
+      IpProtocol: TCP
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !ImportValue
+        'Fn::Sub': '${MisEtlStackName}-RedshiftSecurityGroupId'
+
+  AllowSelfReferencePesonet20:
+    Condition: IsProd
+    Description: Self referencing secgroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      Description: Self referencing secgroup
+      GroupId: sg-0384ef295e8248121 # pesonet20 db secgroup
+      IpProtocol: TCP
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: sg-0384ef295e8248121
 
 ###
 # VPC Peering 7
