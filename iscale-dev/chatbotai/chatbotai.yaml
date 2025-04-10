@@ -1,11 +1,6 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: This CloudFormation stack will deploy the Chatbot AI Infrastructure
 
-Fn::Transform:
-  Name: AWS::Include
-  Parameters:
-    Location: s3://iscale-dev-cloudformation/include/conditions.yaml
-
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -68,7 +63,7 @@ Parameters:
   OrgName:
     Description: The name of the organization
     Type: String
-    Default: iscale-internal
+    Default: iscale-dev
     AllowedPattern: '^[a-z]+(-[a-z]+)*$'
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
     MaxLength: 20
@@ -84,8 +79,8 @@ Parameters:
   ClientDomainName:
     Description: The domain name for the client
     Type: String
-    Default: chatbotai.iscale-software.com
-    AllowedPattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+    Default: iscale-software.com
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
     ConstraintDescription: Domain name must only contain lowercase letters, numbers and hyphen
     MaxLength: 30
   DeletionProtection:
@@ -98,7 +93,7 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-01cb3912348e56e11 
+    Default: ami-0edf4a7e3058418ad # AL2
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -123,7 +118,7 @@ Parameters:
   NetworkStackName:
     Description: The name of the network stack
     Type: String
-    Default: iscale-internal-dev-uw2-chatbotai-network
+    Default: iscale-dev-dev-uw2-network
     MinLength: 1
   SNSStackName:
     Description: The name of the SNS stack
@@ -142,7 +137,10 @@ Parameters:
     Description: ARN of the ALB listener
     Type: String
     Default: arn:aws:elasticloadbalancing:us-west-2:338284463834:listener/app/iscale-dev-stg-uw2-alb-loadbal/df36d54b3af513a9/3192c85b49bab3eb
-
+  ALBDNSName:
+    Description: DNS name of the ALB
+    Type: String
+    Default: iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com
 
 Mappings:
   Fn::Transform:
@@ -151,42 +149,10 @@ Mappings:
       Location: s3://iscale-dev-cloudformation/include/mappings.yaml
 
 Conditions:
-  IsDev:
-    Fn::Equals:
-      - Ref: EnvName
-      - Development
-  IsTest:
-    Fn::Equals:
-      - Ref: EnvName
-      - Test
-  IsStaging:
-    Fn::Equals:
-      - Ref: EnvName
-      - Staging
-  IsProd: 
-    Fn::Equals:
-      - Ref: EnvName
-      - Production
-  IsNotDev: 
-    Fn::Not:
-      - Condition: IsDev
-  IsNotTest: 
-    Fn::Not:
-      - Condition: IsTest
-  IsNotStaging: 
-    Fn::Not:
-      - Condition: IsStaging
-  IsNotProd: 
-    Fn::Not:
-      - Condition: IsProd
-  IsStagingOrProd: 
-    Fn::Or:
-      - Condition: IsStaging
-      - Condition: IsProd
-  IsDevOrStaging:
-    Fn::Or:
-      - Condition: IsDev
-      - Condition: IsStaging
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
   # IsExistingELB: !Not [!Equals [!Ref UseExistingELB, '']]
 
@@ -203,15 +169,14 @@ Resources:
       Type: "A"
       AliasTarget:
         HostedZoneId: "Z1H1FL5HABSF5"
-        DNSName: "dualstack.iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com"
+        DNSName: !Join ['dualstack.', [!Ref ALBDNSName]] #"dualstack.iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com"
         EvaluateTargetHealth: false
 
   ALBListenerRule:
-    # Condition: IsExistingELB - we're using an existing ELB
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       ListenerArn: !Ref ALBListenerArn
-      Priority: 10
+      Priority: 11
       Conditions:
         - Field: host-header
           HostHeaderConfig:
@@ -219,8 +184,31 @@ Resources:
               - chatbotai.iscale-software.com
       Actions:
         - Type: forward
-          TargetGroupArn: placeholder
-          
+          TargetGroupArn: !Ref K3sTargetGroup
+
+  K3sTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]] 
+      VpcId: 
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-VpcId
+      Protocol: HTTP
+      Port: 9000
+      TargetType: instance
+
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckPort: traffic-port
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName       
 
 ##
 # PostgreSQL Database
@@ -238,14 +226,15 @@ Resources:
         EnableEnhancedMonitoring: !If [IsProd, true, false]
         EnablePerformanceInsights: !If [IsProd, true, false]
         EnvName: !Ref EnvName
-        Engine: postgresql
-        EngineVersion: 15.3
-        Family: postgresql15
+        Engine: postgres
+        EngineVersion: 17.4
+        Family: postgres17
         InstanceType: !If [IsProd, db.t4g.large, db.t4g.micro]
         MasterUser: root
         MultiAz: !If [IsProd, true, false]
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
+        Port: 5432
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
         StorageType: gp3
@@ -281,6 +270,7 @@ Resources:
         InstancePort: 80
         InstanceSubnet: Private
         InstanceType: !Ref InstanceType
+        InstanceRole: !Ref SSMRole
         # LoadBalancerHostName: !Ref LoadBalancerHostName
         LoadBalancerPriority: 100
         # LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
@@ -292,6 +282,27 @@ Resources:
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         LaunchTemplate: True
+
+  SSMRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: ec2.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  SSMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+        - !Ref SSMRole
 
   
   
