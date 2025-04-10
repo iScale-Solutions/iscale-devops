@@ -113,6 +113,10 @@ Parameters:
     Type: String
     Default: iscale-dev-stg-uw2-alb
     MinLength: 1
+  LoadBalancerHostName:
+    Description: The host name of the load balancer
+    Type: String
+    Default: ''
   NetworkStackName:
     Description: The name of the network stack
     Type: String
@@ -152,6 +156,7 @@ Conditions:
     Parameters:
        Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
+  HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
   # IsExistingELB: !Not [!Equals [!Ref UseExistingELB, '']]
 
 Resources:
@@ -159,82 +164,30 @@ Resources:
 ##
 # DNS
 # 
-  DNSRecord:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneId: "Z3IVOZ67OCE9RL"
-      Name: "chatbotai.iscale-software.com." 
-      Type: "A"
-      AliasTarget:
-        HostedZoneId: "Z1H1FL5HABSF5"
-        DNSName: !Join ['dualstack.', [!Ref ALBDNSName]] #"dualstack.iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com"
-        EvaluateTargetHealth: false
+  # DNSRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: "Z3IVOZ67OCE9RL"
+  #     Name: "chatbotai.iscale-software.com." 
+  #     Type: "A"
+  #     AliasTarget:
+  #       HostedZoneId: "Z1H1FL5HABSF5"
+  #       DNSName: !Join ['dualstack.', [!Ref ALBDNSName]] #"dualstack.iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com"
+  #       EvaluateTargetHealth: false
 
-  ALBListenerRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties:
-      ListenerArn: !Ref ALBListenerArn
-      Priority: 11
-      Conditions:
-        - Field: host-header
-          HostHeaderConfig:
-            Values:
-              - chatbotai.iscale-software.com
-      Actions:
-        - Type: forward
-          TargetGroupArn: !Ref K3sTargetGroup
-
-  K3sTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]] 
-      VpcId: 
-        Fn::ImportValue:
-          !Sub ${NetworkStackName}-VpcId
-      Protocol: HTTP
-      Port: 9000
-      TargetType: instance
-      HealthCheckProtocol: HTTP
-      HealthCheckPath: /
-      HealthCheckPort: traffic-port
-      Matcher:
-        HttpCode: 200
-      Tags:
-        - Key: Name
-          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-        - Key: Environment
-          Value: !Ref EnvName
-        - Key: Organization
-          Value: !Ref OrgName       
-
-##
-# PostgreSQL Database
-##
-  DBStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
-      Parameters:
-        Name: !Ref Name
-        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
-        AllocatedStorage: !If [IsProd, 50, 20]
-        BackupRetentionPeriod: !If [IsProd, 30, 7]
-        DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
-        EnableEnhancedMonitoring: !If [IsProd, true, false]
-        EnablePerformanceInsights: !If [IsProd, true, false]
-        EnvName: !Ref EnvName
-        Engine: postgres
-        EngineVersion: 17.4
-        Family: postgres17
-        InstanceType: !If [IsProd, db.t4g.large, db.t4g.micro]
-        MasterUser: root
-        MultiAz: !If [IsProd, true, false]
-        NetworkStackName: !Ref NetworkStackName
-        OrgName: !Ref OrgName
-        Port: 5432
-        SNSStackName: !Ref SNSStackName
-        StorageEncrypted: true
-        StorageType: gp3
+  # ALBListenerRule:
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  #   Properties:
+  #     ListenerArn: !Ref ALBListenerArn
+  #     Priority: 11
+  #     Conditions:
+  #       - Field: host-header
+  #         HostHeaderConfig:
+  #           Values:
+  #             - chatbotai.iscale-software.com
+  #     Actions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref K3sMasterServerStack.   
 
 ##
 # K3s Cluster
@@ -265,11 +218,11 @@ Resources:
             - Outputs.SecurityGroupId
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-        InstancePort: 80
+        InstancePort: 9000
         InstanceSubnet: Private
         InstanceType: !Ref InstanceType
-        # LoadBalancerHostName: !Ref LoadBalancerHostName
-        LoadBalancerPriority: 100
+        LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
+        LoadBalancerPriority: 11
         LoadBalancerStackName: !Ref ELBStackName
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId:
@@ -279,6 +232,9 @@ Resources:
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         LaunchTemplate: True
+        VolumeSize: 20
+        VolumeType: gp3
+        
         
   # K3sMasterSchedulerStack:
   #   DependsOn:
@@ -337,6 +293,56 @@ Resources:
   #       SNSStackName: !Ref SNSStackName
   #       UseFriendlyNames: FALSE
   #       LaunchTemplate: True
+
+
+##
+# PostgreSQL Database
+##
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: !If [IsProd, 50, 20]
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: postgres
+        EngineVersion: 17.4
+        Family: postgres17
+        InstanceType: !If [IsProd, db.t4g.large, db.t4g.micro]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        Port: 5432
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+        StorageType: gp3
+
+  DBSchedulerStack:
+    DependsOn:
+      - DBStack
+      - K3sMasterServerStack
+    Condition: IsNotProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
 
   SSMRole:
       Type: AWS::IAM::Role
