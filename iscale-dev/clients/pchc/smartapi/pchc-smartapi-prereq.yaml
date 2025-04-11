@@ -10,6 +10,18 @@ Metadata:
           - Name
           - OrgName
           - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: DocumentDB Configuration
+        Parameters:
+          - ClusterType
+          - ShardCapacity
+          - ShardCount
+          - ShardInstanceCount
 
     ParameterLabels:
       Name:
@@ -42,6 +54,40 @@ Parameters:
       - Staging #Pre-production
       - Development #Regular day to day commit / deplay
       - Test 
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: 'pchc-test-ase1-smartapi-network'
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack.
+    Type: String
+    Default: 'pchc-dev-ase1-sns'
+    MinLength: 1
+  ClusterType:
+    Description: DocumentDB cluster type.
+    Type: String
+    Default: elastic
+    AllowedValues:
+      - instance
+      - elastic
+  ShardCapacity:
+    Description: The number of vCPUs assigned to each elastic cluster shard. 
+    Type: Number
+    Default: 2
+    AllowedValues: [2, 4, 8, 16, 32, 64]
+  ShardCount:
+    Description: The number of shards assigned to the elastic cluster.
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 32
+    ConstraintDescription: Maximum is 32.
+  ShardInstanceCount:
+    Description: 'The number of replica instances applying to all shards in the cluster. A shardInstanceCount value of 1 means there is one writer instance, and any additional instances are replicas that can be used for reads and to improve availability.'
+    Type: Number
+    Default: 1
+  
 
 Mappings: 
   Fn::Transform:
@@ -112,6 +158,25 @@ Resources:
           Value: !Ref EnvName
         - Key: Organization
           Value: !Ref OrgName
+###
+# Document DB Section
+###
+
+  DocumentDBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/docdb-database.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClusterType: !Ref ClusterType #instance | elastic
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        ShardCapacity: !Ref ShardCapacity
+        ShardCount: !Ref ShardCount
+        ShardInstanceCount: !Ref ShardInstanceCount
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
 
 Outputs:
   EcrName:
@@ -131,3 +196,9 @@ Outputs:
     Value: !Ref DataS3Bucket
     Export:
       Name: !Sub ${AWS::StackName}-S3Name
+  
+  DocumentDBStackName:
+    Description: DocumentDB stack name
+    Value: !Ref DocumentDBStack
+    Export:
+      Name: !Sub ${AWS::StackName}-DocumentDBStackName
