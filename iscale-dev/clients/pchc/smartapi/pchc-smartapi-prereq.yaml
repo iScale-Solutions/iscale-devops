@@ -8,6 +8,7 @@ Metadata:
           default: Resource Configuration
         Parameters:
           - Name
+          - SmartPortalName
           - OrgName
           - EnvName
       - Label:
@@ -26,6 +27,8 @@ Metadata:
     ParameterLabels:
       Name:
         default: Resource Name
+      SmartPortalName:
+        default: Smart Portal Name
       OrgName:
         default: Organization Name
       EnvName:
@@ -38,6 +41,12 @@ Parameters:
     MinLength: 3
     MaxLength: 20
     Default: 'smartapi-prereq'
+  SmartPortalName:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 20
+    Default: 'smartportal-prereq'
   OrgName:
     Description: The name of the organization.
     Type: String
@@ -104,7 +113,7 @@ Conditions:
 Resources:
 
 ###
-# ECR
+# ECR smartapi
 ###
 
   ECR:
@@ -125,7 +134,28 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr]]
 
 ###
-# S3
+# ECR smartportal
+###
+
+  ECRSmartPortal:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: false
+      EncryptionConfiguration: 
+        EncryptionType: AES256
+      ImageScanningConfiguration: 
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE # MUTABLE=overwritten, IMMUTABLE=not
+      # LifecyclePolicy: 
+      #   LifecyclePolicy
+      RepositoryName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref SmartPortalName, ecr]]
+      # RepositoryPolicyText: Json
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref SmartPortalName, ecr]]
+
+###
+# S3 smartapi
 ###
 
   DataS3Bucket:
@@ -154,6 +184,41 @@ Resources:
       Tags: 
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, env-bucket]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+###
+# S3 smartportal
+###
+
+  DataS3BucketSmartPortal:
+    Type: AWS::S3::Bucket
+    # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
+    # Recommend not specifying bucket name here for non-prod setups
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref SmartPortalName, env-bucket]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref SmartPortalName, env-bucket]]
         - Key: Environment
           Value: !Ref EnvName
         - Key: Organization
@@ -208,12 +273,24 @@ Outputs:
     Value: !GetAtt ECR.Arn
     Export:
       Name: !Sub ${AWS::StackName}-EcrArnName
+  
+  EcrSmartPortalArnName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ECRSmartPortal.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-EcrSmartPortalArnName
 
   S3Name:
     Description: Endpoint URL
     Value: !Ref DataS3Bucket
     Export:
       Name: !Sub ${AWS::StackName}-S3Name
+  
+  S3SmartPortalName:
+    Description: Endpoint URL
+    Value: !Ref DataS3BucketSmartPortal
+    Export:
+      Name: !Sub ${AWS::StackName}-S3SmartPortalName
   
   DocumentDBStackName:
     Description: DocumentDB stack name
