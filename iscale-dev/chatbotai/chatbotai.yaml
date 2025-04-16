@@ -166,6 +166,8 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ASGHealthCheckType: EC2
+        ASGMaxSize: 1
+        ASGDesiredSize: 1
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint:
           Fn::GetAtt:
@@ -181,7 +183,7 @@ Resources:
             - Outputs.SecurityGroupId
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-        InstancePort: 9000
+        InstancePort: 8051
         InstanceSubnet: Private
         InstanceType: !Ref InstanceType
         LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
@@ -194,27 +196,28 @@ Resources:
             - Outputs.DBSecretManagerKeyId
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
+        VolumeName: /dev/sda1
         LaunchTemplate: True
         VolumeSize: 20
         VolumeType: gp3
         
         
-  K3sMasterSchedulerStack:
-    DependsOn:
-      - DBStack
-      - K3sMasterServerStack
-    Condition: IsNotProd
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
-        UseFriendlyNames: FALSE
-        EC2InstanceTag: CHATBOTAI
+  # K3sMasterSchedulerStack:
+  #   DependsOn:
+  #     - DBStack
+  #     - K3sMasterServerStack
+  #   Condition: IsNotProd
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       StartScheduleExpression: !Ref StartScheduleExpression
+  #       StopScheduleExpression: !Ref StopScheduleExpression
+  #       UseFriendlyNames: FALSE
+  #       EC2InstanceTag: CHATBOTAI
 
   # K3sWorkerServerStack:
   #   DependsOn:
@@ -290,7 +293,6 @@ Resources:
   DBSchedulerStack:
     DependsOn:
       - DBStack
-      - K3sMasterServerStack
     Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -329,10 +331,10 @@ Resources:
         - !Ref SSMRole
 
 ###
-# ECR
+# ECR - web-app
 ###
 
-  ECR:
+  ECRWebApp:
     Type: AWS::ECR::Repository
     Properties:
       EmptyOnDelete: false
@@ -341,17 +343,37 @@ Resources:
       ImageScanningConfiguration: 
         ScanOnPush: true
       ImageTagMutability: MUTABLE
-      RepositoryName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr]]
+      RepositoryName: chatbotai-webapp
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], webapp]]
+        - Key: OrgName
+          Value: !Ref OrgName
+
+###
+# ECR - backend
+###
+
+  ECRBackend:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: false
+      EncryptionConfiguration: 
+        EncryptionType: AES256
+      ImageScanningConfiguration: 
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      RepositoryName: chatbotai-backend
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], ai-backend]]
         - Key: OrgName
           Value: !Ref OrgName
 
   DeplomentUser:
     Type: AWS::IAM::User
     Properties:
-      UserName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, deploy]]
+      UserName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, ecr-deploy]]
       Policies:
         - PolicyName: ecrWriteAccess
           PolicyDocument:
@@ -368,8 +390,18 @@ Resources:
                   - ecr:InitiateLayerUpload
                   - ecr:BatchCheckLayerAvailability
                   - ecr:PutImage
-                Resource: !GetAtt ECR.Arn
-                
+                Resource: 
+                  - !GetAtt ECRWebApp.Arn
+                  - !GetAtt ECRBackend.Arn
+
+Outputs:
+  ECRWebApp:
+    Description: ECR Web App Repository
+    Value: !GetAtt ECRWebApp.RepositoryUri
+  
+  ECRBackend:
+    Description: ECR Backend Repository
+    Value: !GetAtt ECRBackend.RepositoryUri
                 
 
 
