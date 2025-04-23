@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Domain redirects to empleyo.net. This MUST be run in us-east-1 for SSL
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - LoadBalancerStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - LoadBalancerHostName
+          - LoadBalancerPriority
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DomainName:
+        default: Domain Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: redirects
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: empleyo
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DomainName:
+    Description: The domain name to be redirected to
+    Type: String
+    Default: empleyo.net
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+      
+Resources:
+
+  ## Empleyo.ph ##
+  EmpleyoPHHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: empleyo.ph
+
+  EmpleyoPHSSLCert:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: empleyo.ph
+      SubjectAlternativeNames:
+        - www.empleyo.ph
+      ValidationMethod: DNS
+
+  EmpleyoPHSSLValidationRecord1:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref EmpleyoPHHostedZone
+      Name: _f4a08b55752e6e645ee8bf57866eb405.empleyo.ph
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - _33ce38eb6aaf1c549b45ec8b1398b6a0.djqtsrsxkq.acm-validations.aws.
+
+  EmpleyoPHHostedZoneDNSSECSigningKey:
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref EmpleyoPHHostedZone
+      KeyManagementServiceArn: arn:aws:kms:us-east-1:489336767866:key/52683884-d204-4e05-875b-33625197293f
+      Name: key_signing_key
+      Status: ACTIVE
+
+  EmpleyoPHHostedZoneDNSSEC:
+    DependsOn: EmpleyoPHHostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref EmpleyoPHHostedZone
+
+  EmpleyoPHSSLValidationRecord2:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref EmpleyoPHHostedZone
+      Name: _efd37c53284d53544e873fe2eca9fe32.www.empleyo.ph.
+      Type: CNAME
+      TTL: 14400
+      ResourceRecords:
+        - _9e6476dd9c829520c2e44abdd4f6d33c.djqtsrsxkq.acm-validations.aws.
+
+  EmpleyoPHRedirect:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/domain-redirect-s3.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        DomainSSLCert: !Ref EmpleyoPHSSLCert
+        SourceDomainName: empleyo.ph
+        RedirectDomainName: empleyo.net

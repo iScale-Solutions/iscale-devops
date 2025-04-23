@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Redirects a domain to another one via static S3 website. This MUST be run in us-east-1 for SSL
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Domain Configuration
+        Parameters:
+          - SourceDomainName
+          - RedirectDomainName
+          - DomainSSLCert
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      RedirectDomainName:
+        default: Redirect Domain Name
+      SourceDomainName:
+        default: Domain Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: redirect
+    MaxLength: 9 # Max length for target group name is only 32 characters.
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  DomainSSLCert:
+    Description: SSL Certificate ARN
+    Type: String
+    Default: FILL_ME
+  SourceDomainName:
+    Description: The domain name that needs to be redirected
+    Type: String
+    Default: iscale-solutions.net
+  RedirectDomainName:
+    Description: The domain name to be redirected to
+    Type: String
+    Default: iscale-solutions.com
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  RedirectBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref SourceDomainName
+  
+  RedirectFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: RedirectToTargetDomain
+      AutoPublish: true
+      FunctionConfig:
+        Comment: !Join [' ', ['Redirect to',  !Ref RedirectDomainName]]
+        Runtime: cloudfront-js-1.0
+      FunctionCode: !Sub |
+        function handler(event) {
+          return {
+            statusCode: 301,
+            statusDescription: "Moved Permanently",
+            headers: {
+              "location": { "value": "https://${RedirectDomainName}" }
+            }
+          };
+        }
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Ref SourceDomainName
+          - !Join ['.', ['www', !Ref SourceDomainName]]
+        Origins:
+          - Id: RedirectOrigin
+            DomainName: !GetAtt RedirectBucket.RegionalDomainName
+            S3OriginConfig: {}
+        Enabled: true
+        DefaultCacheBehavior:
+          TargetOriginId: RedirectOrigin
+          ViewerProtocolPolicy: redirect-to-https  # Redirect HTTP to HTTPS
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          ForwardedValues:
+              QueryString: true  # Forward all query strings to the origin
+              Cookies:
+                Forward: none  # No cookies are being forwarded to the origin
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt RedirectFunction.FunctionARN
+        DefaultRootObject: ''
+        ViewerCertificate:
+          AcmCertificateArn: !Ref DomainSSLCert  # Use the ACM certificate for HTTPS
+          SslSupportMethod: sni-only
+        PriceClass: PriceClass_100  # Cheapest pricing tier for CloudFront
+
+  # Route 53 Alias record for the apex domain (example.com)
+  CloudFrontAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref SourceDomainName, '']]
+      Name: !Ref SourceDomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2  # Hosted Zone ID for CloudFront (global constant)
+        DNSName: !GetAtt 'CloudFrontDistribution.DomainName'
+
+  # Route 53 Alias record for the www subdomain (www.example.com)
+  WwwCloudFrontAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref SourceDomainName, '']]
+      Name: !Sub 'www.${SourceDomainName}'
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2  # Hosted Zone ID for CloudFront (global constant)
+        DNSName: !GetAtt 'CloudFrontDistribution.DomainName'
