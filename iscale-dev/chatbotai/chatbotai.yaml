@@ -1,0 +1,309 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This CloudFormation stack will deploy the Chatbot AI Infrastructure
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - DeletionProtection
+          - ClientDomainName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+          - InstanceType
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Stack Name
+      DeletionProtection:
+        default: Enable Deletion Protection
+      InstanceKeyName:
+        default: Key Pair Name
+      InstanceAMI:
+        default: AMI ID
+      InstanceType:
+        default: Instance Type
+      StartScheduleExpression:
+        default: Start Schedule Expression
+      StopScheduleExpression:
+        default: Stop Schedule Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 12
+    Default: chatbotai
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 20
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production # Test for uat
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The domain name for the client
+    Type: String
+    Default: iscale-software.com
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    ConstraintDescription: Domain name must only contain lowercase letters, numbers and hyphen
+    MaxLength: 30
+  DeletionProtection:
+    Description: Set to true to enable (valid only in Production mode)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0edf4a7e3058418ad # AL2
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  InstanceType:
+    Description: Type of instance for app server
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+  # UseExistingELB:
+  #   Description: Use existing ELB
+  #   Type: String
+  #   Default: true
+  #   AllowedValues:
+  #     - true
+  #     - false
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+  ALBListenerArn:
+    Description: ARN of the ALB listener
+    Type: String
+    Default: arn:aws:elasticloadbalancing:us-west-2:338284463834:listener/app/iscale-dev-stg-uw2-alb-loadbal/df36d54b3af513a9/3192c85b49bab3eb
+  ALBDNSName:
+    Description: DNS name of the ALB
+    Type: String
+    Default: iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
+  # IsExistingELB: !Not [!Equals [!Ref UseExistingELB, '']]
+
+Resources:
+
+##
+# DNS
+# 
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: "Z3IVOZ67OCE9RL"
+      Name: "chatbotai.iscale-software.com." 
+      Type: "A"
+      AliasTarget:
+        HostedZoneId: "Z1H1FL5HABSF5"
+        DNSName: !Join ['dualstack.', [!Ref ALBDNSName]] #"dualstack.iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com"
+        EvaluateTargetHealth: false
+
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListenerArn
+      Priority: 11
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - chatbotai.iscale-software.com
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref K3sTargetGroup
+
+  K3sTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]] 
+      VpcId: 
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-VpcId
+      Protocol: HTTP
+      Port: 9000
+      TargetType: instance
+
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckPort: traffic-port
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName       
+
+##
+# PostgreSQL Database
+##
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: !If [IsProd, 50, 20]
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: postgres
+        EngineVersion: 17.4
+        Family: postgres17
+        InstanceType: !If [IsProd, db.t4g.large, db.t4g.micro]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        Port: 5432
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+        StorageType: gp3
+
+##
+# K3s Cluster
+##
+  K3sMasterServerStack:
+    DependsOn:
+      - DBStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+        InstancePort: 80
+        InstanceSubnet: Private
+        InstanceType: !Ref InstanceType
+        InstanceRole: !Ref SSMRole
+        # LoadBalancerHostName: !Ref LoadBalancerHostName
+        LoadBalancerPriority: 100
+        # LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        LaunchTemplate: True
+
+  SSMRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: ec2.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  SSMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+        - !Ref SSMRole
+
+  
+  
+  

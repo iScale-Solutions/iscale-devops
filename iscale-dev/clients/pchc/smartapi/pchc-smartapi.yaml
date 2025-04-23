@@ -13,22 +13,24 @@ Metadata:
       - Label:
           default: Stack Configuration
         Parameters:
+          - DocumentDBStackName
           - NetworkStackName
           - SNSStackName
           - EcrArnName
+          - EcrSmartPortalArnName
       - Label:
           default: Load Balancer Configuration
         Parameters:
           - ClientDomainName
           - LoadBalancerHostName
           - LoadBalancerCertificateArn
-      - Label:
-          default: DocumentDB Configuration
-        Parameters:
-          - ClusterType
-          - ShardCapacity
-          - ShardCount
-          - ShardInstanceCount
+      # - Label:
+      #     default: DocumentDB Configuration
+      #   Parameters:
+      #     - ClusterType
+      #     - ShardCapacity
+      #     - ShardCount
+      #     - ShardInstanceCount
       - Label:
           default: Containers Configuration
         Parameters:
@@ -53,10 +55,14 @@ Metadata:
         default: Environment Name
       NetworkStackName:
         default: Network Stack Name
+      DocumentDBStackName:
+        default: Document DB Stack Name
       SNSStackName:
         default: SNS Topic Stack Name
       EcrArnName:
         default: ARN of the ECR
+      EcrSmartPortalArnName:
+        default: ARN of the ECR for Smart Portal
       ClientDomainName:
         default: Domain Name
       LoadBalancerHostName:
@@ -118,42 +124,54 @@ Parameters:
     Type: String
     Default: 'arn:aws:ecr:eu-west-1:1234567890:repository/repository-name'
     MinLength: 1
+  EcrSmartPortalArnName:
+    Description: The ARN of the ECR for Smart Portal.
+    Type: String
+    Default: 'arn:aws:ecr:eu-west-1:1234567890:repository/repository-name'
+    MinLength: 1
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
     Type: String
     AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
     Default: pchcdev.com
     MinLength: 1
+  CustomDomainName:
+    Description: (Optional) Custom domain name for load balancer URL
+    Type: String
+    Default: ''
   LoadBalancerHostName:
     Description: (Optional) Custom Hostname for load balancer URL
     Type: String
     Default: ''
     MaxLength: 12
-  ClusterType:
-    Description: DocumentDB cluster type.
+  DocumentDBStackName:
+    Description: The name of the DocumentDB stack.
     Type: String
-    Default: elastic
-    AllowedValues:
-      - instance
-      - elastic
-  ShardCapacity:
-    Description: The number of vCPUs assigned to each elastic cluster shard. 
-    Type: Number
-    Default: 2
-    AllowedValues: [2, 4, 8, 16, 32, 64]
-  ShardCount:
-    Description: The number of shards assigned to the elastic cluster.
-    Type: Number
-    Default: 1
-    MinValue: 1
-    MaxValue: 32
-    ConstraintDescription: Maximum is 32.
-  ShardInstanceCount:
-    Description: 'The number of replica instances applying to all shards in the cluster. 
-    A shardInstanceCount value of 1 means there is one writer instance, and any additional 
-    instances are replicas that can be used for reads and to improve availability.'
-    Type: Number
-    Default: 1
+    Default: 'pchc-test-ase1-smartapi-prereq'
+    MinLength: 1
+  # ClusterType:            # docdb in pchc-smartapi.yaml is already moved to pchc-smartapi-prereq.yaml
+  #   Description: DocumentDB cluster type. 
+  #   Type: String
+  #   Default: elastic
+  #   AllowedValues:
+  #     - instance
+  #     - elastic
+  # ShardCapacity:
+  #   Description: The number of vCPUs assigned to each elastic cluster shard. 
+  #   Type: Number
+  #   Default: 2
+  #   AllowedValues: [2, 4, 8, 16, 32, 64]
+  # ShardCount:
+  #   Description: The number of shards assigned to the elastic cluster.
+  #   Type: Number
+  #   Default: 1
+  #   MinValue: 1
+  #   MaxValue: 32
+  #   ConstraintDescription: Maximum is 32.
+  # ShardInstanceCount:
+  #   Description: 'The number of replica instances applying to all shards in the cluster. A shardInstanceCount value of 1 means there is one writer instance, and any additional instances are replicas that can be used for reads and to improve availability.'
+  #   Type: Number
+  #   Default: 1
   LoadBalancerCertificateArn:
     Description: SSL Certificate ARN for the ELB
     Type: String
@@ -177,7 +195,7 @@ Parameters:
   EnvBucket:
     Type: String
     Description: Bucket name where env file is stored
-    Default: 'pchc-test-uw2-smartapi-s3-ecr-ecr-env-var'
+    Default: 'pchc-test-ase1-smartapi-prereq-env-bucket'
   ContainerPort:
     Type: Number
     Default: 3000    
@@ -201,6 +219,8 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasSubDomainName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
+
 
 Resources:
 
@@ -225,28 +245,28 @@ Resources:
         UnhealthyThresholdCount: 2
         HealthCheckIntervalSeconds: 30
         TargetType: ip
-        HealthCheckPath: /
+        HealthCheckPath: /api/health
         IdleTimeout: 60
 
-###
-# Document DB Section
-###
+# ###
+# # Document DB Section - decom, already moved to prereq
+# ###
 
-  DocumentDBStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/docdb-database.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        ClusterType: !Ref ClusterType #instance | elastic
-        BackupRetentionPeriod: !If [IsProd, 30, 7]
-        ShardCapacity: !Ref ShardCapacity
-        ShardCount: !Ref ShardCount
-        ShardInstanceCount: !Ref ShardInstanceCount
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
+#   DocumentDBStack:
+#     Type: AWS::CloudFormation::Stack
+#     Properties:
+#       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/docdb-database.yaml
+#       Parameters:
+#         Name: !Ref Name
+#         EnvName: !Ref EnvName
+#         OrgName: !Ref OrgName
+#         ClusterType: !Ref ClusterType #instance | elastic
+#         BackupRetentionPeriod: !If [IsProd, 30, 7]
+#         ShardCapacity: !Ref ShardCapacity
+#         ShardCount: !Ref ShardCount
+#         ShardInstanceCount: !Ref ShardInstanceCount
+#         NetworkStackName: !Ref NetworkStackName
+#         SNSStackName: !Ref SNSStackName
 
 ###
 # BACKEND SECTION (SMART API)
@@ -311,10 +331,10 @@ Resources:
   ECSCluster:
     DependsOn:
       - ELBStack
-      - DocumentDBStack
+      # - DocumentDBStack
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, Cluster]]
+      ClusterName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cluster]]
       CapacityProviders:
         - FARGATE
         - FARGATE_SPOT
@@ -331,7 +351,7 @@ Resources:
   ECSTaskDefinition:
     DependsOn:
       - ELBStack
-      - DocumentDBStack
+      # - DocumentDBStack
     Type: AWS::ECS::TaskDefinition
     Properties:
       Family: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, taskdef]]
@@ -365,7 +385,7 @@ Resources:
   ECSService:
     DependsOn:
       - ELBStack
-      - DocumentDBStack
+      # - DocumentDBStack
     Type: AWS::ECS::Service
     Properties: 
       ServiceName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, service]]
@@ -389,7 +409,7 @@ Resources:
           SecurityGroups:
             - !Ref ContainerSecurityGroup0
       LoadBalancers:
-        - ContainerName: Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, container]]
+        - ContainerName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, container]]
           ContainerPort: !Ref ContainerPort
           TargetGroupArn:
             Fn::GetAtt:
@@ -416,37 +436,37 @@ Resources:
               - Outputs.SecurityGroupId
 
   # Create ingress to allow ContainerSecurityGroup to docudb secg
-
   AllowECSToDocumentDB:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from ECS to Document DB
       IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-          - DocumentDBStack
-          - Outputs.DocuDBElasticSecurityGroup
+      GroupId: 
+        Fn::ImportValue: !Sub '${DocumentDBStackName}-DocuDBElasticSecurityGroup'
+        # Fn::GetAtt:
+        #   - DocumentDBStack
+        #   - Outputs.DocuDBElasticSecurityGroup
       FromPort: 27017
       ToPort: 27017
       SourceSecurityGroupId: !GetAtt ContainerSecurityGroup0.GroupId
 
-# allow jumpserver to docuDB
+# # allow jumpserver to docuDB - decom, already moved to prereq
 
-  AllowJumphostToDocumentDB:
-    Condition: IsNotProd
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from Jumphost to Document DB
-      IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-          - DocumentDBStack
-          - Outputs.DocuDBElasticSecurityGroup
-      FromPort: 27017
-      ToPort: 27017
-      SourceSecurityGroupId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+#   AllowJumphostToDocumentDB:
+#     Condition: IsNotProd
+#     Type: AWS::EC2::SecurityGroupIngress
+#     Properties:
+#       Description: Allow connection from Jumphost to Document DB
+#       IpProtocol: TCP
+#       GroupId:
+#         Fn::ImportValue: !Sub '${DocumentDBStackName}-DocuDBElasticSecurityGroup'
+#           # - DocumentDBStack
+#           # - Outputs.DocuDBElasticSecurityGroup
+#       FromPort: 27017
+#       ToPort: 27017
+#       SourceSecurityGroupId:
+#         Fn::ImportValue:
+#           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
 ###
 # Auto scaling Section
@@ -514,9 +534,12 @@ Resources:
       Comment: !Join ['', [Domain Name Record for, !Ref Name]]
       RecordSets:
         - Name: !If
-            - IsProd
-            - !Join ['.', [!Ref Name, !Ref ClientDomainName]]
+            - HasSubDomainName
+            - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
             - !Join ['', [!Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref ClientDomainName]]
+            # - hasDomainName
+            # - !Ref DomainNameSomethingHere ( asdasd.example.com)
+            # - !Join ['.', [!Ref Name, !Ref ClientDomainName]]
           Type: A
           AliasTarget:
             HostedZoneId:
@@ -547,7 +570,9 @@ Resources:
                   - ecr:InitiateLayerUpload
                   - ecr:BatchCheckLayerAvailability
                   - ecr:PutImage
-                Resource: !Ref EcrArnName # import repo name !Ref ecr name
+                Resource: 
+                 - !Ref EcrArnName # import repo name !Ref ecr name
+                 - !Ref EcrSmartPortalArnName
               - Effect: Allow
                 Action: ecr:GetAuthorizationToken
                 Resource: "*"
@@ -567,7 +592,7 @@ Resources:
               - Sid: RunTask
                 Effect: Allow
                 Action: ecs:RunTask
-                Resource: "*"
+                # Resource: "*"
                 Resource: 
                   - !Join ['', ['arn:aws:ecs:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':task-definition/', !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, taskdef*]]]]
               - Sid: PassRolesInTaskDefinition
@@ -575,6 +600,7 @@ Resources:
                 Action:
                   - iam:PassRole
                 Resource:
+                  - !GetAtt ExecutionRole.Arn 
                   - !GetAtt ECSTaskRole.Arn
               - Sid: DeployService
                 Effect: Allow
@@ -596,25 +622,19 @@ Outputs:
     Description: Endpoint URL
     Value: !Join ['', ['https://', !Ref DNSRecord]]
 
-  EcsDeploymentUserGroup:
-    Description: The Arn of the group allowed to perform deployment
-    Value: !Ref EcsDeploymentUserGroup
-    Export:
-      Name: !Sub ${AWS::StackName}-EcsDeploymentUserGroup
-
   Region:
     Description: The region where this stack is deployed.
     Value: !Ref 'AWS::Region'
 
   ECSClusterArn:
     Description: ECS Cluster ARN
-    Value: !Ref ECSCluster
+    Value: !GetAtt ECSCluster.Arn
     Export:
       Name: !Sub ${AWS::StackName}-EcsClusterArn
 
   ECSClusterName:
     Description: ECS Cluster name
-    Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, Cluster]]
+    Value: !Ref ECSCluster
     Export:
       Name: !Sub ${AWS::StackName}-EcsClusterName
 

@@ -8,6 +8,7 @@ Metadata:
           default: Resource Configuration
         Parameters:
           - Name
+          - SmartPortalName
           - OrgName
           - EnvName
       - Label:
@@ -15,10 +16,19 @@ Metadata:
         Parameters:
           - NetworkStackName
           - SNSStackName
+      - Label:
+          default: DocumentDB Configuration
+        Parameters:
+          - ClusterType
+          - ShardCapacity
+          - ShardCount
+          - ShardInstanceCount
 
     ParameterLabels:
       Name:
         default: Resource Name
+      SmartPortalName:
+        default: Smart Portal Name
       OrgName:
         default: Organization Name
       EnvName:
@@ -31,6 +41,12 @@ Parameters:
     MinLength: 3
     MaxLength: 20
     Default: 'smartapi-prereq'
+  SmartPortalName:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 20
+    Default: 'smartportal-prereq'
   OrgName:
     Description: The name of the organization.
     Type: String
@@ -47,6 +63,40 @@ Parameters:
       - Staging #Pre-production
       - Development #Regular day to day commit / deplay
       - Test 
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: 'pchc-test-ase1-smartapi-network'
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack.
+    Type: String
+    Default: 'pchc-dev-ase1-sns'
+    MinLength: 1
+  ClusterType:
+    Description: DocumentDB cluster type.
+    Type: String
+    Default: elastic
+    AllowedValues:
+      - instance
+      - elastic
+  ShardCapacity:
+    Description: The number of vCPUs assigned to each elastic cluster shard. 
+    Type: Number
+    Default: 2
+    AllowedValues: [2, 4, 8, 16, 32, 64]
+  ShardCount:
+    Description: The number of shards assigned to the elastic cluster.
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 32
+    ConstraintDescription: Maximum is 32.
+  ShardInstanceCount:
+    Description: 'The number of replica instances applying to all shards in the cluster. A shardInstanceCount value of 1 means there is one writer instance, and any additional instances are replicas that can be used for reads and to improve availability.'
+    Type: Number
+    Default: 1
+  
 
 Mappings: 
   Fn::Transform:
@@ -63,7 +113,7 @@ Conditions:
 Resources:
 
 ###
-# ECR
+# ECR smartapi
 ###
 
   ECR:
@@ -84,7 +134,28 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr]]
 
 ###
-# S3
+# ECR smartportal
+###
+
+  ECRSmartPortal:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: false
+      EncryptionConfiguration: 
+        EncryptionType: AES256
+      ImageScanningConfiguration: 
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE # MUTABLE=overwritten, IMMUTABLE=not
+      # LifecyclePolicy: 
+      #   LifecyclePolicy
+      RepositoryName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref SmartPortalName, ecr]]
+      # RepositoryPolicyText: Json
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref SmartPortalName, ecr]]
+
+###
+# S3 smartapi
 ###
 
   DataS3Bucket:
@@ -118,6 +189,78 @@ Resources:
         - Key: Organization
           Value: !Ref OrgName
 
+###
+# S3 smartportal
+###
+
+  DataS3BucketSmartPortal:
+    Type: AWS::S3::Bucket
+    # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
+    # Recommend not specifying bucket name here for non-prod setups
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref SmartPortalName, env-bucket]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref SmartPortalName, env-bucket]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+###
+# Document DB Section
+###
+
+  DocumentDBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/docdb-database.yaml
+      Parameters:
+        Name: !Select [0, !Split ["-", !Ref Name]] # smartapi-prereq = [smartapi, prereq]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ClusterType: !Ref ClusterType #instance | elastic
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        ShardCapacity: !Ref ShardCapacity
+        ShardCount: !Ref ShardCount
+        ShardInstanceCount: !Ref ShardInstanceCount
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+# allow jumpserver to docuDB
+
+  AllowJumphostToDocumentDB:
+    Condition: IsNotProd
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from Jumphost to Document DB
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - DocumentDBStack
+          - Outputs.DocuDBElasticSecurityGroup
+      FromPort: 27017
+      ToPort: 27017
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
 Outputs:
   EcrName:
     Description: DNS name of the Application Load Balancer
@@ -130,9 +273,35 @@ Outputs:
     Value: !GetAtt ECR.Arn
     Export:
       Name: !Sub ${AWS::StackName}-EcrArnName
+  
+  EcrSmartPortalArnName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ECRSmartPortal.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-EcrSmartPortalArnName
 
   S3Name:
     Description: Endpoint URL
     Value: !Ref DataS3Bucket
     Export:
       Name: !Sub ${AWS::StackName}-S3Name
+  
+  S3SmartPortalName:
+    Description: Endpoint URL
+    Value: !Ref DataS3BucketSmartPortal
+    Export:
+      Name: !Sub ${AWS::StackName}-S3SmartPortalName
+  
+  DocumentDBStackName:
+    Description: DocumentDB stack name
+    Value: !Ref DocumentDBStack
+    Export:
+      Name: !Sub ${AWS::StackName}-DocumentDBStackName
+  
+  DocuDBElasticSecurityGroup:
+    Description: DocumentDB elastic security group
+    Value: !GetAtt DocumentDBStack.Outputs.DocuDBElasticSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-DocuDBElasticSecurityGroup
+  
+  
