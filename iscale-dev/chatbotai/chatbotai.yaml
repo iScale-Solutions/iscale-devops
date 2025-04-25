@@ -139,6 +139,13 @@ Parameters:
     Description: The tag to identify the EC2 instance
     Type: String
     Default: CHATBOTAI
+  UseFriendlyNames:
+    Description: Set to TRUE to have nice formatted scheduler event names
+    Type: String
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: TRUE
 
 Mappings:
   Fn::Transform:
@@ -153,6 +160,7 @@ Conditions:
        Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
   HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
+  UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
 
 Resources:
 
@@ -230,6 +238,10 @@ Resources:
               - Effect: Allow
                 Action:
                   - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                Resource: "*"
+              - Effect: Allow
+                Action:
                   - ec2:StartInstances
                   - ec2:StopInstances
                 Resource: !Join [":", ["arn", "aws", "ec2", !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', '*' ]]]]
@@ -255,7 +267,10 @@ Resources:
           SYSTEM_TAG: !Ref EC2InstanceTag
       Code:
         ZipFile: |
+          import boto3
           import os
+          
+          ec2 = boto3.resource('ec2')
 
           def lambda_handler(event, context):
             # Use the filter() method of the instances collection to retrieve
@@ -264,7 +279,7 @@ Resources:
             filters = [
                 {
                     'Name' : 'tag:System', 
-                    'Values': [SYSTEM_TAG]
+                    'Values': [system_tag_value]
                 },
                 {
                     'Name': 'instance-state-name', 
@@ -290,17 +305,47 @@ Resources:
                 'statusCode': 200,
                 'statusMessage': 'OK'
             }
-  StopScheduledEC2InstanceEventRule:
+  StopEC2InstanceByTagFunctionPermission:
     Condition: IsNotProd
-    Type: AWS::Events::Rule
+    Type: AWS::IAM::Policy
     Properties:
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, stop]]
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt StopEC2InstanceByTagFunction.Arn
+      PolicyName: AllowStopEC2InstanceByTag
+
+  StopScheduledEC2InstanceEventRule:
+    Type: AWS::Events::Rule
+    Condition: IsNotProd
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, stop]]
+        - !Ref 'AWS::NoValue'
       Description: !Join [' ',[ Stop, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StopScheduleExpression]]
       ScheduleExpression: !Ref StopScheduleExpression
       State: ENABLED
       Targets:
         - Arn: !GetAtt StopEC2InstanceByTagFunction.Arn
           Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, stop]]
+  
+  ScheduledEventPermissionToStopEC2Instance:
+    Condition: IsNotProd
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopEC2InstanceByTagFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopScheduledEC2InstanceEventRule.Arn
+  
+  UserPermissionsGroup:
+    Type: AWS::IAM::Group
 
   # K3sMasterSchedulerStack:
   #   DependsOn:
