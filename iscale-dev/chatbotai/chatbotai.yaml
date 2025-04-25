@@ -135,6 +135,10 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
+  EC2InstanceTag:
+    Description: The tag to identify the EC2 instance
+    Type: String
+    Default: CHATBOTAI
 
 Mappings:
   Fn::Transform:
@@ -201,7 +205,103 @@ Resources:
         VolumeSize: 20
         VolumeType: gp3
         
-        
+##
+# K3s Master Scheduler
+##       
+  LambdaScheduleEC2InstanceRole:
+    Condition: IsNotProd
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ScheduleEC2InstancePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                Resource: !Join [":", ["arn", "aws", "ec2", !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', '*' ]]]]
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  StopEC2InstanceByTagFunction:
+    Condition: IsNotProd
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function stopping an EC2 instance
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleEC2InstanceRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          SYSTEM_TAG: !Ref EC2InstanceTag
+      Code:
+        ZipFile: |
+          import os
+
+          def lambda_handler(event, context):
+            # Use the filter() method of the instances collection to retrieve
+            # all running EC2 instances.
+            system_tag_value = os.environ.get('SYSTEM_TAG', 'DefaultValue')
+            filters = [
+                {
+                    'Name' : 'tag:System', 
+                    'Values': [SYSTEM_TAG]
+                },
+                {
+                    'Name': 'instance-state-name', 
+                    'Values': ['running']
+                }]
+            
+            # Filter the and locate all running instances
+            instances = ec2.instances.filter(Filters=filters)
+            instance_ids_to_stop = [instance.id for instance in instances]
+            
+            # ensures instances are actually shutdown 
+            if len(instance_ids_to_stop) > 0:
+                try:    
+                    # Perform the shutdown
+                    shuttingDown = ec2.instances.filter(InstanceIds=instance_ids_to_stop).stop()
+                    print(f"Stopped {len(instance_ids_to_stop)} instances")
+                except Exception as e:
+                    print(f"Error stopping instances: {e}")
+            else:
+                print ("Nothing to see here")
+
+            return{
+                'statusCode': 200,
+                'statusMessage': 'OK'
+            }
+  StopScheduledEC2InstanceEventRule:
+    Condition: IsNotProd
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, stop]]
+      Description: !Join [' ',[ Stop, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StopScheduleExpression]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StopEC2InstanceByTagFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, stop]]
+
   # K3sMasterSchedulerStack:
   #   DependsOn:
   #     - DBStack
@@ -393,6 +493,19 @@ Resources:
                 Resource: 
                   - !GetAtt ECRWebApp.Arn
                   - !GetAtt ECRBackend.Arn
+  # add iam role for k3s master 
+#   {
+#   "Version": "2012-10-17",
+#   "Statement": [
+#     {
+#       "Effect": "Allow",
+#       "Action": [
+#         "secretsmanager:GetSecretValue"
+#       ],
+#       "Resource": "arn:aws:secretsmanager:us-west-2:123456789012:secret:YOUR_SECRET_NAME*"
+#     }
+#   ]
+# }
 
 Outputs:
   ECRWebApp:
