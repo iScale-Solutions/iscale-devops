@@ -454,26 +454,6 @@ Resources:
             - DBStack
             - Outputs.DBInstanceName
 
-  SSMRole:
-      Type: AWS::IAM::Role
-      Properties:
-        AssumeRolePolicyDocument:
-          Version: 2012-10-17
-          Statement:
-            - Effect: Allow
-              Principal:
-                Service: ec2.amazonaws.com
-              Action:
-                - sts:AssumeRole
-        ManagedPolicyArns:
-          - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
-
-  SSMInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Path: '/'
-      Roles:
-        - !Ref SSMRole
 
 ###
 # ECR - web-app
@@ -515,6 +495,10 @@ Resources:
         - Key: OrgName
           Value: !Ref OrgName
 
+##
+# IAM  Roles
+##
+
   DeplomentUser:
     Type: AWS::IAM::User
     Properties:
@@ -538,19 +522,22 @@ Resources:
                 Resource: 
                   - !GetAtt ECRWebApp.Arn
                   - !GetAtt ECRBackend.Arn
-  # add iam role for k3s master 
-#   {
-#   "Version": "2012-10-17",
-#   "Statement": [
-#     {
-#       "Effect": "Allow",
-#       "Action": [
-#         "secretsmanager:GetSecretValue"
-#       ],
-#       "Resource": "arn:aws:secretsmanager:us-west-2:123456789012:secret:YOUR_SECRET_NAME*"
-#     }
-#   ]
-# }
+
+  ExternalSecretsUser:    # for External Secrets (will change to IAM role once integrated with ArgoCD)
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, external-secrets]]
+      Policies:
+        - PolicyName: ExternalSecretsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:    
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: 
+                  - !GetAtt DBStack.Outputs.DBSecretManager
 
 Outputs:
   ECRWebApp:
