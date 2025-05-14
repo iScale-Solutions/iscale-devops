@@ -278,6 +278,93 @@ Resources:
       VpcId: 
         Fn::ImportValue:
           !Sub "${NetworkStackName}-VpcId"
+##
+# Route 53 for webapp, backend, and weaviate
+##
+
+  WebappRoute53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+      Name: !Join   # webapp sample URL = webapp-chatbotai-dev.iscale-software.com
+        - '.'
+        - - !Join 
+            - '-'
+            - ['webapp', !Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name]]
+          - !Ref ClientDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !Join 
+          - '.'
+          - - 'dualstack'
+            - Fn::ImportValue:
+                !Sub "${ELBStackName}-DNSName"
+        HostedZoneId: 
+          Fn::ImportValue:
+            !Sub ${ELBStackName}-CanonicalHostedZoneID
+  
+  WeaviateRestRoute53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+      Name: !Join   # webapp sample URL = weaviate-chatbotai-dev.iscale-software.com
+        - '.'
+        - - !Join 
+            - '-'
+            - ['weaviate', !Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name]]
+          - !Ref ClientDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !Join 
+          - '.'
+          - - 'dualstack'
+            - Fn::ImportValue:
+                !Sub "${ELBStackName}-DNSName"
+        HostedZoneId: 
+          Fn::ImportValue:
+            !Sub ${ELBStackName}-CanonicalHostedZoneID
+  
+  WeaviateGrpcRoute53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+      Name: !Join   # webapp sample URL = weaviateg-chatbotai-dev.iscale-software.com
+        - '.'
+        - - !Join 
+            - '-'
+            - ['weaviateg', !Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name]]
+          - !Ref ClientDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !Join 
+          - '.'
+          - - 'dualstack'
+            - Fn::ImportValue:
+                !Sub "${ELBStackName}-DNSName"
+        HostedZoneId: 
+          Fn::ImportValue:
+            !Sub ${ELBStackName}-CanonicalHostedZoneID
+  
+  BackendRoute53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+      Name: !Join   # webapp sample URL = api-chatbotai-dev.iscale-software.com
+        - '.'
+        - - !Join 
+            - '-'
+            - ['api', !Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name]]
+          - !Ref ClientDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !Join 
+          - '.'
+          - - 'dualstack'
+            - Fn::ImportValue:
+                !Sub "${ELBStackName}-DNSName"
+        HostedZoneId: 
+          Fn::ImportValue:
+            !Sub ${ELBStackName}-CanonicalHostedZoneID
   
   # ArgoCDTargetGroup:
   #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -604,6 +691,20 @@ Resources:
                 Resource: 
                   - !GetAtt ECRWebApp.Arn
                   - !GetAtt ECRBackend.Arn
+
+        - PolicyName: ssmRunCommand # for straight deployment without ArgoCD (temporary)
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:    
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:ListCommandInvocations
+                  - ssm:GetCommandInvocation
+                Resource: 
+                  - !Join [':', ['arn:aws:ec2', !Ref AWS::Region, !Ref AWS::AccountId, 'instance/*']]
+                  - !Join [':', ['arn:aws:ssm', !Ref AWS::Region, ':document/AWS-RunShellScript']]
+                  - !Join [':', ['arn:aws:ssm', !Ref AWS::Region, !Ref AWS::AccountId, 'document/chatbotai-rollout']]
 
   ExternalSecretsUser:    # for External Secrets (will change to IAM role once integrated with ArgoCD)
     Type: AWS::IAM::User
