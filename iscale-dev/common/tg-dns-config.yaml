@@ -1,0 +1,223 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS Record, Target Group, and HTTPS Listener Rule common template (applicable for ALB only)
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+          - ClientDomainName
+          - TargetGroupPort
+      - Label:
+          default: Target Group Configuration
+        Parameters:
+          - LoadBalancerHostName
+          - HealthCheckIntervalSeconds
+          - HealthCheckTimeoutSeconds
+          - HealthyThresholdCount
+          - UnhealthyThresholdCount
+          - HealhCheckPath
+          - Protocol
+          - TargetType
+      - Label:
+          default: Listener Configuration
+        Parameters:
+          - ListenerPriority
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - AlbStackName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      AlbStackName:
+        default: ALB Stack Name
+      ClientDomainName:
+        default: Client Domain Name
+      TargetGroupPort:
+        default: Target Group Port
+
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (e.g. amazon-linux).
+    Type: String
+    Default: image-builder
+    AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ClientDomainName:
+    Description: The domain name for the client.
+    Type: String
+    Default: iscale-software.com
+  AlbStackName:
+    Description: The name of the ALB stack. 
+    Type: String
+    Default: iscale-dev-stg-uw2-alb
+    MinLength: 1
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  TargetGroupPort:
+    Description: The port for the target group.
+    Type: Number
+    Default: 30501
+    MinValue: 1
+    MaxValue: 65535
+  LoadBalancerHostName:
+    Description: The host name of the load balancer.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+    MinLength: 1
+  HealthCheckIntervalSeconds:
+    Description: The interval in seconds between health checks.
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 300
+  HealthCheckTimeoutSeconds:
+    Description: The timeout in seconds for health checks.
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 60
+  HealthyThresholdCount:
+    Description: The number of consecutive successful health checks required before considering an instance healthy.
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+  UnhealthyThresholdCount:
+    Description: The number of consecutive failed health checks required before considering an instance unhealthy.
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+  HealhCheckPath:
+    Description: The path for the health check.
+    Type: String
+    Default: /
+    AllowedPattern: "^[a-zA-Z0-9/]+$"
+    MinLength: 1
+    MaxLength: 255
+  Protocol:
+    Description: The protocol for the target group.
+    Type: String
+    Default: HTTP
+    AllowedValues:
+      - HTTP
+      - HTTPS
+      - TCP
+      - UDP
+    ConstraintDescription: Must be one of the allowed protocols.
+  TargetType:
+    Description: The type of target for the target group.
+    Type: String
+    Default: instance
+    AllowedValues:
+      - instance
+      - ip
+      - lambda
+    ConstraintDescription: Must be one of the allowed target types.
+  ListenerPriority:
+    Description: The priority for the listener rule.
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 10000
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml      
+  
+
+Resources:
+
+  Route53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+      Name: !Join   # sample URL = chatbotai-webapp-dev.iscale-software.com
+        - '.'
+        - - !Join 
+            - '-'
+            - [!Ref LoadBalancerHostName, !Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]
+          - !Ref ClientDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !Join 
+          - '.'
+          - - 'dualstack'
+            - Fn::ImportValue:
+                !Sub "${AlbStackName}-DNSName"
+        HostedZoneId: 
+          Fn::ImportValue:
+            !Sub ${AlbStackName}-CanonicalHostedZoneID
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      HealthCheckIntervalSeconds: !Ref HealthCheckIntervalSeconds
+      HealthCheckPath: !Ref HealhCheckPath
+      HealthCheckTimeoutSeconds: !Ref HealthCheckTimeoutSeconds
+      HealthyThresholdCount: !Ref HealthyThresholdCount
+      Port: !Ref TargetGroupPort
+      Protocol: !Ref Protocol
+      TargetType: !Ref TargetType
+      UnhealthyThresholdCount: !Ref UnhealthyThresholdCount
+      VpcId: 
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+
+  HTTPSListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub "${AlbStackName}-ApplicationListenerArn" 
+      Priority: !Ref ListenerPriority
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Ref Route53RecordSet
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
