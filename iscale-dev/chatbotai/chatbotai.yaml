@@ -212,159 +212,39 @@ Resources:
         LaunchTemplate: True
         VolumeSize: 20
         VolumeType: gp3
-##
-# Target Groups for webapp, backend, and weaviate
-##
-  WebappTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], webapp]]
-      HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      Port: 30501
-      Protocol: HTTP
-      TargetType: instance
-      UnhealthyThresholdCount: 2
-      VpcId: 
-        Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcId"
-      
-  WeaviateRestTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], weaviate-rest]]
-      HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      Port: 30081
-      Protocol: HTTP
-      TargetType: instance
-      UnhealthyThresholdCount: 2
-      VpcId: 
-        Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcId"
 
-  WeaviateGrpcTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], weaviate-grpc]]
-      HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      Port: 30051
-      Protocol: HTTP
-      TargetType: instance
-      UnhealthyThresholdCount: 2
-      VpcId: 
-        Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcId"
-  
-  BackendTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], backend]]
-      HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /health
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      Port: 30080
-      Protocol: HTTP
-      TargetType: instance
-      UnhealthyThresholdCount: 2
-      VpcId: 
-        Fn::ImportValue:
-          !Sub "${NetworkStackName}-VpcId"
 ##
-# Route 53 for webapp, backend, and weaviate
+# DNS, Target Groups, and HTTP Listener Rules
 ##
-
-  WebappRoute53RecordSet:
-    Type: AWS::Route53::RecordSet
+  WebappTgDnsConfigStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
-      Name: !Join   # webapp sample URL = webapp-chatbotai-dev.iscale-software.com
-        - '.'
-        - - !Join 
-            - '-'
-            - ['webapp', !Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name]]
-          - !Ref ClientDomainName
-      Type: A
-      AliasTarget:
-        DNSName: !Join 
-          - '.'
-          - - 'dualstack'
-            - Fn::ImportValue:
-                !Sub "${ELBStackName}-DNSName"
-        HostedZoneId: 
-          Fn::ImportValue:
-            !Sub ${ELBStackName}-CanonicalHostedZoneID
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/tg-dns-config.yaml
+      Parameters:
+        Name: 'webapp'
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AlbStackName: !Ref ELBStackName
+        ListenerPriority: 21
+        LoadBalancerHostName: !Ref LoadBalancerHostName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        TargetGroupPort: 30501
   
-  WeaviateRestRoute53RecordSet:
-    Type: AWS::Route53::RecordSet
+  BackendTgDnsConfigStack:
+    Type: AWS::CloudFormation::Stack
     Properties:
-      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
-      Name: !Join   # webapp sample URL = weaviate-chatbotai-dev.iscale-software.com
-        - '.'
-        - - !Join 
-            - '-'
-            - ['weaviate', !Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name]]
-          - !Ref ClientDomainName
-      Type: A
-      AliasTarget:
-        DNSName: !Join 
-          - '.'
-          - - 'dualstack'
-            - Fn::ImportValue:
-                !Sub "${ELBStackName}-DNSName"
-        HostedZoneId: 
-          Fn::ImportValue:
-            !Sub ${ELBStackName}-CanonicalHostedZoneID
-  
-  WeaviateGrpcRoute53RecordSet:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
-      Name: !Join   # webapp sample URL = weaviateg-chatbotai-dev.iscale-software.com
-        - '.'
-        - - !Join 
-            - '-'
-            - ['weaviateg', !Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name]]
-          - !Ref ClientDomainName
-      Type: A
-      AliasTarget:
-        DNSName: !Join 
-          - '.'
-          - - 'dualstack'
-            - Fn::ImportValue:
-                !Sub "${ELBStackName}-DNSName"
-        HostedZoneId: 
-          Fn::ImportValue:
-            !Sub ${ELBStackName}-CanonicalHostedZoneID
-  
-  BackendRoute53RecordSet:
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
-      Name: !Join   # webapp sample URL = api-chatbotai-dev.iscale-software.com
-        - '.'
-        - - !Join 
-            - '-'
-            - ['api', !Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name]]
-          - !Ref ClientDomainName
-      Type: A
-      AliasTarget:
-        DNSName: !Join 
-          - '.'
-          - - 'dualstack'
-            - Fn::ImportValue:
-                !Sub "${ELBStackName}-DNSName"
-        HostedZoneId: 
-          Fn::ImportValue:
-            !Sub ${ELBStackName}-CanonicalHostedZoneID
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/tg-dns-config.yaml
+      Parameters:
+        Name: 'api'
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AlbStackName: !Ref ELBStackName
+        ListenerPriority: 21
+        LoadBalancerHostName: !Ref LoadBalancerHostName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        TargetGroupPort: 30501
   
   # ArgoCDTargetGroup:
   #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
