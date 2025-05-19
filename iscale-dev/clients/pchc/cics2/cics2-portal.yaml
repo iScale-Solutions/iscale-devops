@@ -87,7 +87,7 @@ Parameters:
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
-    Default: 'pchc-stg-ase1-cics2-network'
+    Default: 'pchc-stg-uw2-cics2-network'
     MinLength: 1
   SNSStackName:
     Description: The name of the SNS stack.
@@ -97,7 +97,7 @@ Parameters:
   CicsPrereqStackName:
     Description: The name of the CICS2-prereq stack.
     Type: String
-    Default: 'pchc-stg-uw2-cics2-backend'
+    Default: 'pchc-stg-uw2-cics2-prereq'
     MinLength: 1
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com).
@@ -121,7 +121,7 @@ Parameters:
   MaxContainers:
     Description: Maximum running containers. 
     Type: Number
-    Default: 40
+    Default: 4
   AutoScalingTargetValue:
     Description: Target percentage value for scaling. 
     Type: Number
@@ -201,8 +201,13 @@ Resources:
                   - s3:*
                   - s3-object-lambda:*
                 Resource:
-                  - !Join ['', ['arn:aws:s3:::', !Ref EnvBucket]] # change EnvBucket, use Fn::ImportValue
-                  - !Join ['', ["arn:aws:s3:::", !Ref EnvBucket, '/*']] # change EnvBucket, use Fn::ImportValue
+                  - Fn::ImportValue:
+                      !Sub "${CicsPrereqStackName}-PortalS3Arn"
+                  - !Join
+                    - ''
+                    - - Fn::ImportValue:
+                          !Sub "${CicsPrereqStackName}-PortalS3Arn"
+                      - "/*"
               - Effect: Allow
                 Action: 
                   - ssmmessages:CreateControlChannel
@@ -270,8 +275,12 @@ Resources:
             - ContainerPort: !Ref ContainerPort
           Essential: true
           EnvironmentFiles:
-            - Value: !Join ['', ['arn:aws:s3:::', !Ref EnvBucket, /uat.env]] # change EnvBucket, use Fn::ImportValue
-              Type: "s3"
+            - Type: "s3"
+              Value: !Join
+                - '/'
+                - - Fn::ImportValue:
+                      !Sub "${CicsPrereqStackName}-PortalS3Arn"
+                  - "uat.env"
           Image: !Ref ContainerImageUri
           LogConfiguration:
             LogDriver: awslogs
@@ -432,7 +441,8 @@ Resources:
                   - ecr:BatchCheckLayerAvailability
                   - ecr:PutImage
                 Resource: 
-                 - !Ref EcrArnName # change , use Fn::ImportValue: CicsPrereqStackName
+                 - Fn::ImportValue:
+                    !Sub "${CicsPrereqStackName}-PortalEcrArnName"
               - Effect: Allow
                 Action: ecr:GetAuthorizationToken
                 Resource: "*"
