@@ -117,11 +117,28 @@ Resources:
       ImageTagMutability: MUTABLE # MUTABLE=overwritten, IMMUTABLE=not
       # LifecyclePolicy: 
       #   LifecyclePolicy
-      RepositoryName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr]]
+      RepositoryName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ["-", !Ref Name]], icltool-ecr]]
       # RepositoryPolicyText: Json
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ecr]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ["-", !Ref Name]], icltool-ecr]]
+  
+  ECRPortal:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: false
+      EncryptionConfiguration: 
+        EncryptionType: AES256
+      ImageScanningConfiguration: 
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE # MUTABLE=overwritten, IMMUTABLE=not
+      # LifecyclePolicy: 
+      #   LifecyclePolicy
+      RepositoryName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ["-", !Ref Name] ], portal-ecr]]
+      # RepositoryPolicyText: Json
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ["-", !Ref Name] ], portal-ecr]]
 
 ###
 # S3 section
@@ -153,6 +170,35 @@ Resources:
       Tags: 
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, env-bucket]]
+        - Key: Organization
+          Value: !Ref OrgName
+  
+  IclS3Bucket:
+    Type: AWS::S3::Bucket
+    # This will become an issue if the stack is removed, then recreated. If retained, the bucket name will collide with the next instance of the stack
+    # Recommend not specifying bucket name here for non-prod setups
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ["-", !Ref Name] ], icltool-bucket]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ["-", !Ref Name] ], icltool-bucket]]
         - Key: Organization
           Value: !Ref OrgName
 
@@ -223,19 +269,37 @@ Outputs:
     Description: DNS name of the Application Load Balancer
     Value: !Ref ECR
     Export:
-      Name: !Sub ${AWS::StackName}-EcrName
+      Name: !Sub ${AWS::StackName}-IclEcrName
 
   EcrArnName:
     Description: DNS name of the Application Load Balancer
     Value: !GetAtt ECR.Arn
     Export:
-      Name: !Sub ${AWS::StackName}-EcrArnName
+      Name: !Sub ${AWS::StackName}-IclEcrArnName
   
+  PortalEcrName:
+    Description: DNS name of the Application Load Balancer
+    Value: !Ref ECRPortal
+    Export:
+      Name: !Sub ${AWS::StackName}-PortalEcrName
+
+  PortalEcrArnName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ECRPortal.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-PortalEcrArnName
+
   S3Name:
     Description: Endpoint URL
     Value: !Ref S3Bucket
     Export:
-      Name: !Sub ${AWS::StackName}-S3Name
+      Name: !Sub ${AWS::StackName}-PortalS3Name
+  
+  IclS3Name:
+    Description: Endpoint URL
+    Value: !Ref IclS3Bucket
+    Export:
+      Name: !Sub ${AWS::StackName}-IclS3Name
   
   DocumentDBStackName:
     Description: DocumentDB stack name
