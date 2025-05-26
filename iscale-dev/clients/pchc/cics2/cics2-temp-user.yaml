@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CM2 Script Temp User
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 15
+    Default: cics2-tempuser
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  CM2ScriptDeploymentUserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      Policies:
+        - PolicyName: CM2ScriptDeploymentUserPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CreateUserAndAccessKey
+                Effect: Allow
+                Action:
+                  - iam:CreateUser
+                  - iam:CreateAccessKey
+                Resource: !Join ['', ['arn:aws:iam::', !Ref 'AWS::AccountId', ':user/', !Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name] ], '-bank*']]
+              - Sid: CreateS3BucketAndPolicy
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:PutBucketPolicy
+                  - s3:GetBucketPolicy
+                  - s3:PutObject
+                Resource: !Join ['', ['arn:aws:s3:::', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name] ], '-bank*']]
+              - Sid: LambdaFunctionPermissions
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListFunctions
+                Resource: !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name] ], '-bank*']]
+
