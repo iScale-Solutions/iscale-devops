@@ -437,42 +437,50 @@ Resources:
         ZipFile: |
           import boto3
           import os
-          
+
           ec2 = boto3.resource('ec2')
 
           def lambda_handler(event, context):
-            # Use the filter() method of the instances collection to retrieve
-            # all running EC2 instances.
-            system_tag_value = os.environ.get('SYSTEM_TAG', 'DefaultValue')
-            filters = [
-                {
-                    'Name' : 'tag:System', 
-                    'Values': [system_tag_value]
-                },
-                {
-                    'Name': 'instance-state-name', 
-                    'Values': ['running']
-                }]
-            
-            # Filter the and locate all running instances
-            instances = ec2.instances.filter(Filters=filters)
-            instance_ids_to_start = [instance.id for instance in instances]
-            
-            # ensures instances are actually shutdown 
-            if len(instance_ids_to_start) > 0:
-                try:    
-                    # Perform the shutdown
-                    shuttingDown = ec2.instances.filter(InstanceIds=instance_ids_to_start).start()
-                    print(f"Started {len(instance_ids_to_start)} instances")
-                except Exception as e:
-                    print(f"Error starting instances: {e}")
-            else:
-                print ("Nothing to see here")
+              # Retrieve the system tag value from environment variables
+              system_tag_value = os.environ.get('SYSTEM_TAG', 'DefaultValue')
+              
+              # Define filters to find stopped instances with the specified system tag
+              filters = [
+                  {
+                      'Name': 'tag:System',
+                      'Values': [system_tag_value]
+                  },
+                  {
+                      'Name': 'instance-state-name',
+                      'Values': ['stopped']
+                  }
+              ]
+              
+              # Filter and locate all stopped instances with the given system tag
+              instances = ec2.instances.filter(Filters=filters)
+              
+              # Now filter out instances where the 'Name' tag contains 'manual'
+              instance_ids_to_start = []
+              for instance in instances:
+                  name_tag = next((tag['Value'] for tag in instance.tags if tag['Key'] == 'Name'), '').lower()
+                  if 'manual' not in name_tag:
+                      instance_ids_to_start.append(instance.id)
+              
+              if instance_ids_to_start:
+                  try:
+                      # Start the filtered instances
+                      starting_instances = ec2.instances.filter(InstanceIds=instance_ids_to_start).start()
+                      print(f"Started {len(instance_ids_to_start)} instances: {instance_ids_to_start}")
+                  except Exception as e:
+                      print(f"Error starting instances: {e}")
+              else:
+                  print("No eligible stopped instances to start.")
+              
+              return {
+                  'statusCode': 200,
+                  'statusMessage': 'OK'
+              }
 
-            return{
-                'statusCode': 200,
-                'statusMessage': 'OK'
-            }
   StartEC2InstanceByTagFunctionPermission:
     Condition: IsNotProd
     Type: AWS::IAM::Policy
