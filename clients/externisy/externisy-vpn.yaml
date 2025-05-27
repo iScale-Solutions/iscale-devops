@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Externisy VPN Server
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: VPN Server Configuration
+        Parameters:
+          - VPNInstanceType
+          - VPNInstanceAMI
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      VPNInstanceType:
+        default: VPN Server Instance type
+      VPNInstanceAMI:
+        default: VPN Server Instance AMI
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: vpn
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: externisy-prd-ew3-vpn-network
+    MinLength: 1
+  OfficeIPs:
+    Type: List<String>
+    Description: List of IP addresses (CIDRs) allowed to connect on the UDP port
+    Default: 222.127.128.170/32, 202.124.253.146/32, 202.124.253.147/32, 202.124.253.148/32, 202.124.253.149/32, 202.124.253.150/32
+  VPNInstanceAMI:
+    Description: VPN Server AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0160e8d70ebc43ee1
+  VPNInstanceType:
+    Description: Instance type for VPN server
+    Type: String
+    Default: t3a.micro
+    AllowedValues:
+      - t3a.nano
+      - t3a.micro
+      - t3a.small
+      - t3a.medium
+      - t3a.large
+  VPNPort:
+    Description: The port number on which the VPN Server listens
+    Type: Number
+    Default: 1194
+    MinValue: 1
+    MaxValue: 65535
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: externisy-prd-ew3-sns
+    MinLength: 1
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  ### VPN Server Section ###
+
+  VPNServerEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      Policies:
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: AccessCloudWatchMetrics
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - ec2:DescribeTags
+                Resource: '*'
+
+  VPNServerInstancePublicEIP:
+    Condition: IsProd
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref VPNServerInstance
+  
+  VPNServerIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, server]]
+      Roles:
+        - !Ref VPNServerEC2Role
+
+  VPNServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupIngress:
+        - CidrIp: !Select [0, !Ref OfficeIPs]
+          IpProtocol: UDP
+          FromPort: !Ref VPNPort
+          ToPort: !Ref VPNPort
+          Description: Office IP
+        - CidrIp: !Select [1, !Ref OfficeIPs]
+          IpProtocol: UDP
+          FromPort: !Ref VPNPort
+          ToPort: !Ref VPNPort
+          Description: Office IP
+        - CidrIp: !Select [2, !Ref OfficeIPs]
+          IpProtocol: UDP
+          FromPort: !Ref VPNPort
+          ToPort: !Ref VPNPort
+          Description: Office IP
+        - CidrIp: !Select [3, !Ref OfficeIPs]
+          IpProtocol: UDP
+          FromPort: !Ref VPNPort
+          ToPort: !Ref VPNPort
+          Description: Office IP
+        - CidrIp: !Select [4, !Ref OfficeIPs]
+          IpProtocol: UDP
+          FromPort: !Ref VPNPort
+          ToPort: !Ref VPNPort
+          Description: Office IP
+        - CidrIp: !Select [5, !Ref OfficeIPs]
+          IpProtocol: UDP
+          FromPort: !Ref VPNPort
+          ToPort: !Ref VPNPort
+          Description: Office IP
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  VPNServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: true
+      ImageId: !Ref VPNInstanceAMI
+      InstanceType: !Ref VPNInstanceType
+      IamInstanceProfile: !Ref VPNServerIamInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref VPNServerSecurityGroup
+          SubnetId:
+            Fn::ImportValue:
+              Fn::Sub: '${NetworkStackName}-PublicSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+
+  ### Alarms Section ###
+
+  # VPNServerLowDiskSpaceAlarm:
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, low, disk]]
+  #     MetricName: disk_used_percent
+  #     Namespace: CWAgent
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: ImageId
+  #         Value: !Ref VPNInstanceAMI
+  #       - Name: InstanceId
+  #         Value: !Ref VPNServerInstance
+  #       - Name: path
+  #         Value: /
+  #       - Name: fstype
+  #         Value: xfs
+  #       - Name: InstanceType
+  #         Value: !Ref VPNInstanceType
+  #       - Name: device
+  #         Value: nvme0n1p1
+
+  # VPNServerAZ1LowMemAlarm:
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, low, mem]]
+  #     MetricName: mem_used_percent
+  #     Namespace: CWAgent
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: ImageId
+  #         Value: !Ref VPNInstanceAMI
+  #       - Name: InstanceId
+  #         Value: !Ref VPNServerInstance
+  #       - Name: InstanceType
+  #         Value: !Ref VPNInstanceType
+
+  VPNServerAZ1HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref VPNServerInstance
+
+  # VPNServerDNSRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
+  #     Name: !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+  #     Type: A
+  #     AliasTarget:
+  #       HostedZoneId: !GetAtt [ELBStack, Outputs.CanonicalHostedZoneID]
+  #       DNSName: !GetAtt [ELBStack, Outputs.DNSName] 
+
+
+### Backup ###
+
+  BackupStack:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref VPNServerInstance]]]]
