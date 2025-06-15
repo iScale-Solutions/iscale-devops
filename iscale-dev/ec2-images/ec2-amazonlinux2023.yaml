@@ -64,7 +64,7 @@ Parameters:
       - Development
       - Test
   ImageRecipeVersion:
-    Description: The version of the image recipe.
+    Description: The version of the image recipe. (use format xx.xx.xx)
     Type: String
     Default: 1.0.0 # use date formatting for versioning (yyyy.mm.dd)
     AllowedPattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$"
@@ -190,12 +190,12 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2023
-      Version: 1.0.0
+      Version: 1.0.1
       Description: Installs the CodeDeploy Agent with additional log configuration
       ChangeDescription: Initial version
       Data: |
         name: CodeDeploy - InlineData
-        description: Installation of CodeDeploy Agent
+        description: Installs the CodeDeploy Agent with additional log configuration
         schemaVersion: 1.0
         phases:
           - name: build
@@ -275,7 +275,65 @@ Resources:
                 inputs:
                   commands:
                     - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/codedeploy-logs.json
-                    - sudo systemctl enable amazon-cloudwatch-agent.service
+
+  CloudFormationLogsComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: CloudFormationLogs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Setup CloudFormation logs
+      ChangeDescription: Initial version
+      Data: |
+        name: CloudFormationLogs - InlineData
+        description: Setup CloudFormation logs
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: 01_CreateCFNLogsConfig
+                action: CreateFile
+                inputs:
+                  - path: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/cloudformation-logs.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/log/cfn-hup.log",
+                                  "log_group_name": "/var/log/cfn-hup.log",
+                                  "log_stream_name": "{hostname}_{instance_id}"
+                                },
+                                {
+                                  "file_path": "/var/log/cfn-init-cmd.log",
+                                  "log_group_name": "/var/log/cfn-init-cmd.log",
+                                  "log_stream_name": "{hostname}_{instance_id}"
+                                },
+                                {
+                                  "file_path": "/var/log/cfn-init.log",
+                                  "log_group_name": "/var/log/cfn-init.log",
+                                  "log_stream_name": "{hostname}_{instance_id}"
+                                },
+                                {
+                                  "file_path": "/var/log/cfn-wire.log",
+                                  "log_group_name": "/var/log/cfn-wire.log",
+                                  "log_stream_name": "{hostname}_{instance_id}"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: 02_AppendAndRestartCloudWatchAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/cloudformation-logs.json
 
   AL2023CommonLinuxUtilitiesComponent:
     Type: AWS::ImageBuilder::Component
@@ -327,6 +385,7 @@ Resources:
       Components: #Max 20
         - ComponentArn: !Ref CloudWatchAgentComponent
         - ComponentArn: !Ref CodeDeployComponent
+        - ComponentArn: !Ref CloudFormationLogsComponent
         - ComponentArn: !Ref AL2023CommonLinuxUtilitiesComponent
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-linux/1.0.4/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux/1.0.2/1']]
