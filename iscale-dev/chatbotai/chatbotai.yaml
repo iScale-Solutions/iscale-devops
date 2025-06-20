@@ -203,7 +203,7 @@ Resources:
         InstanceSubnet: Private
         InstanceType: !Ref InstanceType
         LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
-        LoadBalancerPriority: 11
+        LoadBalancerPriority: !If [IsNotProd, 11, 30]
         LoadBalancerStackName: !Ref ELBStackName
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId:
@@ -229,11 +229,11 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         AlbStackName: !Ref ELBStackName
-        ListenerPriority: 21
+        ListenerPriority: !If [IsNotProd, 21, 31]
         LoadBalancerHostName: !Ref LoadBalancerHostName
         NetworkStackName: !Ref NetworkStackName
         ClientDomainName: !Ref ClientDomainName
-        TargetGroupPort: !If [IsNotProd, 30501, 31501]
+        TargetGroupPort: 30501
   
   BackendTgDnsConfigStack:
     Type: AWS::CloudFormation::Stack
@@ -244,11 +244,26 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         AlbStackName: !Ref ELBStackName
-        ListenerPriority: 22
+        ListenerPriority: !If [IsNotProd, 22, 32]
         LoadBalancerHostName: !Ref LoadBalancerHostName
         NetworkStackName: !Ref NetworkStackName
         ClientDomainName: !Ref ClientDomainName
-        TargetGroupPort: !If [IsNotProd, 30080, 31080]
+        TargetGroupPort: 30080
+  
+  WsgiTgDnsConfigStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/tg-dns-config.yaml
+      Parameters:
+        Name: 'wsgi'
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AlbStackName: !Ref ELBStackName
+        ListenerPriority: !If [IsNotProd, 23, 33]
+        LoadBalancerHostName: !Ref LoadBalancerHostName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        TargetGroupPort: 30800
 
 ##
 # Security Group Ingress - webapp and backend
@@ -259,8 +274,8 @@ Resources:
       Description: Allow connection from Load Balancer
       GroupId: !GetAtt K3sMasterServerStack.Outputs.AppServerSecurityGroup
       IpProtocol: tcp
-      FromPort: !If [IsNotProd, 30501, 31501]
-      ToPort: !If [IsNotProd, 30501, 31501]
+      FromPort: 30501
+      ToPort: 30501
       SourceSecurityGroupId: 
         Fn::ImportValue:
           !Sub "${ELBStackName}-SecurityGroupId"
@@ -271,12 +286,24 @@ Resources:
       Description: Allow connection from Load Balancer
       GroupId: !GetAtt K3sMasterServerStack.Outputs.AppServerSecurityGroup
       IpProtocol: tcp
-      FromPort: !If [IsNotProd, 30080, 31080]
-      ToPort: !If [IsNotProd, 30080, 31080]
+      FromPort: 30080
+      ToPort: 30080
       SourceSecurityGroupId: 
         Fn::ImportValue:
           !Sub "${ELBStackName}-SecurityGroupId"
-          
+
+  WsgiSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from Load Balancer
+      GroupId: !GetAtt K3sMasterServerStack.Outputs.AppServerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 30800
+      ToPort: 30800
+      SourceSecurityGroupId: 
+        Fn::ImportValue:
+          !Sub "${ELBStackName}-SecurityGroupId"
+
 ##
 # K3s Master Scheduler
 ##       
@@ -595,7 +622,7 @@ Resources:
         Engine: postgres
         EngineVersion: 17.4
         Family: postgres17
-        InstanceType: !If [IsProd, db.t4g.large, db.t4g.micro]
+        InstanceType: !If [IsProd, db.t4g.small, db.t4g.micro]
         MasterUser: root
         MultiAz: !If [IsProd, true, false]
         NetworkStackName: !Ref NetworkStackName
