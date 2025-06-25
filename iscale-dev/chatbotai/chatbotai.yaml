@@ -679,24 +679,173 @@ Resources:
         VolumeSize: 60
         VolumeType: gp3
   
-  # K3sWorkerSchedulerStack:
-  #   DependsOn:
-  #     - DBStack
-  #     - K3sWorkerServerStack
-    # Condition: IsNotProd
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-  #     Parameters:
-  #       Name: !Ref Name
-  #       EnvName: !Ref EnvName
-  #       OrgName: !Ref OrgName
-  #       StartScheduleExpression: !Ref StartScheduleExpression
-  #       StopScheduleExpression: !Ref StopScheduleExpression
-  #       UseFriendlyNames: FALSE
-  #       CodeDeployApplicationName: placeholder
-  #       CodeDeployDeploymentGroupName: placeholder
+  LambdaScheduleK3sWorkerASGRole:
+    Condition: IsProd
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ScheduleK3sWorkerASGPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:SetDesiredCapacity
+                  - autoscaling:UpdateAutoScalingGroup
+                Resource: !Join ['', ['arn:aws:autoscaling:', !Ref AWS::Region, ":", !Ref AWS::AccountId, ":autoScalingGroup:*:autoScalingGroupName/", !GetAtt K3sWorkerServerStack.Outputs.AutoScalingGroupName]]
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
 
+  StartK3sWrokerASGFunction:
+    Condition: IsProd
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function starting K3s worker ASG
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleK3sWorkerASGRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          ASG_NAME: !GetAtt K3sWorkerServerStack.Outputs.AutoScalingGroupName
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              asg_name = os.environ.get('ASG_NAME', 'DefaultValue')
+              client = boto3.client('autoscaling')
+              response = client.set_desired_capacity(
+                  AutoScalingGroupName=asg_name,
+                  DesiredCapacity=1,
+                  HonorCooldown=True
+              )
+              return {
+                  'statusCode': 200,
+                  'statusMessage': 'ASG started successfully'
+              }
+  StartK3sWrokerASGFunctionPermission:
+    Condition: IsProd
+    DependsOn:
+      - UserPermissionsGroup
+    Type: AWS::IAM::Policy
+    Properties:
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt StartK3sWrokerASGFunction.Arn
+      PolicyName: AllowStartK3sWorkerASG
+
+  StartScheduledK3sWorkerASGEventRule:
+    Condition: IsProd
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, k3sworker, start]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ Start, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StartScheduleExpression]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StartK3sWrokerASGFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, k3sworker, start]]
+  
+  StopK3sWorkerASGFunction:
+    Condition: IsProd
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function stopping K3s worker ASG
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleK3sWorkerASGRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          ASG_NAME: !GetAtt K3sWorkerServerStack.Outputs.AutoScalingGroupName
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              asg_name = os.environ.get('ASG_NAME', 'DefaultValue')
+              client = boto3.client('autoscaling')
+              response = client.set_desired_capacity(
+                  AutoScalingGroupName=asg_name,
+                  DesiredCapacity=0,
+                  HonorCooldown=True
+              )
+              return {
+                  'statusCode': 200,
+                  'statusMessage': 'ASG stopped successfully'
+              }
+  StopK3sWrokerASGFunctionPermission:
+    Condition: IsProd
+    Type: AWS::IAM::Policy
+    Properties:
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt StopK3sWorkerASGFunction.Arn
+      PolicyName: AllowStopK3sWorkerASG
+  StopScheduledK3sWorkerASGEventRule:
+    Condition: IsProd
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, k3sworker, stop]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ Stop, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StopScheduleExpression]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StopK3sWorkerASGFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, k3sworker, stop]]
+  ScheduledEventPermissionToStartK3sWorkerASG:
+    Condition: IsProd
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartK3sWrokerASGFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartScheduledK3sWorkerASGEventRule.Arn
+  ScheduledEventPermissionToStopK3sWorkerASG:
+    Condition: IsProd
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopK3sWorkerASGFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopScheduledK3sWorkerASGEventRule.Arn
 
 
 ##
