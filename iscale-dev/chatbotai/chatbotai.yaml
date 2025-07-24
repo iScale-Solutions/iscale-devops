@@ -17,6 +17,8 @@ Metadata:
           - SNSStackName
           - DeletionProtection
           - ClientDomainName
+          - ELBStackName
+          - LoadBalancerHostName
       - Label:
           default: Instance Configuration
         Parameters:
@@ -28,6 +30,8 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
+          - EC2InstanceTag
+          - UseFriendlyNames
 
     ParameterLabels:
       Name:
@@ -93,7 +97,11 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-0edf4a7e3058418ad # AL2
+    Default: ami-0883100926d78f546 # AL2
+  InstanceAMIWorker:
+    Description: Instance AMI ID for worker nodes
+    Type: AWS::EC2::Image::Id
+    Default: ami-070da720b8892bed8 # Ubuntu
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -108,13 +116,15 @@ Parameters:
       - t3.medium
       - t3.large
       - t3.xlarge
-  # UseExistingELB:
-  #   Description: Use existing ELB
-  #   Type: String
-  #   Default: true
-  #   AllowedValues:
-  #     - true
-  #     - false
+  ELBStackName:
+    Description: The name of the ELB stack
+    Type: String
+    Default: iscale-dev-stg-uw2-alb
+    MinLength: 1
+  LoadBalancerHostName:
+    Description: The host name of the load balancer
+    Type: String
+    Default: ''
   NetworkStackName:
     Description: The name of the network stack
     Type: String
@@ -133,14 +143,17 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
-  ALBListenerArn:
-    Description: ARN of the ALB listener
+  EC2InstanceTag:
+    Description: The tag to identify the EC2 instance
     Type: String
-    Default: arn:aws:elasticloadbalancing:us-west-2:338284463834:listener/app/iscale-dev-stg-uw2-alb-loadbal/df36d54b3af513a9/3192c85b49bab3eb
-  ALBDNSName:
-    Description: DNS name of the ALB
+    Default: CHATBOTAI
+  UseFriendlyNames:
+    Description: Set to TRUE to have nice formatted scheduler event names
     Type: String
-    Default: iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com
+    AllowedValues:
+      - TRUE
+      - FALSE
+    Default: TRUE
 
 Mappings:
   Fn::Transform:
@@ -154,61 +167,687 @@ Conditions:
     Parameters:
        Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
-  # IsExistingELB: !Not [!Equals [!Ref UseExistingELB, '']]
+  HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
+  UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
 
 Resources:
 
 ##
-# DNS
-# 
-  DNSRecord:
-    Type: AWS::Route53::RecordSet
+# K3s Cluster
+##
+  K3sMasterServerStack:
+    DependsOn:
+      - DBStack
+    Type: AWS::CloudFormation::Stack
     Properties:
-      HostedZoneId: "Z3IVOZ67OCE9RL"
-      Name: "chatbotai.iscale-software.com." 
-      Type: "A"
-      AliasTarget:
-        HostedZoneId: "Z1H1FL5HABSF5"
-        DNSName: !Join ['dualstack.', [!Ref ALBDNSName]] #"dualstack.iscale-dev-stg-uw2-alb-loadbal-1543139786.us-west-2.elb.amazonaws.com"
-        EvaluateTargetHealth: false
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, master]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGHealthCheckType: EC2
+        ASGMaxSize: 1
+        ASGDesiredSize: 0
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+        InstancePort: 8051
+        InstanceSubnet: Private
+        InstanceType: !Ref InstanceType
+        LoadBalancerHostName: !If 
+        - HasLoadBalancerHostName
+        - !If 
+            - IsNotProd
+            - !Join 
+                - '-'
+                - [!Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name]]
+            - !Ref LoadBalancerHostName
+        - !Ref 'AWS::NoValue'
+        LoadBalancerPriority: !If [IsNotProd, 11, 30]
+        LoadBalancerStackName: !Ref ELBStackName
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        VolumeName: /dev/sda1
+        LaunchTemplate: True
+        VolumeSize: !If [IsNotProd, 20, 50]
+        VolumeType: gp3
 
-  ALBListenerRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+##
+# DNS, Target Groups, and HTTP Listener Rules
+##
+  WebappTgDnsConfigStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: IsNotProd
     Properties:
-      ListenerArn: !Ref ALBListenerArn
-      Priority: 11
-      Conditions:
-        - Field: host-header
-          HostHeaderConfig:
-            Values:
-              - chatbotai.iscale-software.com
-      Actions:
-        - Type: forward
-          TargetGroupArn: !Ref K3sTargetGroup
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/tg-dns-config.yaml
+      Parameters:
+        Name: 'webapp'
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AlbStackName: !Ref ELBStackName
+        ListenerPriority: !If [IsNotProd, 21, 31]
+        LoadBalancerHostName: !Ref LoadBalancerHostName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        TargetGroupPort: 30501
+  
+  BackendTgDnsConfigStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/tg-dns-config.yaml
+      Parameters:
+        Name: 'api'
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AlbStackName: !Ref ELBStackName
+        ListenerPriority: !If [IsNotProd, 22, 32]
+        LoadBalancerHostName: !Ref LoadBalancerHostName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        TargetGroupPort: 30080
+  
+  WsgiTgDnsConfigStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/tg-dns-config.yaml
+      Parameters:
+        Name: 'wsgi'
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        AlbStackName: !Ref ELBStackName
+        ListenerPriority: !If [IsNotProd, 23, 33]
+        LoadBalancerHostName: !Ref LoadBalancerHostName
+        NetworkStackName: !Ref NetworkStackName
+        ClientDomainName: !Ref ClientDomainName
+        TargetGroupPort: 30800
 
-  K3sTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+##
+# Security Group Ingress - webapp and backend - these Target Groups Should be manually attached to the target Nodes
+##
+  WebAppSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]] 
-      VpcId: 
+      Description: Allow connection from Load Balancer
+      GroupId: !If [IsNotProd, !GetAtt K3sMasterServerStack.Outputs.AppServerSecurityGroup, !GetAtt K3sWorkerServerStack.Outputs.AppServerSecurityGroup] 
+      IpProtocol: tcp
+      FromPort: 30501
+      ToPort: 30501
+      SourceSecurityGroupId: 
         Fn::ImportValue:
-          !Sub ${NetworkStackName}-VpcId
-      Protocol: HTTP
-      Port: 9000
-      TargetType: instance
+          !Sub "${ELBStackName}-SecurityGroupId"
+  
+  BackendSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from Load Balancer
+      GroupId: !If [IsNotProd, !GetAtt K3sMasterServerStack.Outputs.AppServerSecurityGroup, !GetAtt K3sWorkerServerStack.Outputs.AppServerSecurityGroup] 
+      IpProtocol: tcp
+      FromPort: 30080
+      ToPort: 30080
+      SourceSecurityGroupId: 
+        Fn::ImportValue:
+          !Sub "${ELBStackName}-SecurityGroupId"
 
-      HealthCheckProtocol: HTTP
-      HealthCheckPath: /
-      HealthCheckPort: traffic-port
-      Matcher:
-        HttpCode: 200
-      Tags:
-        - Key: Name
-          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-        - Key: Environment
-          Value: !Ref EnvName
-        - Key: Organization
-          Value: !Ref OrgName       
+  WsgiSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from Load Balancer
+      GroupId: !If [IsNotProd, !GetAtt K3sMasterServerStack.Outputs.AppServerSecurityGroup, !GetAtt K3sWorkerServerStack.Outputs.AppServerSecurityGroup] 
+      IpProtocol: tcp
+      FromPort: 30800
+      ToPort: 30800
+      SourceSecurityGroupId: 
+        Fn::ImportValue:
+          !Sub "${ELBStackName}-SecurityGroupId"
+
+  K3sWorkerSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: IsProd
+    Properties:
+      Description: Allow connection from Worker Nodes
+      GroupId: !GetAtt K3sMasterServerStack.Outputs.AppServerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6443
+      ToPort: 6443
+      SourceSecurityGroupId: !GetAtt K3sWorkerServerStack.Outputs.AppServerSecurityGroup
+
+# ##
+# # API Gateway - decom; will use wsgi container to serve the API from gchat
+# ##
+
+#   ApiGateway:
+#     Type: AWS::ApiGatewayV2::Api
+#     Properties:
+#       Name: !Join 
+#         - '-'
+#         - [!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], apigateway]
+#       ProtocolType: HTTP
+#       Description: !Join 
+#         - ' '
+#         - ['API for the Chatbot AI application in the', !Ref EnvName, 'environment']
+#       Tags:
+#         OrgName: !Ref OrgName
+#         EnvName: !Ref EnvName
+
+#   ApiGatewayIntegration:
+#     Type: AWS::ApiGatewayV2::Integration
+#     Properties:
+#       ApiId: !Ref ApiGateway
+#       IntegrationType: HTTP_PROXY
+#       IntegrationUri: !Join ['', [ 'https://', !GetAtt WsgiTgDnsConfigStack.Outputs.Route53RecordSet]]
+#       IntegrationMethod: POST
+#       PayloadFormatVersion: '1.0'
+
+#   ApiGatewayRoute:
+#     Type: AWS::ApiGatewayV2::Route
+#     Properties:
+#       ApiId: !Ref ApiGateway
+#       RouteKey: "POST /"
+#       Target: !Join 
+#         - '/'
+#         - ["integrations", !Ref ApiGatewayIntegration]
+
+#   ApiGatewayStage:
+#     Type: AWS::ApiGatewayV2::Stage
+#     Properties:
+#       ApiId: !Ref ApiGateway
+#       StageName: !FindInMap [EnvShort, !Ref EnvName, Name]
+#       AutoDeploy: true
+
+##
+# K3s Master Scheduler
+##       
+  LambdaScheduleEC2InstanceRole:
+    # Condition: IsNotProd
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ScheduleEC2InstancePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                Resource: !Join [":", ["arn", "aws", "ec2", !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', '*' ]]]]
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  StopEC2InstanceByTagFunction:
+    # Condition: IsNotProd
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function stopping an EC2 instance
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleEC2InstanceRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          SYSTEM_TAG: !Ref EC2InstanceTag
+          ENVIRONMENT_TAG: !Ref EnvName
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          
+          ec2 = boto3.resource('ec2')
+
+          def lambda_handler(event, context):
+            # Use the filter() method of the instances collection to retrieve
+            # all running EC2 instances.
+            system_tag_value = os.environ.get('SYSTEM_TAG', 'DefaultValue')
+            environment_tag_value = os.environ.get('ENVIRONMENT_TAG', 'DefaultValue')
+            filters = [
+                {
+                    'Name' : 'tag:System', 
+                    'Values': [system_tag_value]
+                },
+                {
+                    'Name': 'tag:Environment',
+                    'Values': [environment_tag_value] 
+                },
+                {
+                    'Name': 'instance-state-name', 
+                    'Values': ['running']
+                }]
+            
+            # Filter the and locate all running instances
+            instances = ec2.instances.filter(Filters=filters)
+            instance_ids_to_stop = [instance.id for instance in instances]
+            
+            # ensures instances are actually shutdown 
+            if len(instance_ids_to_stop) > 0:
+                try:    
+                    # Perform the shutdown
+                    shuttingDown = ec2.instances.filter(InstanceIds=instance_ids_to_stop).stop()
+                    print(f"Stopped {len(instance_ids_to_stop)} instances")
+                except Exception as e:
+                    print(f"Error stopping instances: {e}")
+            else:
+                print ("Nothing to see here")
+
+            return{
+                'statusCode': 200,
+                'statusMessage': 'OK'
+            }
+  StopEC2InstanceByTagFunctionPermission:
+    # Condition: IsNotProd
+    Type: AWS::IAM::Policy
+    Properties:
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt StopEC2InstanceByTagFunction.Arn
+      PolicyName: AllowStopEC2InstanceByTag
+
+  StopScheduledEC2InstanceEventRule:
+    Type: AWS::Events::Rule
+    # Condition: IsNotProd
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, stop]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ Stop, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StopScheduleExpression]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StopEC2InstanceByTagFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, stop]]
+  
+  ScheduledEventPermissionToStopEC2Instance:
+    # Condition: IsNotProd
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopEC2InstanceByTagFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopScheduledEC2InstanceEventRule.Arn
+  
+  StartEC2InstanceByTagFunction:
+    # Condition: IsNotProd
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function starting an EC2 instance
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleEC2InstanceRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          SYSTEM_TAG: !Ref EC2InstanceTag
+          ENVIRONMENT_TAG: !Ref EnvName
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          ec2 = boto3.resource('ec2')
+
+          def lambda_handler(event, context):
+              # Retrieve the system tag value from environment variables
+              system_tag_value = os.environ.get('SYSTEM_TAG', 'DefaultValue')
+              environment_tag_value = os.environ.get('ENVIRONMENT_TAG', 'DefaultValue')
+              
+              # Define filters to find stopped instances with the specified system tag
+              filters = [
+                  {
+                      'Name': 'tag:System',
+                      'Values': [system_tag_value]
+                  },
+                  {
+                      'Name': 'tag:Environment',
+                      'Values': [environment_tag_value] 
+                  },
+                  {
+                      'Name': 'instance-state-name',
+                      'Values': ['stopped']
+                  }
+              ]
+              
+              # Filter and locate all stopped instances with the given system tag
+              instances = ec2.instances.filter(Filters=filters)
+              
+              # Now filter out instances where the 'Name' tag contains 'manual'
+              instance_ids_to_start = []
+              for instance in instances:
+                  name_tag = next((tag['Value'] for tag in instance.tags if tag['Key'] == 'Name'), '').lower()
+                  if 'manual' not in name_tag:
+                      instance_ids_to_start.append(instance.id)
+              
+              if instance_ids_to_start:
+                  try:
+                      # Start the filtered instances
+                      starting_instances = ec2.instances.filter(InstanceIds=instance_ids_to_start).start()
+                      print(f"Started {len(instance_ids_to_start)} instances: {instance_ids_to_start}")
+                  except Exception as e:
+                      print(f"Error starting instances: {e}")
+              else:
+                  print("No eligible stopped instances to start.")
+              
+              return {
+                  'statusCode': 200,
+                  'statusMessage': 'OK'
+              }
+
+  StartEC2InstanceByTagFunctionPermission:
+    # Condition: IsNotProd
+    Type: AWS::IAM::Policy
+    Properties:
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt StartEC2InstanceByTagFunction.Arn
+      PolicyName: AllowStartEC2InstanceByTag
+
+  StartScheduledEC2InstanceEventRule:
+    Type: AWS::Events::Rule
+    # Condition: IsNotProd
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, start]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ Start, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StartScheduleExpression]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StartEC2InstanceByTagFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ec2, start]]
+  
+  ScheduledEventPermissionToStartEC2Instance:
+    # Condition: IsNotProd
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartEC2InstanceByTagFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartScheduledEC2InstanceEventRule.Arn
+
+  UserPermissionsGroup:
+    Type: AWS::IAM::Group
+
+##
+# K3s Worker Section
+##
+
+  K3sWorkerServerStack:
+    Condition: IsProd
+    DependsOn:
+      - DBStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, worker]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGHealthCheckType: EC2
+        ASGMinSize: 0
+        ASGDesiredSize: 1
+        ASGMaxSize: 2
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceAddress
+        DatabasePort:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstancePort
+        DatabaseSecurityGroupId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.SecurityGroupId
+        ExternalEFSID:
+          Fn::GetAtt:
+            - K3sMasterServerStack
+            - Outputs.AppServerEFS
+        ExternalEFSSecurityGroup:
+          Fn::GetAtt:
+            - K3sMasterServerStack
+            - Outputs.AppServerEFSSecurityGroup
+        InstanceAMI: !Ref InstanceAMIWorker
+        InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+        InstancePort: 30501
+        InstanceSubnet: Private
+        InstanceType: t3.large
+        LoadBalancerHostName: !If 
+        - HasLoadBalancerHostName
+        - !Join ['-', [!Ref LoadBalancerHostName, !FindInMap [EnvShort, !Ref EnvName, Name], 'w']]
+        - !Ref 'AWS::NoValue'
+        LoadBalancerPriority: 29
+        LoadBalancerStackName: !Ref ELBStackName
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBSecretManagerKeyId
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        LaunchTemplate: True
+        VolumeName: /dev/sda1
+        VolumeSize: 60
+        VolumeType: gp3
+  
+  LambdaScheduleK3sWorkerASGRole:
+    Condition: IsProd
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ScheduleK3sWorkerASGPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:SetDesiredCapacity
+                  - autoscaling:UpdateAutoScalingGroup
+                Resource: !Join ['', ['arn:aws:autoscaling:', !Ref AWS::Region, ":", !Ref AWS::AccountId, ":autoScalingGroup:*:autoScalingGroupName/", !GetAtt K3sWorkerServerStack.Outputs.AutoScalingGroupName]]
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  StartK3sWrokerASGFunction:
+    Condition: IsProd
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function starting K3s worker ASG
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleK3sWorkerASGRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          ASG_NAME: !GetAtt K3sWorkerServerStack.Outputs.AutoScalingGroupName
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              asg_name = os.environ.get('ASG_NAME', 'DefaultValue')
+              client = boto3.client('autoscaling')
+              response = client.set_desired_capacity(
+                  AutoScalingGroupName=asg_name,
+                  DesiredCapacity=1,
+                  HonorCooldown=True
+              )
+              return {
+                  'statusCode': 200,
+                  'statusMessage': 'ASG started successfully'
+              }
+  StartK3sWrokerASGFunctionPermission:
+    Condition: IsProd
+    DependsOn:
+      - UserPermissionsGroup
+    Type: AWS::IAM::Policy
+    Properties:
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt StartK3sWrokerASGFunction.Arn
+      PolicyName: AllowStartK3sWorkerASG
+
+  StartScheduledK3sWorkerASGEventRule:
+    Condition: IsProd
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, k3sworker, start]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ Start, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StartScheduleExpression]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StartK3sWrokerASGFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, k3sworker, start]]
+  
+  StopK3sWorkerASGFunction:
+    Condition: IsProd
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function stopping K3s worker ASG
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaScheduleK3sWorkerASGRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          ASG_NAME: !GetAtt K3sWorkerServerStack.Outputs.AutoScalingGroupName
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              asg_name = os.environ.get('ASG_NAME', 'DefaultValue')
+              client = boto3.client('autoscaling')
+              response = client.set_desired_capacity(
+                  AutoScalingGroupName=asg_name,
+                  DesiredCapacity=0,
+                  HonorCooldown=True
+              )
+              return {
+                  'statusCode': 200,
+                  'statusMessage': 'ASG stopped successfully'
+              }
+  StopK3sWrokerASGFunctionPermission:
+    Condition: IsProd
+    Type: AWS::IAM::Policy
+    Properties:
+      Groups:
+        - !Ref UserPermissionsGroup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt StopK3sWorkerASGFunction.Arn
+      PolicyName: AllowStopK3sWorkerASG
+  StopScheduledK3sWorkerASGEventRule:
+    Condition: IsProd
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !If
+        - UseFriendlyNames
+        - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, k3sworker, stop]]
+        - !Ref 'AWS::NoValue'
+      Description: !Join [' ',[ Stop, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], at, !Ref StopScheduleExpression]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StopK3sWorkerASGFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, k3sworker, stop]]
+  ScheduledEventPermissionToStartK3sWorkerASG:
+    Condition: IsProd
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartK3sWrokerASGFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartScheduledK3sWorkerASGEventRule.Arn
+  ScheduledEventPermissionToStopK3sWorkerASG:
+    Condition: IsProd
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopK3sWorkerASGFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopScheduledK3sWorkerASGEventRule.Arn
+
 
 ##
 # PostgreSQL Database
@@ -229,7 +868,7 @@ Resources:
         Engine: postgres
         EngineVersion: 17.4
         Family: postgres17
-        InstanceType: !If [IsProd, db.t4g.large, db.t4g.micro]
+        InstanceType: db.t4g.micro #!If [IsProd, db.t4g.small, db.t4g.micro]
         MasterUser: root
         MultiAz: !If [IsProd, true, false]
         NetworkStackName: !Ref NetworkStackName
@@ -239,70 +878,213 @@ Resources:
         StorageEncrypted: true
         StorageType: gp3
 
-##
-# K3s Cluster
-##
-  K3sMasterServerStack:
+  DBSchedulerStack:
     DependsOn:
       - DBStack
+    # Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
       Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
-        InstanceAMI: !Ref InstanceAMI
-        InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-        InstancePort: 80
-        InstanceSubnet: Private
-        InstanceType: !Ref InstanceType
-        InstanceRole: !Ref SSMRole
-        # LoadBalancerHostName: !Ref LoadBalancerHostName
-        LoadBalancerPriority: 100
-        # LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
-        NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
-        SNSStackName: !Ref SNSStackName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
         UseFriendlyNames: FALSE
-        LaunchTemplate: True
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
 
-  SSMRole:
-      Type: AWS::IAM::Role
-      Properties:
-        AssumeRolePolicyDocument:
-          Version: 2012-10-17
-          Statement:
-            - Effect: Allow
-              Principal:
-                Service: ec2.amazonaws.com
-              Action:
-                - sts:AssumeRole
-        ManagedPolicyArns:
-          - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
 
-  SSMInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
+###
+# ECR - web-app
+###
+
+  ECRWebApp:
+    Type: AWS::ECR::Repository
     Properties:
-      Path: '/'
-      Roles:
-        - !Ref SSMRole
+      EmptyOnDelete: false
+      EncryptionConfiguration: 
+        EncryptionType: AES256
+      ImageScanningConfiguration: 
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy: 
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "max 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      RepositoryName: !If [IsNotProd,chatbotai-webapp,chatbotai-prd-webapp] 
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], webapp]]
+        - Key: OrgName
+          Value: !Ref OrgName
+
+###
+# ECR - backend
+###
+
+  ECRBackend:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: false
+      EncryptionConfiguration: 
+        EncryptionType: AES256
+      ImageScanningConfiguration: 
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy: 
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "max 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      RepositoryName: !If [IsNotProd,chatbotai-backend,chatbotai-prd-backend] 
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], ai-backend]]
+        - Key: OrgName
+          Value: !Ref OrgName
+
+###
+# ECR - googlechat
+###
+
+  ECRGoogleChat:
+    Type: AWS::ECR::Repository
+    Properties:
+      EmptyOnDelete: false
+      EncryptionConfiguration: 
+        EncryptionType: AES256
+      ImageScanningConfiguration: 
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy: 
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "max 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      RepositoryName: !If [IsNotProd,chatbotai-googlechat,chatbotai-prd-googlechat] 
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], googlechat]]
+        - Key: OrgName
+          Value: !Ref OrgName
+
+##
+# IAM  Roles
+##
+
+  DeplomentUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, ecr-deploy]]
+      Policies:
+        - PolicyName: ecrWriteAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'     
+              - Effect: Allow
+                Action:
+                  - ecr:CompleteLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:InitiateLayerUpload
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                Resource: 
+                  - !GetAtt ECRWebApp.Arn
+                  - !GetAtt ECRBackend.Arn
+                  - !GetAtt ECRGoogleChat.Arn
+
+        - PolicyName: ssmRunCommand # for straight deployment without ArgoCD (temporary)
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:    
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:ListCommandInvocations
+                  - ssm:GetCommandInvocation
+                Resource: 
+                  - !Join [':', ['arn:aws:ec2', !Ref AWS::Region, !Ref AWS::AccountId, 'instance/*']]
+                  - !Join [':', ['arn:aws:ssm', !Ref AWS::Region, ':document/AWS-RunShellScript']]
+                  - !Join [':', ['arn:aws:ssm', !Ref AWS::Region, !Ref AWS::AccountId, 'document/chatbotai-rollout']]
+
+  ExternalSecretsUser:    # for External Secrets (will change to IAM role once integrated with ArgoCD)
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, external-secrets]]
+      Policies:
+        - PolicyName: ExternalSecretsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:    
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: 
+                  - !GetAtt DBStack.Outputs.DBSecretManager
+
+Outputs:
+  ECRWebApp:
+    Description: ECR Web App Repository
+    Value: !GetAtt ECRWebApp.RepositoryUri
+  
+  ECRBackend:
+    Description: ECR Backend Repository
+    Value: !GetAtt ECRBackend.RepositoryUri
+  
+  ECRGoogleChat:
+    Description: ECR Google Chat Repository
+    Value: !GetAtt ECRGoogleChat.RepositoryUri
+                
+
 
   
   
