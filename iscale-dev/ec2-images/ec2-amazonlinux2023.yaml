@@ -42,7 +42,7 @@ Metadata:
         default: Amazon Linux 2023 SSM Parameter
       ShareImage:
         default: Share image with other account? If sharing, encryption will be disabled.
-
+      
 Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name).
@@ -190,7 +190,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2023
-      Version: 1.0.1
+      Version: 1.0.2
       Description: Installs the CodeDeploy Agent with additional log configuration
       ChangeDescription: Initial version
       Data: |
@@ -209,7 +209,7 @@ Resources:
               - name: 02_CreateLogsConfig
                 action: CreateFile
                 inputs:
-                  - path: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/codedeploy-logs.json
+                  - path: /tmp/codedeploy-logs.json
                     content: |
                       {
                         "logs": {
@@ -270,11 +270,6 @@ Resources:
                   - path: /usr/local/bin/cfn-signal
                     target: /opt/aws/bin/cfn-signal
                     force: true
-              - name: 10_AppendAndRestartCloudWatchAgent
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/codedeploy-logs.json
 
   CloudFormationLogsComponent:
     Type: AWS::ImageBuilder::Component
@@ -283,7 +278,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2023
-      Version: 1.0.0
+      Version: 1.0.4
       Description: Setup CloudFormation logs
       ChangeDescription: Initial version
       Data: |
@@ -296,7 +291,7 @@ Resources:
               - name: 01_CreateCFNLogsConfig
                 action: CreateFile
                 inputs:
-                  - path: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/cloudformation-logs.json
+                  - path: /tmp/cloudformation-logs.json
                     content: |
                       {
                         "logs": {
@@ -329,11 +324,6 @@ Resources:
                         }
                       }
                     overwrite: true
-              - name: 02_AppendAndRestartCloudWatchAgent
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/cloudformation-logs.json
 
   AL2023CommonLinuxUtilitiesComponent:
     Type: AWS::ImageBuilder::Component
@@ -368,6 +358,30 @@ Resources:
                   commands:
                     - sudo yum install -y telnet
 
+  RestartCloudWatchAgentComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: RestartCloudWatchAgent
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.1
+      Description: Append new CloudWatch config and restart the CloudWatch Agent
+      ChangeDescription: Initial version
+      Data: |
+        name: RestartCloudWatchAgent
+        description: Append new CloudWatch config and restart the CloudWatch Agent
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: 01_AppendAndRestartCloudWatchAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/cloudformation-logs.json
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/codedeploy-logs.json
+
 ###
 # Image Recipe
 ###
@@ -387,13 +401,15 @@ Resources:
         - ComponentArn: !Ref CodeDeployComponent
         - ComponentArn: !Ref CloudFormationLogsComponent
         - ComponentArn: !Ref AL2023CommonLinuxUtilitiesComponent
+        - ComponentArn: !Ref RestartCloudWatchAgentComponent
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-linux/1.0.4/1']]
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-linux/1.0.2/1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/stig-build-linux-high/2025.1.0/1']]
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
             DeleteOnTermination: true
-            Encrypted: true
+            Encrypted: !If [IsImageShared, false, true]
             VolumeType: gp3
             VolumeSize: 8
 
@@ -401,7 +417,7 @@ Resources:
 # Image Builder
 ###
 
-  AmazonLinuxBuilder: 
+  AmazonLinux2023Builder: 
     Type: AWS::CloudFormation::Stack
     Properties: 
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
