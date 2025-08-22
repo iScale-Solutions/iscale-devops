@@ -69,6 +69,11 @@ Parameters:
     Type: String
     Default: 'pchc-stg-uw2-cics2-prereq'
     MinLength: 1
+  BatchAmiId:
+    Description: The AMI ID for Amazon Linux 2023
+    Type: AWS::EC2::Image::Id
+    Default: ami-01102c5e8ab69fb75 # Update this to the latest AL2023 AMI ID for your region
+    ConstraintDescription: Must be a valid Amazon Linux 2023 AMI ID.
 
 Mappings:
   Fn::Transform:
@@ -443,6 +448,73 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], bank000]]
         - Key: Organization
           Value: !Ref OrgName
+##
+# Batch Host
+##
+  
+  BatchHostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  BatchHostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+        - !Ref BatchHostRole
+
+  BatchHostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: 
+        Fn::ImportValue:
+          !Join ['', [!Ref NetworkStackName, '-VpcId']] 
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, batch, host, security, group]]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, batch, host, security, group]]
+
+
+  BatchHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      # KeyName: iannis-pchc #!Ref KeyName
+      InstanceType: t3.small
+      ImageId: !Ref BatchAmiId
+      IamInstanceProfile: !Ref BatchHostInstanceProfile
+      DisableApiTermination: false
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          GroupSet: 
+            - !Ref BatchHostSecurityGroup
+          SubnetId: 
+            Fn::ImportValue:
+              !Join ['', [!Ref NetworkStackName, '-PrivateSubnetId1']] 
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo dnf update -y
+          sudo dnf install -y aws-cli git
+          sudo systemctl start git
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, batch, host]]
+
 Outputs:
 
   LambdaDeploymentUserGroup:
