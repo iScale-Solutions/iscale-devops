@@ -452,7 +452,7 @@ Resources:
 # Batch Host
 ##
   
-  BatchHostRole:
+  QueueingServiceHostRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -466,42 +466,44 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
 
-  BatchHostInstanceProfile:
+  QueueingServiceHostInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Path: '/'
       Roles:
-        - !Ref BatchHostRole
+        - !Ref QueueingServiceHostRole
 
-  BatchHostSecurityGroup:
+  QueueingServiceHostSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       VpcId: 
         Fn::ImportValue:
           !Join ['', [!Ref NetworkStackName, '-VpcId']] 
-      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, batch, host, security, group]]
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], queuing, service, security, group]]
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
-          CidrIp: 0.0.0.0/0
+          SourceSecurityGroupId:
+            Fn::ImportValue:
+              !Join ['', [!Ref NetworkStackName, '-JumpHostSecurityGroupId']]
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, batch, host, security, group]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], queuing, service, security, group]]
 
 
-  BatchHost:
+  QueueingServiceHost:
     Type: AWS::EC2::Instance
     Properties:
       # KeyName: iannis-pchc #!Ref KeyName
       InstanceType: t3.small
       ImageId: !Ref BatchAmiId
-      IamInstanceProfile: !Ref BatchHostInstanceProfile
+      IamInstanceProfile: !Ref QueueingServiceHostInstanceProfile
       DisableApiTermination: false
       NetworkInterfaces:
         - DeviceIndex: 0
           GroupSet: 
-            - !Ref BatchHostSecurityGroup
+            - !Ref QueueingServiceHostSecurityGroup
           SubnetId: 
             Fn::ImportValue:
               !Join ['', [!Ref NetworkStackName, '-PrivateSubnetId1']] 
@@ -513,7 +515,74 @@ Resources:
           sudo systemctl start git
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, batch, host]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], queuing, service]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+##
+# SQS Section
+##
+
+  # Cics2SqsQueue:
+  #   Type: AWS::SQS::Queue
+  #   Properties:
+  #     QueueName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], sqs]]
+  #     VisibilityTimeout: 30
+  #     MessageRetentionPeriod: 345600 # 4 days in seconds
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], sqs]]
+  #       - Key: Organization
+  #         Value: !Ref OrgName
+
+  # QueuePolicy:
+  #   Type: AWS::SQS::QueueInlinePolicy
+  #   Properties:
+  #     Queue: !Ref Cics2SqsQueue
+  #     PolicyDocument:
+  #       Version: '2012-10-17'
+  #       Id: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], sqs]]
+  #       Statement:
+  #         - Sid: AllowS3ToSendMessage
+  #           Effect: Allow
+  #           Principal: 
+  #             Service: s3.amazonaws.com
+  #           Condition:
+  #             ArnLike:
+  #               aws:SourceArn: !Join ['', ['arn:aws:s3:::', [!Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name]], '-', bank*]]]
+  #           Action:
+  #             - 'sqs:SendMessage'
+  #           Resource: !GetAtt Cics2SqsQueue.Arn
+
+##
+# S3 Section
+##
+  # Cics2CentralS3Bucket:
+  #   Type: AWS::S3::Bucket
+  #   DeletionPolicy: Retain
+  #   Properties:
+  #     BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], central-bucket]]
+  #     VersioningConfiguration:
+  #       Status: Enabled
+  #     BucketEncryption:
+  #       ServerSideEncryptionConfiguration:
+  #         - ServerSideEncryptionByDefault:
+  #             SSEAlgorithm: AES256
+  #     LifecycleConfiguration:
+  #       Rules:
+  #       - AbortIncompleteMultipartUpload:
+  #           DaysAfterInitiation: 3
+  #         Status: Enabled
+  #     PublicAccessBlockConfiguration:
+  #       BlockPublicAcls: true
+  #       BlockPublicPolicy: true
+  #       IgnorePublicAcls: true
+  #       RestrictPublicBuckets: true
+  #     Tags: 
+  #       - Key: Name
+  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], cics2]]
+  #       - Key: Organization
+  #         Value: !Ref OrgName
 
 Outputs:
 
