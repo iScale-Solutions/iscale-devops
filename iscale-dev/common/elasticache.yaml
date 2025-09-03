@@ -20,7 +20,9 @@ Metadata:
       - Label:
           default: Cache Configuration
         Parameters:
+          - EngineName
           - EngineVersion
+          - ValkeyEngineVersion
           - Port
           - NodeType
           - NumCacheClusters
@@ -34,8 +36,12 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      EngineName:
+        default: Cache engine name
       EngineVersion:
-        default: Cache engine version
+        default: Cache engine version (redis)
+      ValkeyEngineVersion:
+        default: Cache engine version (valkey)
       ExportOutputs:
         default: Export Stack Outputs
       Port:
@@ -74,14 +80,30 @@ Parameters:
       - Staging
       - Development
       - Test
+  EngineName:
+    Description: Cache engine name
+    Type: String
+    Default: redis
+    AllowedValues:
+      - redis
+      - valkey
   EngineVersion:
-    Description: Cache engine version
+    Description: Redis engine version (redis)
     Type: String
     Default: 5.0.6
     AllowedValues:
       - 5.0.6
       - 6.x
       - 6.0
+      - 7.0
+  ValkeyEngineVersion:
+    Description: Cache engine version (valkey)
+    Type: String
+    Default: 7.2
+    AllowedValues:
+      - 7.2
+      - 8.0
+      - 8.1
   EncryptInTransit:
     Description: Set to TRUE to encrypt in transit
     Type: String
@@ -153,8 +175,14 @@ Conditions:
   HasNotAllowSecurityGroup: !Equals [!Ref AllowSecurityGroup, '']
   HasExportOutputs: !Equals [!Ref ExportOutputs, TRUE]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, TRUE]
-  UseV5: !Equals [!Ref EngineVersion, 5.0.6]
-  UseV6: !Equals [!Ref EngineVersion, 6.0]
+  IsRedis: !Equals [!Ref EngineName, redis]
+  IsValkey: !Equals [!Ref EngineName, valkey]
+  UseRedisV5: !And [!Equals [!Ref EngineVersion, 5.0.6], !Condition IsRedis]
+  UseRedisV6: !And [!Equals [!Ref EngineVersion, 6.0], !Condition IsRedis]
+  UseRedisV7: !And [!Equals [!Ref EngineVersion, 7.0], !Condition IsRedis]
+  UseValkeyV7: !And [!Equals [!Ref ValkeyEngineVersion, 7.2], !Condition IsValkey]
+  UseValkeyV80: !And [!Equals [!Ref ValkeyEngineVersion, 8.0], !Condition IsValkey]
+  UseValkeyV81: !And [!Equals [!Ref ValkeyEngineVersion, 8.1], !Condition IsValkey]
 
 Resources:
 
@@ -194,18 +222,46 @@ Resources:
       CidrIp: 0.0.0.0/0
 
   Redis50CacheParameterGroup:
-    Condition: UseV5
+    Condition: UseRedisV5
     Type: AWS::ElastiCache::ParameterGroup
     Properties:
       Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
       CacheParameterGroupFamily: redis5.0
   
   Redis60CacheParameterGroup:
-    Condition: UseV6
+    Condition: UseRedisV6
     Type: AWS::ElastiCache::ParameterGroup
     Properties:
       Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, v6, cache]]
       CacheParameterGroupFamily: redis6.x
+  
+  Redis70CacheParameterGroup:
+    Condition: UseRedisV7
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, v7, cache]]
+      CacheParameterGroupFamily: redis7
+
+  Valkey70CacheParameterGroup:
+    Condition: UseValkeyV7
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, v7, cache-valkey]]
+      CacheParameterGroupFamily: valkey7
+  
+  Valkey80CacheParameterGroup:
+    Condition: UseValkeyV80
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, v8, cache-valkey]]
+      CacheParameterGroupFamily: valkey8
+  
+  Valkey81CacheParameterGroup:
+    Condition: UseValkeyV81
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, v8, cache-valkey]]
+      CacheParameterGroupFamily: valkey8
 
   ElasticacheSubnetGroup:
     Type: AWS::ElastiCache::SubnetGroup
@@ -230,9 +286,24 @@ Resources:
       AutomaticFailoverEnabled: false
       CacheNodeType: !Ref NodeType
       CacheParameterGroupName: !If
-        - UseV5
+        - UseRedisV5
         - !Ref Redis50CacheParameterGroup
-        - !Ref Redis60CacheParameterGroup
+        - !If
+          - UseRedisV6
+          - !Ref Redis60CacheParameterGroup
+          - !If
+            - UseRedisV7
+            - !Ref Redis70CacheParameterGroup
+            - !If
+              - UseValkeyV7
+              - !Ref Valkey70CacheParameterGroup
+              - !If
+                - UseValkeyV80
+                - !Ref Valkey80CacheParameterGroup
+                - !If 
+                  - UseValkeyV81
+                  - !Ref Valkey81CacheParameterGroup
+                  - !Ref 'AWS::NoValue'
       Port: !Ref Port
       CacheSubnetGroupName: !Ref ElasticacheSubnetGroup
       SecurityGroupIds: [!GetAtt ElasticacheSecurityGroup.GroupId]
@@ -242,8 +313,11 @@ Resources:
           !Sub "${SNSStackName}-TopicArn"
       AtRestEncryptionEnabled: true
       TransitEncryptionEnabled: !Ref EncryptInTransit
-      Engine: redis
-      EngineVersion: !Ref EngineVersion
+      Engine: !Ref EngineName
+      EngineVersion: !If
+        - IsRedis
+        - !Ref EngineVersion
+        - !Ref ValkeyEngineVersion
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, cache]]
