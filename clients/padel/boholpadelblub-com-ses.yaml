@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: SES Access for boholpadelclub.com
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+          - DomainName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DomainName:
+        default: Domain Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: ses
+    MinLength: 3
+    MaxLength: 9
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: boholpadel
+    AllowedPattern: ^[a-z]+(-[a-z]+)*$
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+  DomainName:
+    Description: The domain name (e.g. example.com, iscale-solutions.com).
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: boholpadelclub.com
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  EmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref DomainName
+      DkimAttributes:
+        SigningEnabled: true
+      DkimSigningAttributes:
+        NextSigningKeyLength: RSA_1024_BIT
+
+  WebsiteSMTPUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: boholpadel_www_smtp
+      Policies:
+        - PolicyName: SendOnlyFromEmailAddress
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*'
+
+  WebsiteSMTPAccessKey:
+    Type: Custom::AccessKey
+    Properties:
+      UserName: !Ref WebsiteSMTPUser
+      ParameterPath: !Join ['/', ['/iam-users', !Ref WebsiteSMTPUser]]
+      Serial: 1
+      Status: Active
+      ReturnSecret: true
+      ReturnPassword: true
+      NoEcho: False
+      SMTPRegion: !Ref 'AWS::Region'
+      ServiceToken: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:binxio-cfn-secret-provider'
+
+Outputs:
+
+  SMTPEndpoint:
+    Value: !Join ['.', ['email-smtp', !Ref 'AWS::Region', 'amazonaws.com']]
+    Description: SMTP Server Endpoint
+
+  WebsiteSMTPAccessKey:
+    Value: !Ref WebsiteSMTPAccessKey
+    Description: Access key for the website STMP user
+
+  WebsiteSMTPPassword:
+    Value: !GetAtt 'WebsiteSMTPAccessKey.SMTPPassword'
+    Description: SMTP password for the website STMP user
