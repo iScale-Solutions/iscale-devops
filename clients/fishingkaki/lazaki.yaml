@@ -22,6 +22,11 @@ Metadata:
           - LoadBalancerCertificateArn
           - LoadBalancerHostName
       - Label:
+          default: CloudFront Configuration (CDN)
+        Parameters:
+          - CdnDomainName
+          - AcmCertificateArn
+      - Label:
           default: Instance Configuration
         Parameters:
           - InstanceKeyName
@@ -48,6 +53,10 @@ Metadata:
         default: Load Balancer SSL Certificate ARN
       LoadBalancerHostName:
         default: Load Balancer Host Name
+      CdnDomainName:
+        default: CDN Domain Name
+      AcmCertificateArn:
+        default: ACM Certificate ARN for CDN
       NetworkStackName:
         default: Network Stack Name
       SNSStackName:
@@ -105,6 +114,14 @@ Parameters:
     Description: SSL Certificate for the ELB
     Type: String
     Default: arn:aws:acm:us-west-2:482643916846:certificate/a7df2317-2025-4c33-918a-b48f6aa7a262
+  CdnDomainName:
+    Description: Custom Domain Name for CDN URL (Prod only)
+    Type: String
+    Default: fk-cdn.net
+  AcmCertificateArn:
+    Description: ACM Certificate ARN for CDN (Prod only). CloudFront only supports ACM certificates in the us-east-1 Region (N. Virginia). Make sure to create the ACM cert in us-east-1 first.
+    Type: String
+    Default: arn:aws:acm:us-east-1:482643916846:certificate/926bb735-fba1-4e53-8ac4-72771c3ab79c # Domain = *.fk-cdn.net
   NetworkStackName:
     Description: The name of the network stack
     Type: String
@@ -192,6 +209,25 @@ Resources:
           Fn::GetAtt:
             - DBStack
             - Outputs.DBClusterARN
+
+  CacheStack:
+    Condition: IsProd
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        EncryptInTransit: TRUE
+        EngineName: valkey
+        ValkeyEngineVersion: 8.1
+        NodeType: cache.t4g.small
+        NumCacheClusters: 1
+        OrgName: !Ref OrgName
+        SnapshotRetentionLimit: 30
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: TRUE
 
 ####
 # Web Application | Lazaki web
@@ -322,6 +358,24 @@ Resources:
               - WebServerStack
               - Outputs.AppServerS3BucketArn
           - !Ref 'AWS::NoValue'
+        CacheEndpoint: !If
+          - IsProd
+          - Fn::GetAtt:
+              - CacheStack
+              - Outputs.CachePrimaryEndpoint
+          - !Ref 'AWS::NoValue'
+        CachePort: !If
+          - IsProd
+          - Fn::GetAtt:
+              - CacheStack
+              - Outputs.ClusterPort
+          - !Ref 'AWS::NoValue'
+        CacheSecurityGroupId: !If
+          - IsProd
+          - Fn::GetAtt:
+              - CacheStack
+              - Outputs.SecurityGroupId
+          - !Ref 'AWS::NoValue'
         InstanceAMI: !Ref BackEndInstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstanceSpotPrice: 0.5
@@ -429,6 +483,172 @@ Resources:
       ToPort: 443
       SourceSecurityGroupId: !GetAtt [BackEndServerStack, Outputs.AppServerSecurityGroup]
       Description: Allow HTTPS connections from App Server
+
+####
+#  Static Bucket section
+####
+
+  StaticFilesBucket:
+    Condition: IsProd
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If
+        - IsProd
+        - !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, static-files]]
+        - Ref: 'AWS::NoValue' #let the system choose a bucket name
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, static-files]]
+        - Key: Organization
+          Value: !Ref OrgName   
+
+# ####
+# # CloudFront Section
+# ####
+
+# cloudfront for static files
+
+  StaticS3CloudfrontOriginAccessControl:
+    Condition: IsProd
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig: 
+          Name: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], AssetS3-OAC]]
+          Description: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], AssetS3-OAC]]
+          OriginAccessControlOriginType: s3
+          SigningBehavior: always
+          SigningProtocol: sigv4
+
+  CachePolicy:
+    Condition: IsProd
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], cache-policy]]
+        DefaultTTL: 86400 # 24 hours
+        MaxTTL: 2592000 # 30 days
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Origin
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  MyCloudFrontDistribution:
+    Condition: IsProd
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Join ['.', [!Ref Name, !Ref CdnDomainName]]
+        Comment: "CloudFront distribution for serving static files from S3 with restricted access"
+        Enabled: true
+        Origins:
+          - Id: assetsS3Origin
+            DomainName: !GetAtt StaticFilesBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt StaticS3CloudfrontOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: !Ref 'AWS::NoValue'
+        HttpVersion: http2
+        DefaultCacheBehavior:
+          TargetOriginId: assetsS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: !Ref CachePolicy
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          MinimumProtocolVersion: TLSv1.2_2021
+          SslSupportMethod: sni-only
+        PriceClass: PriceClass_All
+
+  StaticBucketPolicy:
+    Condition: IsProd
+    DependsOn:
+      - StaticS3CloudfrontOriginAccessControl
+      - StaticFilesBucket
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StaticFilesBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource:
+            - !GetAtt StaticFilesBucket.Arn
+            - !Sub "${StaticFilesBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Join ['', ['arn:aws:cloudfront::', !Ref 'AWS::AccountId', ':distribution/', !Ref MyCloudFrontDistribution]]
+
+# Allow app servers to access static S3 bucket
+  StaticS3AccessPolicy:
+    Condition: IsProd
+    DependsOn:
+      - StaticS3CloudfrontOriginAccessControl
+      - StaticFilesBucket
+    Description: Allow app servers to create/delete objects in static S3 bucket for CDN
+    Type: AWS::IAM::Policy
+    Properties:
+      Roles:
+        - Fn::GetAtt:
+            - BackEndServerStack
+            - Outputs.AppServerIamRole
+      PolicyName: StaticS3BucketAccess
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject*
+              - s3:ListBucket
+              - s3:PutObject*
+              - s3:DeleteObject
+            Resource: 
+              - !GetAtt StaticFilesBucket.Arn
+              - !Sub "${StaticFilesBucket.Arn}/*"
+
+  AssetsS3CNAMERecord:
+    Condition: IsProd
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Join ['', [Ref: CdnDomainName, "."]]
+      Name: !Join ['.', [!Ref Name, !Ref CdnDomainName]]
+      Type: CNAME
+      TTL: 300
+      Comment: asset site
+      ResourceRecords:
+        - Fn::GetAtt:
+          - MyCloudFrontDistribution
+          - DomainName
 
 Outputs:
 
