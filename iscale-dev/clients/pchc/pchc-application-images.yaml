@@ -118,7 +118,8 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 1.0.1
+        - Amazon Linux 2023
+      Version: 1.1.0
       Description: Installs MySQL Client + dev libs
       ChangeDescription: Initial version
       Data: |
@@ -230,7 +231,8 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
-      Version: 2.0.1
+        - Amazon Linux 2023
+      Version: 2.0.2
       Description: Installs NodeJS
       ChangeDescription: Initial version
       Data: |
@@ -375,6 +377,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2
+        - Amazon Linux 2023
       Version: 1.0.0
       Description: Setup Pesonet 20 logs monitoring
       ChangeDescription: Initial version
@@ -809,7 +812,7 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2023
-      Version: 1.0.0
+      Version: 2.0.12
       Description: Installs RoR v2.4.1
       ChangeDescription: Initial version
       Data: |
@@ -823,54 +826,40 @@ Resources:
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - |
-                      sudo su ec2-user
-                      cd /home/ec2-user
-
-                      sudo dnf update -y
-                      sudo dnf groupinstall "Development Tools" -y
-                      sudo dnf install -y gcc make bzip2 bzip2-devel libffi-devel zlib-devel gdbm-devel ncurses-devel openssl-devel readline-devel libxml2 libxml2-devel libxslt libxslt-devel
-                      
-                      mkdir -p ~/opt && cd ~/opt
-                      curl -L -O https://www.openssl.org/source/openssl-1.1.1w.tar.gz
-                      tar xzf openssl-1.1.1w.tar.gz
-                      cd openssl-1.1.1w
-                      ./config --prefix=$HOME/opt/openssl-1.1.1 --openssldir=$HOME/opt/openssl-1.1.1 shared zlib
-                      make -j$(nproc)
-                      make install
-              - name: InstallRbenvAndRubyBuild
+                    - sudo dnf update -y
+                    - sudo dnf groupinstall "Development Tools" -y
+                    - sudo dnf install -y gcc make bzip2 bzip2-devel libffi-devel zlib-devel gdbm-devel ncurses-devel openssl-devel readline-devel libxml2 libxml2-devel libxslt libxslt-devel git tar curl
+                    - mkdir -p /usr/local/src && cd /usr/local/src
+                    - curl -L -O https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+                    - tar xzf openssl-1.1.1w.tar.gz
+                    - cd openssl-1.1.1w
+                    - ./config --prefix=/usr/local/openssl-1.1.1 --openssldir=/usr/local/openssl-1.1.1 shared zlib
+                    - make -j$(nproc)
+                    - make install
+              - name: InstallRbenvRubyBuildRubyAndRoR
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - sudo su ec2-user
-                    - cd /home/ec2-user
-                    - git clone https://github.com/rbenv/rbenv.git ~/.rbenv
-                    - echo 'export PATH="$HOME/.rbenv/bin:$PATH"' >> ~/.bashrc
-                    - echo 'eval "$(rbenv init - bash)"' >> ~/.bashrc
-                    - exec $SHELL
-                    - git clone https://github.com/rbenv/ruby-build.git ~/.rbenv/plugins/ruby-build
-                    - sudo ~/.rbenv/plugins/ruby-build/install.sh
-                    - export PATH="$HOME/.rbenv/bin:$PATH"
-                    - eval "$(rbenv init -)"
-                    - source ~/.bashrc
-                    - rbenv --version
-                    - rbenv install -l
-                    - ruby-build --version
-              - name: InstallRubyAndRoR
-                action: ExecuteBash
-                inputs:
-                  commands:
-                    - sudo su ec2-user
-                    - cd /home/ec2-user
-                    - RUBY_CONFIGURE_OPTS="--with-openssl-dir=$HOME/opt/openssl-1.1.1" rbenv install 2.4.1
-                    - ln -s /etc/pki/tls/certs/ca-bundle.crt /home/ec2-user/opt/openssl-1.1.1/cert.pem #symlink local cert to openssl-1.1.1
+                    - git clone https://github.com/rbenv/rbenv.git /usr/local/rbenv
+                    - mkdir -p /usr/local/rbenv/plugins
+                    - git clone https://github.com/rbenv/ruby-build.git /usr/local/rbenv/plugins/ruby-build
+                    - echo 'export RBENV_ROOT="/usr/local/rbenv"' | sudo tee /etc/profile.d/rbenv.sh
+                    - echo 'export PATH="$RBENV_ROOT/bin:$PATH"' | sudo tee -a /etc/profile.d/rbenv.sh
+                    - echo 'eval "$(rbenv init - bash)"' | sudo tee -a /etc/profile.d/rbenv.sh
+                    - chmod +x /etc/profile.d/rbenv.sh
+                    - source /etc/profile.d/rbenv.sh
+                    - rbenv -v
+                    - RUBY_CONFIGURE_OPTS="--with-openssl-dir=/usr/local/openssl-1.1.1" rbenv install -v 2.4.1
+                    - echo $(rbenv versions --bare | grep -Fx 2.4.1)
+                    - echo "Done installing Ruby 2.4.1"
+                    - ln -s /etc/pki/tls/certs/ca-bundle.crt /usr/local/openssl-1.1.1/cert.pem
                     - rbenv global 2.4.1
                     - ruby -v
-                    - ruby -ropenssl -e 'puts OpenSSL::OPENSSL_LIBRARY_VERSION' #check version of openssl
+                    - ruby -ropenssl -e 'puts OpenSSL::OPENSSL_LIBRARY_VERSION'
                     - gem update --system 3.0.8
-                    - gem install bundler -v 1.17.3 #same bundler version as in AL2
+                    - gem install bundler -v 1.17.3
                     - |
-                      cat << EOF >> ~/Gemfile
+                      cat << EOF >> /tmp/Gemfile
                       source 'https://rubygems.org'
                       ruby '2.4.1'
                       gem 'rails', '4.2.8'
@@ -878,7 +867,7 @@ Resources:
                       gem 'sprockets', '3.7.2'
                       gem 'racc', '1.4.14'
                       EOF
-                    - BUNDLE_GEMFILE=/home/ec2-user/Gemfile bundle _1.17.3_ install
+                    - BUNDLE_GEMFILE=/tmp/Gemfile bundle _1.17.3_ install
                     - gem rdoc --all
 
 # Recipe
@@ -887,7 +876,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'maws']]
-      Version: 2025.06.18
+      Version: 2025.09.08
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'maws']]
@@ -911,7 +900,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pas6']]
-      Version: 2025.06.18
+      Version: 2025.09.08
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pas6']]
@@ -935,7 +924,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'paygate']]
-      Version: 2025.06.18
+      Version: 2025.09.08
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'paygate']]
@@ -958,7 +947,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pddts']]
-      Version: 2025.06.18
+      Version: 2025.09.08
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pddts']]
@@ -983,7 +972,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pddts', 'eod']]
-      Version: 2025.06.18
+      Version: 2025.09.08
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pddts eod']]
@@ -1008,7 +997,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pesonet']]
-      Version: 2025.06.18
+      Version: 2025.09.08
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pesonet']]
@@ -1032,12 +1021,12 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pesonet20']]
-      Version: 2025.09.05
+      Version: 2025.09.10
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/1.1.0']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pesonet20']]
       Components: #Max 20
-        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref MariaDBClientComponent
         - ComponentArn: !Ref NginxComponent
         - ComponentArn: !Ref NodeJSComponent
         - ComponentArn: !Ref RoRComponent3
@@ -1056,7 +1045,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'philpass']]
-      Version: 2025.06.18
+      Version: 2025.09.08
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'philpass']]
@@ -1081,7 +1070,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'dsapp']]
-      Version: 2025.06.18
+      Version: 2025.09.08
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'dsapp']]
@@ -1216,6 +1205,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
         ImageRecipeARN: !Ref Pesonet20ImageRecipe
+        InstanceTypeName: t3.small
         ShareImage: !Ref ShareImage
         SNSStackName: !Ref SNSStackName
 
