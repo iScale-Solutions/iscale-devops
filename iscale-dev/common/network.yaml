@@ -179,15 +179,29 @@ Parameters:
     AllowedValues:
       - true
       - false
-  CreateMultipleNatGateway:
+  NatInstanceOrGateway:
     Description: |
-      Set to true to create a separate Nat Gateway for each private subnets. Otherwise, it will create only one Nat Gateway for both private subnets. 
+      Select NAT instance if you need to cut cost and expects low outgoing internet traffic. This only creates 1 NAT instance for all AZ.
+      Select NAT Gateway if you expect large outgoing traffic and/or requires NAT gateway for each AZ.
+      This will only be applied if CreatePrivate is set to true.
+    Type: String
+    Default: NatGateway
+    AllowedValues:
+      - NatInstance
+      - NatGateway
+  CreateMultipleNat:
+    Description: |
+      Set to true to create a separate Nat Gateway or instance for each private subnets. Otherwise, it will create only one Nat Gateway or instance for both private subnets. 
       This will only be applied if CreatePrivate is set to true.
     Type: String
     Default: false
     AllowedValues:
       - true
       - false
+  NatInstanceAMI:
+    Description: NAT instance AMI ID (only applicable if NatInstance is selected for NatInstanceOrGateway parameter)
+    Type: AWS::EC2::Image::Id
+    Default: ami-0a94a1259c5779e00 
   JumpHostAMI:
     Description: Jump host AMI ID
     Type: AWS::EC2::Image::Id
@@ -256,13 +270,22 @@ Conditions:
   IsCreateJumpHostDynDNS: !And [Condition: IsCreateJumpHost, !Not [!Equals [!Ref JumpHostHostname, '']], !Not [!Equals [!Ref HostedZoneStackName, '']]]
   IsCreateLocalDNS: !Equals [!Ref CreateLocalDNS, true]
   IsCreatePrivate: !Equals [!Ref CreatePrivate, true]
-  IsCreateMultipleNatGateway: !Equals [!Ref CreateMultipleNatGateway, true]
+  IsNatInstance: !Equals [!Ref NatInstanceOrGateway, NatInstance]
+  IsNatGateway: !Equals [!Ref NatInstanceOrGateway, NatGateway]
+  IsCreatePrivateAndNatGateway: !And [Condition: IsCreatePrivate, Condition: IsNatGateway]
+  IsCreatePrivateAndNatInstance: !And [Condition: IsCreatePrivate, Condition: IsNatInstance]
+  # IsCreateMultipleNatGateway: !Equals [!Ref CreateMultipleNat, true]
+  IsCreateMultipleNat: !Equals [!Ref CreateMultipleNat, true]
+  IsCreateMultipleNatInstance: !And [Condition: IsCreatePrivateAndNatInstance, Condition: IsCreateMultipleNat]
+  IsCreateMultipleNatGateway: !And [Condition: IsCreatePrivateAndNatGateway, Condition: IsCreateMultipleNat]
   IsEitherMultiAzOrPrivate: !Or [Condition: IsMultiAz, Condition: IsCreatePrivate]
   IsMultiAzAndPrivate: !And [Condition: IsMultiAz, Condition: IsCreatePrivate]
   Is2AzAndPrivate: !And [Condition: Is2Az, Condition: IsCreatePrivate]
   Is3AzAndPrivate: !And [Condition: Is3Az, Condition: IsCreatePrivate]
-  IsMultiAzPrivateAndCreateMultipleNatGateway: !And [Condition: IsMultiAzAndPrivate, Condition: IsCreateMultipleNatGateway]
+  IsMultiAzPrivateAndCreateMultipleNatGateway: !And [Condition: IsMultiAz, Condition: IsCreateMultipleNatGateway]
   Is3AzPrivateAndCreateMultipleNatGateway: !And [Condition: Is3AzAndPrivate, Condition: IsCreateMultipleNatGateway]
+  IsMultiAzPrivateAndCreateMultipleNatInstance: !And [Condition: IsMultiAz, Condition: IsCreateMultipleNatInstance]
+  Is3AzPrivateAndCreateMultipleNatInstance: !And [Condition: Is3AzAndPrivate, Condition: IsCreateMultipleNatInstance]
   IsCreateVpcEndpoint: !Equals [!Ref CreateVpcEndpoint, true]
   Is2AzAndPrivateAndCreateVpcEndpoint: !And [Condition: Is2AzAndPrivate, Condition: IsCreateVpcEndpoint]
   Is3AzAndPrivateAndCreateVpcEndpoint: !And [Condition: Is3AzAndPrivate, Condition: IsCreateVpcEndpoint]
@@ -620,14 +643,14 @@ Resources:
 # Nat Gateway
   NatGatewayElasticIp1:
     Type: AWS::EC2::EIP
-    Condition: IsCreatePrivate
+    Condition: IsCreatePrivateAndNatGateway
     DependsOn: InternetGateway
     Properties:
       Domain: vpc
 
   NatGateway1:
     Type: AWS::EC2::NatGateway
-    Condition: IsCreatePrivate
+    Condition: IsCreatePrivateAndNatGateway
     Properties: 
       AllocationId: !GetAtt NatGatewayElasticIp1.AllocationId
       SubnetId: !Ref PublicSubnet1
@@ -669,6 +692,147 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, nat, c]]
 
+  # nat instance
+  NatInstance1:
+    Condition: IsCreatePrivateAndNatInstance
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: !Ref NatInstanceAMI
+      InstanceType: t3a.micro
+      IamInstanceProfile: !Ref NatInstanceIamProfile
+      Monitoring: false
+      SourceDestCheck: false
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: [!GetAtt NatInstanceSecurityGroup.GroupId]
+          SubnetId: !Ref PublicSubnet1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 10
+      UserData:
+        Fn::Base64: |
+            #!/bin/bash -xe
+            sudo dnf install iptables-services -y
+            sudo systemctl enable iptables
+            sudo systemctl start iptables
+            echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/custom-ip-forwarding.conf
+            sudo sysctl -p /etc/sysctl.d/custom-ip-forwarding.conf
+            sudo /sbin/iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+            sudo /sbin/iptables -F FORWARD
+            sudo service iptables save
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, nat-instance-az1]]
+  
+  NatInstance2:
+    Condition: IsMultiAzPrivateAndCreateMultipleNatInstance
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: !Ref NatInstanceAMI
+      InstanceType: t3a.micro
+      IamInstanceProfile: !Ref NatInstanceIamProfile
+      Monitoring: false
+      SourceDestCheck: false
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: [!GetAtt NatInstanceSecurityGroup.GroupId]
+          SubnetId: !Ref PublicSubnet2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 10
+      UserData:
+        Fn::Base64: |
+            #!/bin/bash -xe
+            sudo dnf install iptables-services -y
+            sudo systemctl enable iptables
+            sudo systemctl start iptables
+            echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/custom-ip-forwarding.conf
+            sudo sysctl -p /etc/sysctl.d/custom-ip-forwarding.conf
+            sudo /sbin/iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+            sudo /sbin/iptables -F FORWARD
+            sudo service iptables save
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, nat-instance-az2]]
+  
+  NatInstance3:
+    Condition: Is3AzPrivateAndCreateMultipleNatInstance
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: !Ref NatInstanceAMI
+      InstanceType: t3a.micro
+      IamInstanceProfile: !Ref NatInstanceIamProfile
+      Monitoring: false
+      SourceDestCheck: false
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: [!GetAtt NatInstanceSecurityGroup.GroupId]
+          SubnetId: !Ref PublicSubnet3
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 10
+      UserData:
+        Fn::Base64: |
+            #!/bin/bash -xe
+            sudo dnf install iptables-services -y
+            sudo systemctl enable iptables
+            sudo systemctl start iptables
+            echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/custom-ip-forwarding.conf
+            sudo sysctl -p /etc/sysctl.d/custom-ip-forwarding.conf
+            sudo /sbin/iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+            sudo /sbin/iptables -F FORWARD
+            sudo service iptables save
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, nat-instance-az3]]
+
+  NatInstanceIamProfile:
+    Condition: IsCreatePrivateAndNatInstance
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: NatInstanceIamRole
+        
+  NatInstanceIamRole:
+    Condition: IsCreatePrivateAndNatInstance
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  
+  NatInstanceSecurityGroup:
+    Condition: IsCreatePrivateAndNatInstance
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: nat-instance-secg
+      GroupDescription: nat-instance-secgroup
+      VpcId: !Ref VPC
+  
+  NatInstanceSecurityGroupEgress:
+    Condition: IsCreatePrivateAndNatInstance
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt NatInstanceSecurityGroup.GroupId
+      IpProtocol: -1
+      CidrIp: "0.0.0.0/0"
+
 # Private Route Table
 
 # Private Route Table (AZ1)
@@ -687,7 +851,8 @@ Resources:
     Properties:
       RouteTableId: !Ref PrivateRouteTable1
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway1
+      NatGatewayId: !If [ IsNatGateway, !Ref NatGateway1, !Ref "AWS::NoValue"]
+      InstanceId: !If [IsNatInstance, !Ref NatInstance1, !Ref "AWS::NoValue"]
 
   PrivateRouteTableAssociationPrivateSubnet1:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -712,7 +877,20 @@ Resources:
     Properties:
       RouteTableId: !Ref PrivateRouteTable2
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !If [ IsCreateMultipleNatGateway , !Ref NatGateway2, !Ref NatGateway1]
+      NatGatewayId: !If 
+        - IsNatGateway
+        - !If
+          - IsMultiAzPrivateAndCreateMultipleNatGateway
+          - !Ref NatGateway2
+          - !Ref NatGateway1
+        - !Ref "AWS::NoValue"
+      InstanceId: !If
+        - IsNatInstance
+        - !If 
+          - IsMultiAzPrivateAndCreateMultipleNatInstance
+          - !Ref NatInstance2
+          - !Ref NatInstance1
+        - !Ref "AWS::NoValue"
 
   PrivateRouteTableAssociationPrivateSubnet2:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -737,7 +915,20 @@ Resources:
     Properties:
       RouteTableId: !Ref PrivateRouteTable3
       DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !If [ IsCreateMultipleNatGateway , !Ref NatGateway3, !Ref NatGateway1]
+      NatGatewayId: !If 
+        - IsNatGateway
+        - !If
+          - Is3AzPrivateAndCreateMultipleNatGateway
+          - !Ref NatGateway3
+          - !Ref NatGateway1
+        - !Ref "AWS::NoValue"
+      InstanceId: !If
+        - IsNatInstance
+        - !If 
+          - Is3AzPrivateAndCreateMultipleNatInstance
+          - !Ref NatInstance3
+          - !Ref NatInstance1
+        - !Ref "AWS::NoValue"
 
   PrivateRouteTableAssociationPrivateSubnet3:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -825,7 +1016,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       # KeyName: iannis-pchc #!Ref KeyName
-      InstanceType: t3.nano
+      InstanceType: t3a.nano
       ImageId: !Ref JumpHostAMI
       IamInstanceProfile: !Ref JumpHostInstanceProfile
       DisableApiTermination: false
@@ -1180,7 +1371,7 @@ Outputs:
       Name: !Sub '${AWS::StackName}-LocalHostedZoneDomainName'
   
   NatGateway1:
-    Condition: IsCreatePrivate
+    Condition: IsCreatePrivateAndNatGateway
     Description: NAT Gateway for AZ1
     Value: !Ref NatGateway1
     Export:
