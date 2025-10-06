@@ -87,7 +87,7 @@ Parameters:
   BackEndInstanceAMI:
     Description: BackEnd AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-072b3398219313921 #Historical FK AMI
+    Default: ami-072b3398219313921 #Historical FK AMI ami-0cd5b474240541d6b old
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com)
     Type: String
@@ -101,7 +101,7 @@ Parameters:
   LoadBalancerHostName:
     Description: (Optional) Custom Hostname for load balancer URL
     Type: String
-    Default: fkv2web-staging
+    Default: ''
   LoadBalancerCertificateArn:
     Description: SSL Certificate for the ELB
     Type: String
@@ -211,10 +211,28 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
+  WebServerSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, fe]]
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, fe]]
+      GenerateSecretString:
+        SecretStringTemplate: !Sub
+          - |
+            {
+              "Name": "${Name}"
+            }
+          - Name: !Ref Name
+        GenerateStringKey: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        PasswordLength: 30
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
   WebServerStack:
     DependsOn:
-      - DBStack
-      # - WebDeployStack
+      - WebDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -223,31 +241,16 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.ClusterEndpointAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.ClusterPort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
         InstanceAMI: !Ref WebInstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstanceSpotPrice: 0.5
         InstancePort: 80
         InstanceType: !If [IsProd, t3.large, t3.small]
-        LoadBalancerHostName: !Ref LoadBalancerHostName
+        LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, fkv2web-staging]
         LoadBalancerPriority: 100
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, fe]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         InstanceSubnet: Public
@@ -257,7 +260,6 @@ Resources:
 
   WebServerSchedulerStack:
     DependsOn:
-      - DBStack
       - WebServerStack
     Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
@@ -297,7 +299,7 @@ Resources:
   BackEndServerStack:
     DependsOn:
       - DBStack
-      # - BackEndDeployStack
+      - BackEndDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -326,7 +328,7 @@ Resources:
         InstanceKeyName: !Ref InstanceKeyName
         InstanceSpotPrice: 0.5
         InstancePort: 80
-        InstanceType: t3.medium
+        InstanceType: !If [IsProd, t3.large, t3.small]
         LoadBalancerPriority: 101
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
         NetworkStackName: !Ref NetworkStackName
@@ -343,7 +345,6 @@ Resources:
 
   BackEndServerSchedulerStack:
     DependsOn:
-      - DBStack
       - BackEndServerStack
     Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
