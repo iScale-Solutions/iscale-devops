@@ -72,7 +72,7 @@ Parameters:
   BatchAmiId:
     Description: The AMI ID for Amazon Linux 2023
     Type: AWS::EC2::Image::Id
-    Default: ami-01102c5e8ab69fb75 # Update this to the latest AL2023 AMI ID for your region
+    Default: ami-088d74defe9802f14 #ami-01102c5e8ab69fb75 # Update this to the latest AL2023 AMI ID for your region
     ConstraintDescription: Must be a valid Amazon Linux 2023 AMI ID.
 
 Mappings:
@@ -136,7 +136,7 @@ Resources:
                   - lambda:ListAliases
                 Resource: 
                   - !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name] ], '*']]
-              - Sid: 'LambdaAccessLogsPolicy'
+              - Sid: LambdaAccessLogsPolicy
                 Effect: Allow
                 Action: 
                   - logs:CreateLogGroup
@@ -159,14 +159,25 @@ Resources:
                   - secretsmanager:GetSecretValue
                   - secretsmanager:ListSecrets
                 Resource: !Join ['', ['arn:aws:secretsmanager:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':secret:', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name] ], '*']]
-              - Sid: ForReview
+              - Sid: CreateTagRolePolicy
                 Effect: Allow
                 Action:
                   - iam:CreateRole
-                  - iam:PassRole
-                  - s3:CreateBucket
                   - iam:TagRole
-                Resource: "*"   #TODO
+                Resource: !Join ['', ['arn:aws:iam::', !Ref 'AWS::AccountId', ':role/', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name] ], '-sls-*']]
+              - Sid: PassRole
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !Join ['', ['arn:aws:iam::', !Ref 'AWS::AccountId', ':role/', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name] ], '-QueueingServiceHostRole-*']]
+                  - !Join ['', ['arn:aws:iam::', !Ref 'AWS::AccountId', ':role/', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name] ], '-sls-*']]
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - lambda.amazonaws.com
+                      - !Join ['.', ['states', !Ref 'AWS::Region', 'amazonaws.com']]
+                      - ec2.amazonaws.com
               - Sid: UnrestrictedPermissions1
                 Effect: Allow
                 Action:
@@ -177,7 +188,7 @@ Resources:
                   - ec2:DescribeSubnets
                   - ec2:DescribeVpcs
                 Resource: "*"
-              - Sid: UnrestrictedPermissions2
+              - Sid: S3Policy
                 Effect: Allow
                 Action:
                   - s3:PutBucketTagging
@@ -186,8 +197,18 @@ Resources:
                   - s3:PutEncryptionConfiguration
                   - s3:PutBucketPolicy
                 Resource: 
-                  - !Join ['', ['arn:aws:s3:::', "*"]] #TODO
-                  - !Join ['', ['arn:aws:s3:::', "*/*"]] #TODO
+                  - !Join ['', ['arn:aws:s3:::', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name]], '-*']]
+                  # - !Join ['', ['arn:aws:s3:::', "*"]] #TODO
+                  # - !Join ['', ['arn:aws:s3:::', "*/*"]] #TODO
+              - Sid: S3CreatePolicy
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                Resource: "*"
+                Condition: # only allow creating buckets with specific naming pattern
+                  StringLike:
+                    s3:BucketName: 
+                      - !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '*']]
               - Sid: ApiGatewayPolicy
                 Effect: Allow
                 Action:
@@ -196,14 +217,12 @@ Resources:
                   - apigateway:PATCH
                   - apigateway:GET
                   - apigateway:DELETE
-                  - apigateway:TagResource
-                  - apigateway:UntagResource
-                Resource: 
-                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::*restapi*']] #TODO
-                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::/tags/*']] #TODO
-                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::/apis/*/*']] #TODO
-                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::/apis']] #TODO
-                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::/apis/*']] #TODO
+                Resource: # api gateways created by serverless are respawned on every deploy so need to allow *
+                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::*restapi*']] 
+                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::/tags/*']]
+                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::/apis/*/*']]
+                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::/apis']]
+                  - !Join ['', ['arn:aws:apigateway:', !Ref 'AWS::Region', '::/apis/*']]
               - Sid: UnrestrictedPermissions3
                 Effect: Allow
                 Action: 
@@ -213,8 +232,9 @@ Resources:
                   - logs:TagResource
                   - logs:DeleteLogGroup
                   - logs:PutRetentionPolicy
-                Resource: !Join ['', ['arn:aws:logs:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', '*']] #TODO
-              - Effect: Allow
+                Resource: !Join ['', ['arn:aws:logs:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':*cics2*']] #TODO
+              - Sid: StepFunctionsPolicy
+                Effect: Allow
                 Action:
                   - states:CreateStateMachine
                   - states:DescribeStateMachine
@@ -224,34 +244,29 @@ Resources:
                   - states:DescribeExecution
                   - states:StopExecution
                   - states:TagResource
-                Resource: "*" # TODO need to update naming of serverless step functions
-              - Effect: Allow
+                Resource: !Join ['', ['arn:aws:states:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':stateMachine:', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name] ], '-stepf-OutwardICL-standard']]
+              - Sid: CognitoPolicy
+                Effect: Allow
                 Action:
-                  - cognito-idp:CreateUserPool
-                  - cognito-idp:GetGroup
-                  - cognito-idp:DeleteGroup
-                  - cognito-idp:DeleteUserPool
-                  - cognito-idp:CreateResourceServer
-                  - cognito-idp:* # TODO need to update specific permissions
-                Resource: !Join ['', ['arn:aws:cognito-idp:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':userpool/*']]
-        # - PolicyName: EcrWriteAccess
-        #   PolicyDocument:
-        #     Version: 2012-10-17
-        #     Statement:
-        #       - Effect: Allow
-        #         Action:
-        #           - ecr:CompleteLayerUpload
-        #           - ecr:UploadLayerPart
-        #           - ecr:InitiateLayerUpload
-        #           - ecr:BatchCheckLayerAvailability
-        #           - ecr:PutImage
-        #         Resource: 
-        #           Fn::ImportValue:
-        #             !Sub '${CicsPrereqStackName}-PortalEcrArnName'
-        #       - Effect: Allow
-        #         Action:
-        #           - ecr:GetAuthorizationToken
-        #         Resource: "*"
+                  - cognito-idp:Create*
+                  - cognito-idp:Get*
+                  - cognito-idp:Delete*
+                  - cognito-idp:Update*
+                  - cognito-idp:Describe*
+                  # - cognito-idp:* # TODO need to update specific permissions
+                Resource: !Join ['', ['arn:aws:cognito-idp:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':userpool/',  !Ref 'AWS::Region', '_*' ]]
+              - Sid: EventBridgePolicy
+                Effect: Allow
+                Action:
+                  - events:DescribeRule
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                  - events:ListRules
+                  - events:EnableRule
+                  - events:DisableRule
+                Resource: !Join ['', ['arn:aws:events:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':rule/',  !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name]], '-sls-*']] #TODO
 
 # secgroup for lambda, get the secgroup ID and add it to github cicd secrets. this will be attached to all deployed lambdas using serverless.yml
 
@@ -291,55 +306,6 @@ Resources:
       KeySpec: SYMMETRIC_DEFAULT
       KeyUsage: ENCRYPT_DECRYPT
       KeyPolicy:
-#       {
-#   "Id": "key-consolepolicy-3",
-#   "Version": "2012-10-17",
-#   "Statement": [
-#     {
-#       "Sid": "Enable IAM User Permissions",
-#       "Effect": "Allow",
-#       "Principal": {
-#         "AWS": "arn:aws:iam::050821737631:root"
-#       },
-#       "Action": "kms:*",
-#       "Resource": "*"
-#     },
-#     {
-#       "Sid": "Allow use of the key",
-#       "Effect": "Allow",
-#       "Principal": {
-#         "AWS": "arn:aws:iam::050821737631:user/pchc-cics2"
-#       },
-#       "Action": [
-#         "kms:Encrypt",
-#         "kms:Decrypt",
-#         "kms:ReEncrypt*",
-#         "kms:GenerateDataKey*",
-#         "kms:DescribeKey"
-#       ],
-#       "Resource": "*"
-#     },
-#     {
-#       "Sid": "Allow attachment of persistent resources",
-#       "Effect": "Allow",
-#       "Principal": {
-#         "AWS": "arn:aws:iam::050821737631:user/pchc-cics2"
-#       },
-#       "Action": [
-#         "kms:CreateGrant",
-#         "kms:ListGrants",
-#         "kms:RevokeGrant"
-#       ],
-#       "Resource": "*",
-#       "Condition": {
-#         "Bool": {
-#           "kms:GrantIsForAWSResource": "true"
-#         }
-#       }
-#     }
-#   ]
-# }
-
         Version: '2012-10-17'
         Statement:
           - Sid: AllowRootAccount
@@ -350,7 +316,7 @@ Resources:
             Resource: "*"
           - Sid: AllowCics2KmsKey
             Effect: Allow
-            Principal: #arn:aws:iam::050821737631:user/pchc-cics2
+            Principal:
               AWS: !Join ['', ['arn:aws:iam::',!Ref AWS::AccountId, ':user/', !Ref OrgName, '-', !Select [0, !Split ['-', !Ref Name]]]]
             Action:
               - kms:Encrypt
@@ -361,7 +327,7 @@ Resources:
             Resource: "*"
           - Sid: AllowCics2KmsKeyGrant
             Effect: Allow
-            Principal: #arn:aws:iam::050821737631:user/pchc-cics2
+            Principal:
               AWS: !Join ['', ['arn:aws:iam::',!Ref AWS::AccountId, ':user/', !Ref OrgName, '-', !Select [0, !Split ['-', !Ref Name]]]]
             Action:
               - kms:CreateGrant
