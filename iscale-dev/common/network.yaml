@@ -22,6 +22,7 @@ Metadata:
           - CreatePrivate
           - CreateMultipleNatGateway
           - CreateVpcEndpoint
+          - S3GatewayVpcEndpoint
       - Label:
           default: Subnet Indexes
         Parameters:
@@ -92,6 +93,8 @@ Metadata:
         default: Internal Subnet 2 CIDR Index
       InternalSubnet3Index:
         default: Internal Subnet 3 CIDR Index
+      S3GatewayVpcEndpoint:
+        default: Custom S3 VPC Endpoint Type
 
 Parameters: 
   Name:
@@ -174,6 +177,13 @@ Parameters:
     Description: |
       Set to FALSE to disable creating of VPC Peering/VPC Private Link in private subnets. (Applicable to non-prod environment)
       This will only be applied if CreatePrivate is set to true.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  S3GatewayVpcEndpoint:
+    Description: Select Gateway type for S3 VPC Endpoint.
     Type: String
     Default: true
     AllowedValues:
@@ -290,6 +300,9 @@ Conditions:
   Is2AzAndPrivateAndCreateVpcEndpoint: !And [Condition: Is2AzAndPrivate, Condition: IsCreateVpcEndpoint]
   Is3AzAndPrivateAndCreateVpcEndpoint: !And [Condition: Is3AzAndPrivate, Condition: IsCreateVpcEndpoint]
   IsCreatePrivateAndCreateVpcEndpoint: !And [Condition: IsCreatePrivate, Condition: IsCreateVpcEndpoint]
+  IsCreateS3GatewayVpcEndpoint: !Equals [!Ref S3GatewayVpcEndpoint, true]
+  Is2AzAndPrivateAndCreateS3GatewayVpcEndpoint: !And [Condition: Is2AzAndPrivate, Condition: IsCreateS3GatewayVpcEndpoint]
+  Is3AzAndPrivateAndCreateS3GatewayVpcEndpoint: !And [Condition: Is3AzAndPrivate, Condition: IsCreateS3GatewayVpcEndpoint]
 
 Resources:
 
@@ -1231,6 +1244,31 @@ Resources:
         - !Ref PrivateSubnet3
       VpcEndpointType: Interface
       VpcId: !Ref VPC
+  
+  S3GatewayVpcEndpoint2AZ:
+    Condition: Is2AzAndPrivateAndCreateS3GatewayVpcEndpoint
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      RouteTableIds:
+        - !Ref PrivateRouteTable1
+        - !Ref PrivateRouteTable2
+      VpcEndpointType: Gateway
+      VpcId: !Ref VPC
+      
+  
+  S3GatewayVpcEndpoint3AZ:
+    Condition: Is3AzAndPrivateAndCreateS3GatewayVpcEndpoint
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      RouteTableIds:
+        - !Ref PrivateRouteTable1
+        - !Ref PrivateRouteTable2
+        - !Ref PrivateRouteTable3
+      VpcEndpointType: Gateway
+      VpcId: !Ref VPC
+
 
   LocalHostedZone: 
     Type: AWS::Route53::HostedZone
