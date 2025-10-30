@@ -16,6 +16,12 @@ Metadata:
           - NetworkStackName
           - SNSStackName
           - CicsPrereqStackName
+      - Label:
+          default: Queueing Service Host Configuration
+        Parameters:
+          - BatchAmiId
+          - QueueingHostAmiId
+          - RepositoryUrl
 
     ParameterLabels:
       Name:
@@ -30,6 +36,12 @@ Metadata:
         default: SNS Topic Stack Name
       CicsPrereqStackName:
         default: CICS2 Prerequisite Stack Name
+      BatchAmiId:
+        default: Batch Host AMI ID
+      QueueingHostAmiId:
+        default: Queueing Service Host AMI ID
+      RepositoryUrl:
+        default: Queueing Service Repository URL
 
 Parameters:
   Name:
@@ -74,6 +86,19 @@ Parameters:
     Type: AWS::EC2::Image::Id
     Default: ami-088d74defe9802f14 #ami-01102c5e8ab69fb75 # Update this to the latest AL2023 AMI ID for your region
     ConstraintDescription: Must be a valid Amazon Linux 2023 AMI ID.
+  QueueingHostAmiId:
+    Description: The AMI ID for the Queueing Service Host
+    Type: AWS::EC2::Image::Id
+    Default: ami-088d74defe9802f14 # Update this to the latest AMI ID built in your Image Builder pipeline
+    ConstraintDescription: Must be a valid AMI ID.
+  RepositoryUrl:
+    Description: The Git repository URL for the Queueing Service Host code
+    Default: "https://github.com/organization/pchc-cics-process-queue.git"
+    Type: String
+  Branch:
+    Description: The Git branch to clone for the Queueing Service Host code
+    Default: "staging"
+    Type: String
 
 Mappings:
   Fn::Transform:
@@ -438,6 +463,16 @@ Resources:
               Service: ec2.amazonaws.com
             Action:
               - sts:AssumeRole
+      # Policies:
+      #   - PolicyName: QueueingServiceHostSSMPolicy
+      #     PolicyDocument:
+      #       Version: 2012-10-17
+      #       Statement:
+      #         - Sid: SSMGetParametersByPath
+      #           Action:
+      #             - ssm:GetParametersByPath
+      #           Effect: Allow
+      #           Resource: !Join ['', ['arn:aws:ssm:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':parameter/', !Ref OrgName, '/', !FindInMap [EnvShort, !Ref EnvName, Name], '/',  !Select [0, !Split ['-', !Ref Name]], '/*']]
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
 
@@ -506,6 +541,87 @@ Resources:
         - Key: Organization
           Value: !Ref OrgName
 
+# ##
+# # ASG Section
+# ##
+#   QueueingServiceHostAutoScalingGroup:
+#     Type: AWS::AutoScaling::AutoScalingGroup
+#     Properties:
+#       VPCZoneIdentifier:
+#         - 
+#           Fn::ImportValue:
+#             !Join ['', [!Ref NetworkStackName, '-PrivateSubnetId1']] 
+#         - 
+#           Fn::ImportValue:
+#             !Join ['', [!Ref NetworkStackName, '-PrivateSubnetId2']] 
+#       LaunchConfigurationName: 
+#         Ref: QueueingServiceHostLaunchConfiguration
+#       MinSize: '2'
+#       MaxSize: '4'
+#       DesiredCapacity: '2'
+#       Tags:
+#         - Key: Name
+#           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], queuing, service, asg]]
+#           PropagateAtLaunch: true
+#         - Key: Organization
+#           Value: !Ref OrgName
+#           PropagateAtLaunch: true
+
+#   QueueingServiceHostLaunchConfiguration:
+
+#     Type: AWS::AutoScaling::LaunchConfiguration
+#     Properties:
+#       ImageId: !Ref QueueingHostAmiId
+#       InstanceType: !If [IsProd, t3.medium, t3a.small]
+#       IamInstanceProfile: !Ref QueueingServiceHostInstanceProfile
+#       SecurityGroups:
+#         - !Ref QueueingServiceHostSecurityGroup
+#       BlockDeviceMappings:
+#         - DeviceName: /dev/xvda #AL
+#           Ebs:
+#             VolumeSize: 20
+#             VolumeType: gp3
+#             DeleteOnTermination: true
+#       UserData: 
+#         Fn::Base64: !Sub |
+#           #!/bin/bash
+
+#           sudo dnf update -y
+#           sudo dnf install -y aws-cli git
+#           sudo systemctl start git
+
+#           cd /home/ec2-user
+#           curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+#           source ~/.bashrc
+#           nvm install 22
+#           node -e "console.log('Running Node.js ' + process.version)"
+
+#           ln -sf "$NVM_DIR/versions/node/$(nvm version)/bin/node" /usr/local/bin/node
+#           ln -sf "$NVM_DIR/versions/node/$(nvm version)/bin/npm" /usr/local/bin/npm
+#           ln -sf "$NVM_DIR/versions/node/$(nvm version)/bin/npx" /usr/local/bin/npx
+
+#           aws ssm get-parameter --name "param" --with-decryption --query "Parameter.Value" --output text | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' > source /var/lib/cloud/instance/custom-ssm-parameter.txt
+#           source /var/lib/cloud/instance/custom-ssm-parameter.txt
+
+#           git clone -b $BRANCHNAME $REPOSITORYURL --single-branch
+#           cd $(basename $REPOSITORYURL .git)
+#           pm2 start $SCRIPTNAME.js --name $SCRIPTNAME
+
+# ##
+# # SSM Parameters Section
+# ##
+#   QueueingServiceHostSSMParameter:
+#     Type: AWS::SSM::Parameter
+#     Properties:
+#       Name: !Join ['', [!Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name]], '/ec2/queueing-service/']]
+#       Type: String
+#       Value: !Ref QueueingHostAmiId
+#       Tags:
+#         - Key: Name
+#           Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], 'queueing-service-ssm-param']]
+#         - Key: Organization
+#           Value: !Ref OrgName
+
 ##
 # SQS Section
 ##
@@ -573,6 +689,32 @@ Resources:
       Tags: 
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], bank, central]]
+        - Key: Organization
+          Value: !Ref OrgName
+  
+  BankReportsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ["-", !Ref Name]], bank-reports]]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 3
+          Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: 
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ["-", !Ref Name]], bank-reports]]
         - Key: Organization
           Value: !Ref OrgName
 
