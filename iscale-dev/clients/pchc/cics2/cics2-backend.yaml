@@ -659,6 +659,80 @@ Resources:
               - 'sqs:SendMessage'
             Resource: !GetAtt Cics2SqsQueue.Arn
 
+  ReportsFifoQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], reports, "sqs.fifo"]]
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 900 # 15 minutes in seconds
+      MessageRetentionPeriod: 345600 # 4 days in seconds (default)
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ReportsFifoDlq.Arn
+        maxReceiveCount: 3  # Move to DLQ after 3 failed processing attempts
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], reports, "sqs.fifo"]]
+        - Key: Organization
+          Value: !Ref OrgName
+    
+  ReportsFifoDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], reports, "dlq.fifo"]]
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      MessageRetentionPeriod: 345600 # 4 days in seconds (default)
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], reports, "dlq.fifo"]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  ReportsFifoQueuePolicy:
+    Type: AWS::SQS::QueueInlinePolicy
+    Properties:
+      Queue: !Ref ReportsFifoQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Id: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], reports, "sqs.fifo"]]
+        Statement:
+          - Sid: AllowS3ToSendMessage
+            Effect: Allow
+            Principal: 
+              Service: s3.amazonaws.com
+            Condition:
+              ArnLike:
+                aws:SourceArn: 
+                  !Join 
+                    ['', ['arn:aws:s3:::', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name]], '-bank*']]
+            Action:
+              - 'sqs:SendMessage'
+            Resource: 
+              - !GetAtt ReportsFifoQueue.Arn
+
+  ReportsFifoDLQPolicy:
+    Type: AWS::SQS::QueueInlinePolicy
+    Properties:
+      Queue: !Ref ReportsFifoDlq
+      PolicyDocument:
+        Version: '2012-10-17'
+        Id: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], reports, "dlq.fifo"]]
+        Statement:
+          - Sid: AllowS3ToSendMessage
+            Effect: Allow
+            Principal: 
+              Service: s3.amazonaws.com
+            Condition:
+              ArnLike:
+                aws:SourceArn: 
+                  !Join 
+                    ['', ['arn:aws:s3:::', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name]], '-bank*']]
+            Action:
+              - 'sqs:SendMessage'
+            Resource: 
+              - !GetAtt ReportsFifoDlq.Arn
+
 ##
 # S3 Section
 ##
