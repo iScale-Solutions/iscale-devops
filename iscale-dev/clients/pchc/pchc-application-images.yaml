@@ -677,6 +677,53 @@ Resources:
                 inputs:
                   commands:
                     - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/dsapp-cloudwatch.json
+  Cics2ProcessQueueLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Cics2ProcessQueue_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Setup CICS 2 Process Queue logging
+      ChangeDescription: Initial version
+      Data: |
+        name: Cics2ProcessQueueLogs - InlineData
+        description: Setup CICS2 Process Queue logging
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/cics2-process-queue-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/home/ec2-user/.pm2/logs/op-file-version-error.log",
+                                  "log_group_name": "cics2-process-queue/pm2-logs/op-file-version-error.log"
+                                },
+                                {
+                                  "file_path": "/home/ec2-user/.pm2/logs/op-file-version-out.log",
+                                  "log_group_name": "cics2-process-queue/pm2-logs/op-file-version-out.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/cics2-process-queue-cloudwatch.json
+
 
   PHP82Component:
     Type: AWS::ImageBuilder::Component
@@ -1199,14 +1246,15 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'cics2']]
-      Version: 2025.11.03
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/1.1.0']]
+      Version: 2025.11.19
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/1.1.1']]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'cics2']]
       Components: #Max 20
         - ComponentArn: !Ref GitComponent
         - ComponentArn: !Ref NodeJS22Component 
         - ComponentArn: !Ref Pm2V6Component
+        - ComponentArn: !Ref Cics2ProcessQueueLogComponent
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
