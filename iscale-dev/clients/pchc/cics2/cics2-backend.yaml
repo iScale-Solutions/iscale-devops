@@ -16,12 +16,12 @@ Metadata:
           - NetworkStackName
           - SNSStackName
           - CicsPrereqStackName
+          - ClientDomainName
       - Label:
           default: Queueing Service Host Configuration
         Parameters:
           - BatchAmiId
           - QueueingHostAmiId
-          - RepositoryUrl
 
     ParameterLabels:
       Name:
@@ -40,9 +40,7 @@ Metadata:
         default: Batch Host AMI ID
       QueueingHostAmiId:
         default: Queueing Service Host AMI ID
-      RepositoryUrl:
-        default: Queueing Service Repository URL
-
+        
 Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name)
@@ -81,24 +79,32 @@ Parameters:
     Type: String
     Default: 'pchc-stg-uw2-cics2-prereq'
     MinLength: 1
+  ClientDomainName:
+    Description: The domain name for the client (used for load balancer hostnames)
+    Type: String
+    Default: pchcdev.com
   BatchAmiId:
     Description: The AMI ID for Amazon Linux 2023
     Type: AWS::EC2::Image::Id
-    Default: ami-088d74defe9802f14 #ami-01102c5e8ab69fb75 # Update this to the latest AL2023 AMI ID for your region
+    Default: ami-088d74defe9802f14 #ami-01102c5e8ab69fb75 # Update this to the latest AL2023 AMI ID for your region ##delete this once ASG is working
     ConstraintDescription: Must be a valid Amazon Linux 2023 AMI ID.
-  # QueueingHostAmiId:
-  #   Description: The AMI ID for the Queueing Service Host
-  #   Type: AWS::EC2::Image::Id
-  #   Default: ami-088d74defe9802f14 # Update this to the latest AMI ID built in your Image Builder pipeline
-  #   ConstraintDescription: Must be a valid AMI ID.
-  # RepositoryUrl:
-  #   Description: The Git repository URL for the Queueing Service Host code
-  #   Default: "https://github.com/organization/pchc-cics-process-queue.git"
-  #   Type: String
-  # Branch:
-  #   Description: The Git branch to clone for the Queueing Service Host code
-  #   Default: "staging"
-  #   Type: String
+  QueueingHostAmiId:
+    Description: The AMI ID for Amazon Linux 2023
+    Type: AWS::EC2::Image::Id
+    Default: ami-088d74defe9802f14 #Update this to the latest AL2023 AMI ID for your region
+    ConstraintDescription: Must be a valid Amazon Linux 2023 AMI ID.
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  StartScheduleExpression:
+    Description: The cron expression to start the Queueing Service Host instances
+    Type: String
+    Default: "cron(0 8 ? * MON-FRI *)" # Every weekday at 8 AM UTC
+  StopScheduleExpression:
+    Description: The cron expression to stop the Queueing Service Host instances
+    Type: String
+    Default: "cron(0 20 ? * MON-FRI *)" # Every weekday at 8 PM UTC
 
 Mappings:
   Fn::Transform:
@@ -551,6 +557,89 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], queuing, service]]
         - Key: Organization
           Value: !Ref OrgName
+
+
+###
+# Queueing Host Stack
+###
+
+  # QueueingHostELBStack:
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+  #     Parameters:
+  #       Name: !Join ['-', [!Ref Name, tre]]
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       CertificateArn: !Ref LoadBalancerCertificateArn
+  #       DeletionProtection: !Ref DeletionProtection
+  #       InstancePort: 80
+  #       NetworkStackName: !Ref NetworkStackName
+  #       SNSStackName: !Ref SNSStackName
+
+  QueueingHostDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Select [0, !Split ['-', !Ref Name]], queue]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  QueueingHostServerStack:
+    DependsOn:
+      - QueueingHostDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Join ['-', [!Select [0, !Split ['-', !Ref Name]], queueing]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGMinSize: 0
+        ASGMaxSize: 3
+        ASGDesiredSize: 1
+        ClientDomainName: !Ref ClientDomainName
+        InstanceAMI: !Ref QueueingHostAmiId
+        InstanceKeyName: !Ref InstanceKeyName
+        # InstancePort: 
+        #InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
+        InstanceSubnet: Private
+        InstanceType: !If [IsProd, t3.medium, t3a.small]
+        LoadBalancerHostName: !If [IsTest, cics2-test, !If [IsStaging, cics2-stg, cics2]]
+        # LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref QueueingHostELBStack]]
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux AMI uses /dev/xvda
+        VolumeSize: 20 #GB 
+        VolumeType: gp3
+        LaunchTemplate: True
+
+  # QueueingHostSchedulerStack:
+  #   DependsOn:
+  #     - QueueingHostServerStack
+  #   Condition: IsNotProd
+  #   Type: AWS::CloudFormation::Stack
+  #   Properties:
+  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+  #     Parameters:
+  #       Name: !Ref Name
+  #       EnvName: !Ref EnvName
+  #       OrgName: !Ref OrgName
+  #       StartScheduleExpression: !Ref StartScheduleExpression
+  #       StopScheduleExpression: !Ref StopScheduleExpression
+  #       UseFriendlyNames: FALSE
+  #       CodeDeployApplicationName:
+  #         Fn::GetAtt:
+  #           - QueueingHostDeployStack
+  #           - Outputs.CodeDeployApplicationName
+  #       CodeDeployDeploymentGroupName:
+  #         Fn::GetAtt:
+  #           - QueueingHostDeployStack
+  #           - Outputs.CodeDeployDeploymentGroupName
 
 # ##
 # # ASG Section
