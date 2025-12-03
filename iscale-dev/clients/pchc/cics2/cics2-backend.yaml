@@ -22,6 +22,7 @@ Metadata:
         Parameters:
           - BatchAmiId
           - QueueingHostAmiId
+          - S3TriggerLambdaArn
 
     ParameterLabels:
       Name:
@@ -40,6 +41,8 @@ Metadata:
         default: Batch Host AMI ID
       QueueingHostAmiId:
         default: Queueing Service Host AMI ID
+      S3TriggerLambdaArn:
+        default: S3 Trigger Lambda ARN
         
 Parameters:
   Name:
@@ -97,6 +100,10 @@ Parameters:
     Description: Instance Key Name
     Type: String
     Default: ''
+  S3TriggerLambdaArn:
+    Description: The ARN of the S3 Trigger Lambda function
+    Type: String
+    Default: 'arn:aws:lambda:us-west-2:050821737631:function:pchc-stg-uw2-cics2-sls-stg-s3TriggerSQS'
   StartScheduleExpression:
     Description: The cron expression to start the Queueing Service Host instances
     Type: String
@@ -714,6 +721,46 @@ Resources:
             Action:
               - 'sqs:SendMessage'
             Resource: !GetAtt Cics2SqsQueue.Arn
+
+  S3TriggerSqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], s3trigger-sqs]]
+      VisibilityTimeout: 30
+      MessageRetentionPeriod: 345600 # 4 days in seconds
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], s3trigger-sqs]]
+        - Key: Organization
+          Value: !Ref OrgName
+
+  S3TriggerSqsQueuePolicy:
+    Type: AWS::SQS::QueueInlinePolicy
+    Properties:
+      Queue: !Ref S3TriggerSqsQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Id: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Select [0, !Split ['-', !Ref Name]], s3trigger-sqs]]
+        Statement:
+          - Sid: AllowS3ToSendMessage
+            Effect: Allow
+            Principal: 
+              Service: s3.amazonaws.com
+            Condition:
+              ArnLike:
+                aws:SourceArn: 
+                  !Join 
+                    ['', ['arn:aws:s3:::', !Ref OrgName, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '-', !FindInMap [RegionShort, !Ref 'AWS::Region', Name], '-', !Select [0, !Split ['-', !Ref Name]], '-bank*']]
+            Action:
+              - 'sqs:SendMessage'
+            Resource: !GetAtt S3TriggerSqsQueue.Arn
+
+  SQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      EventSourceArn: !GetAtt S3TriggerSqsQueue.Arn
+      FunctionName: !Ref S3TriggerLambdaArn
 
   ReportsFifoQueue:
     Type: AWS::SQS::Queue
