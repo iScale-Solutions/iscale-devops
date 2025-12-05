@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudCFO App Resources
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+          - InstanceType
+          - RDSEndpointUrl
+          - DestinationRDSecurityGroupId
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceType:
+        default: Instance Type
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      RDSEndpointUrl:
+        default: RDS Endpoint URL
+      DestinationRDSecurityGroupId:
+        default: Destination RDS Security Group ID
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 20
+    Default: app
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: cloudcfo
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production #Prod
+      - Staging #Pre-production
+      - Development 
+      - Test 
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-02b297871a94f4b42 # Base Amazon Linux 2023
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  InstanceType:
+    Description: Instance Type (size)
+    Type: String
+    Default: t3a.small
+    AllowedValues:
+      - t3a.micro
+      - t3a.small # dev
+      - t3a.medium
+      - t3a.large # prod and stage
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+    MinLength: 1
+  RDSEndpointUrl:
+    Description: The RDS Endpoint URL to be used by HAProxy
+    Type: String
+    Default: ''
+  DestinationRDSecurityGroupId:
+    Description: The Security Group ID of the RDS instance to allow ingress from HAProxy
+    Type: String
+    Default: ''
+  SNSStackName:
+    Description: The name of the SNS stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasKeyName: !Not [!Equals [!Ref InstanceKeyName, ""]]
+      
+Resources:
+  DBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: 20
+        EnvName: !Ref EnvName
+        Engine: mysql
+        EngineVersion: 8.0.43
+        Family: mysql8.0
+        InstanceType: db.t4g.micro
+        MasterUser: root
+        MultiAz: false
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+        
+  HAProxyInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref InstanceAMI
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref "AWS::NoValue"]
+      IamInstanceProfile: !Ref HAProxyIamProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          GroupSet: [!GetAtt HAProxySecurityGroup.GroupId]
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PublicSubnetId1'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+      UserData:
+        Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            sudo dnf install -y haproxy
+            sudo mv /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak
+            sudo touch /etc/haproxy/haproxy.cfg
+            sudo cat << EOF >> /etc/haproxy/haproxy.cfg
+            global
+                log /dev/log local0
+                log /dev/log local1 notice
+                # ... other global settings
+
+            defaults
+                log global
+                mode tcp
+                # ... other default settings
+
+            frontend mysql_front
+                bind *:43306
+                mode tcp
+                
+                # Allow traffic from Looker Studio ONLY
+                acl allowed_src src 142.251.74.0/23
+                acl allowed_src src 2001:4860:4807::/48
+
+                # Reject all other IPs
+                tcp-request connection reject if !allowed_src
+
+                default_backend mysql_back
+
+            backend mysql_back
+                mode tcp
+                server db_server ${RDSEndpointUrl}:3306 check
+            EOF
+            sudo systemctl restart haproxy
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, haproxy]]
+  
+  HAProxyEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref HAProxyInstance
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, haproxy-eip]]
+
+  HAProxyIamProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: HAProxyIamRole
+        
+  HAProxyIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  HAProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, haproxy-sg]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 43306
+          ToPort: 43306
+          CidrIp: 142.251.74.0/23
+        - IpProtocol: tcp
+          FromPort: 43306
+          ToPort: 43306
+          CidrIpv6: 2001:4860:4807::/48
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+  
+  AllowHAProxyToRDSIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DestinationRDSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref HAProxySecurityGroup
+      Description: Allow DB connection from HAProxy
+          
+Outputs:
+  HAProxyInstanceId:
+    Description: HAProxy EC2 Instance ID
+    Value: !Ref HAProxyInstance
+    Export:
+      Name: !Sub '${OrgName}-${EnvName}-${AWS::Region}-${Name}-HAProxyInstanceId'
+
+  HAProxyEIPAddress:
+    Description: HAProxy EC2 Instance EIP Address
+    Value: !Ref HAProxyEIP
+    Export:
+      Name: !Sub '${OrgName}-${EnvName}-${AWS::Region}-${Name}-HAProxyEIPAddress'
