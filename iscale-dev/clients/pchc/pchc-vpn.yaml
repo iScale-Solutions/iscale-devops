@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: VPN Server for developers' access for PCHC client
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceAMI
+          - InstanceType
+          - VolumeName
+          - VolumeSize
+          - VolumeType
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceType:
+        default: Instance Type
+      VolumeName:
+        default: Volume Device Name
+      VolumeSize:
+        default: Volume Disk Size
+      VolumeType:
+        default: Volume Disk Type 
+
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    MinLength: 3
+    MaxLength: 15
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the cloudformation Network stack
+    Type: String
+    Default: pchc-stg-uw2-cics2-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the cloudformation SNS stack
+    Type: String
+    Default: pchc-test-uw2-sns
+    MinLength: 1
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-02b297871a94f4b42 # base amazon-linux2023 AMI Oregon
+  InstanceType:
+    Description: Instance Type
+    Type: String
+    Default: t3a.micro # 10% cheaper than t3.micro
+  VolumeName:
+    Description: Amazon Linux 2 AMI uses /dev/xvda ; Ubuntu and Windows uses /dev/sda1
+    Type: String
+    Default: /dev/xvda
+    AllowedValues:
+      - /dev/xvda
+      - /dev/sda1
+  VolumeSize:
+    Description: Size in GB
+    Type: Number
+    Default: 10
+  VolumeType:
+    Type: String
+    Default: gp3
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: !Ref InstanceAMI
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref Ec2IamProfile
+      Monitoring: true
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: [!GetAtt DefaultSecurityGroup.GroupId]
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PublicSubnetId1'
+      BlockDeviceMappings:
+        - DeviceName: !Ref VolumeName
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: !Ref VolumeType
+      UserData:
+        Fn::Base64: |
+            #!/bin/bash -xe
+            # Install dependencies
+            yum install git -y
+            cd /home/ec2-user/
+            sudo curl -O https://raw.githubusercontent.com/angristan/openvpn-install/master/openvpn-install.sh
+            sudo chmod +x openvpn-install.sh
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+####
+# Security Group Section
+####
+
+  DefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      GroupDescription: Security group for OpenVPN
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  # Security group rules
+  DefaultSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt DefaultSecurityGroup.GroupId
+      IpProtocol: udp
+      FromPort: 1194
+      ToPort: 1194
+      CidrIp: "0.0.0.0/0"
+  
+  DefaultSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt DefaultSecurityGroup.GroupId
+      IpProtocol: -1
+      CidrIp: "0.0.0.0/0"
+
+####
+# IAM Section
+####
+
+  Ec2IamProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: Ec2IamRole
+
+  Ec2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
