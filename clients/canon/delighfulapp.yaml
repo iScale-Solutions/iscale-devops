@@ -1,0 +1,543 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CMP Delightful App – Elastic Beanstalk PHP 8.3 + RDS MySQL with Secrets, Alarms and conditional scheduling
+
+Parameters:
+  
+  DeveloperGroup:
+    Type: String
+    Default: canon-prd-ThinkBit-group
+    Description: Name of the existing IAM group for developers who need S3 access
+  
+  DeploymentMode:
+    Type: String
+    Default: staging
+    AllowedValues:
+      - staging
+      - production
+    Description: Select staging or production mode
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0f28436a
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: subnet-0fd98f78
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: subnet-cc6246a9, subnet-bcd98fcb
+
+  AppS3Key:
+    Type: String
+    Default: app.zip
+    Description: S3 key (object path) for the application bundle in the app source bucket
+
+  NotificationEmail:
+    Type: String
+    Default: iannis@iscale-solutions.com
+    Description: Email for CloudWatch alarm notifications
+
+Conditions:
+  IsStaging: !Equals [ !Ref DeploymentMode, staging ]
+
+Resources:
+
+  #########################################
+  # Custom Resource to Upload app.zip
+  #########################################
+
+  UploadAppZipCustomResource:
+    Type: Custom::UploadAppZip
+    Properties:
+      ServiceToken: !GetAtt AppZipUploaderFunction.Arn
+      Bucket: !Ref AppSourceBucket
+      Key: !Ref AppS3Key
+
+  #########################################
+  # Lambda Function to Upload app.zip to S3
+  #########################################
+
+  AppZipUploaderFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3WriteAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${AppSourceBucket}/*"
+
+  AppZipUploaderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt AppZipUploaderFunctionRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Code:
+        ZipFile: |
+            import boto3
+            import os
+            import io
+            import zipfile
+            import urllib.request
+            import json
+
+            S3_BUCKET = os.environ["BUCKET"]
+            S3_KEY = os.environ["KEY"]
+
+            def send_response(event, context, response_status, reason=None):
+              response_url = event["ResponseURL"]
+              response_body = {
+                "Status": response_status,
+                "Reason": reason or f"See the details in CloudWatch Log Stream: {context.log_stream_name}",
+                "PhysicalResourceId": context.log_stream_name,
+                "StackId": event["StackId"],
+                "RequestId": event["RequestId"],
+                "LogicalResourceId": event["LogicalResourceId"],
+                "Data": {}
+              }
+              json_response_body = json.dumps(response_body)
+              headers = {
+                "content-type": "",
+                "content-length": str(len(json_response_body))
+              }
+              req = urllib.request.Request(response_url, data=json_response_body.encode(), headers=headers, method="PUT")
+              try:
+                with urllib.request.urlopen(req) as response:
+                  response.read()
+              except Exception as e:
+                print(f"send_response failed: {e}")
+
+            def handler(event, context):
+              try:
+                s3 = boto3.client("s3")
+                request_type = event.get("RequestType")
+                if request_type == "Delete":
+                  # Delete the object from S3
+                  try:
+                    s3.delete_object(Bucket=S3_BUCKET, Key=S3_KEY)
+                  except Exception as e:
+                    print(f"S3 delete_object failed: {e}")
+                  send_response(event, context, "SUCCESS")
+                  return
+                elif request_type == "Update":
+                  # Do nothing on Update
+                  send_response(event, context, "SUCCESS")
+                  return
+                # Only on Create, upload the zip
+                php_content = b'<?php echo "Hello, World!";'
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                  zf.writestr('index.php', php_content)
+                zip_buffer.seek(0)
+                s3.put_object(Bucket=S3_BUCKET, Key=S3_KEY, Body=zip_buffer.read())
+                send_response(event, context, "SUCCESS")
+              except Exception as e:
+                print(f"Lambda error: {e}")
+                send_response(event, context, "FAILED", reason=str(e))
+      Environment:
+        Variables:
+          BUCKET: !Ref AppSourceBucket
+          KEY: !Ref AppS3Key
+
+  #########################################
+  # IAM Policy for S3 Bucket Access
+  #########################################
+
+  DeveloperS3AccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: cmp-delightful-app-s3-access
+      Groups:
+        - !Ref DeveloperGroup
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !GetAtt AppSourceBucket.Arn
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub "${AppSourceBucket.Arn}/*"
+
+  #########################################
+  # S3 Bucket for App Source
+  #########################################
+
+  AppSourceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub cmp-delightful-app-${DeploymentMode}-src
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Environment
+          Value: !Ref DeploymentMode
+        - Key: App
+          Value: CMP-Delightful
+
+  #########################################
+  # Secrets Manager – DB credentials
+  #########################################
+
+  CMPDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub cmp-delightful-db-${DeploymentMode}-credentials
+      Description: DB credentials for CMP Delightful App
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"cmpapp","dbname":"cmpdelightful"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Environment
+          Value: !Ref DeploymentMode
+        - Key: App
+          Value: CMP-Delightful
+
+  #########################################
+  # IAM Roles for EB
+  #########################################
+
+  EBServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub EBServiceRole-CMP-Delightful-${DeploymentMode}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: elasticbeanstalk.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+
+  EBInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub EBInstanceRole-CMP-Delightful-${DeploymentMode}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref CMPDatabaseSecret
+
+  EBInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref EBInstanceRole ]
+
+  #########################################
+  # Elastic Beanstalk App
+  #########################################
+
+  CMPDelightfulApp:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: CMP Delightful App
+
+  CMPDelightfulAppVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    DependsOn: UploadAppZipCustomResource
+    Properties:
+      ApplicationName: !Ref CMPDelightfulApp
+      SourceBundle:
+        S3Bucket: !Ref AppSourceBucket
+        S3Key: !Ref AppS3Key
+
+  #########################################
+  # Security Groups
+  #########################################
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub CMP Delightful App ${DeploymentMode} SG
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub CMP Delightful DB ${DeploymentMode} SG
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+  #########################################
+  # RDS Groups
+  #########################################
+
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for CMP Delightful DB
+      SubnetIds: !Ref PrivateSubnetIds
+
+  RDSParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: mysql8.4
+      Description: CMP Delightful MySQL params
+      Parameters:
+        log_output: FILE
+        general_log: 1
+        slow_query_log: 1
+        log_error_verbosity: 3
+        # audit log parameters removed (not supported for MySQL 8.4)
+
+  RDSOptionGroup:
+    Type: AWS::RDS::OptionGroup
+    Properties:
+      EngineName: mysql
+      MajorEngineVersion: "8.4"
+      OptionGroupDescription: Audit plugin enabled
+
+  #########################################
+  # RDS Instance
+  #########################################
+
+  CMPDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub cmp-delightful-db-${DeploymentMode}
+      Engine: mysql
+      EngineVersion: 8.4.6
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 200
+      StorageType: gp3
+      MultiAZ: !If [ IsStaging, false, true ]
+      MasterUsername: !Sub '{{resolve:secretsmanager:${CMPDatabaseSecret}::username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${CMPDatabaseSecret}::password}}'
+      DBName: !Sub '{{resolve:secretsmanager:${CMPDatabaseSecret}::dbname}}'
+      VPCSecurityGroups: [ !Ref RDSSecurityGroup ]
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      DBParameterGroupName: !Ref RDSParameterGroup
+      OptionGroupName: !Ref RDSOptionGroup
+      BackupRetentionPeriod: !If [ IsStaging, 4, 30 ]
+      PubliclyAccessible: false
+      DeletionProtection: !If [ IsStaging, false, true ]
+
+  #########################################
+  # Elastic Beanstalk Environment
+  #########################################
+
+  CMPDelightfulAppEnv:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref CMPDelightfulApp
+      EnvironmentName: !Sub cmp-delightful-${DeploymentMode}
+      PlatformArn: arn:aws:elasticbeanstalk:ap-southeast-1::platform/PHP 8.3 running on 64bit Amazon Linux 2023/4.9.0
+      VersionLabel: !Ref CMPDelightfulAppVersion
+      OptionSettings:
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: InstanceType
+          Value: !If [ IsStaging, t4g.small, t4g.medium ]
+        - Namespace: aws:autoscaling:asg
+          OptionName: MinSize
+          Value: !If [ IsStaging, "1", "2" ]
+        - Namespace: aws:autoscaling:asg
+          OptionName: MaxSize
+          Value: !If [ IsStaging, "1", "4" ]
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: IamInstanceProfile
+          Value: !Ref EBInstanceProfile
+        - Namespace: aws:ec2:vpc
+          OptionName: VPCId
+          Value: !Ref VpcId
+        - Namespace: aws:ec2:vpc
+          OptionName: Subnets
+          Value: !Join [ ",", !Ref SubnetIds ]
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DB_SECRET_ARN
+          Value: !Ref CMPDatabaseSecret
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: DB_HOST
+          Value: !GetAtt CMPDatabase.Endpoint.Address
+
+  #########################################
+  # SNS + CloudWatch Alarms
+  #########################################
+
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub cmp-delightful-${DeploymentMode}-alerts
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref NotificationEmail
+
+  RDSCPUHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: High RDS CPU
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref CMPDatabase
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: [ !Ref AlertsTopic ]
+
+  EBHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: EB environment unhealthy
+      Namespace: AWS/ElasticBeanstalk
+      MetricName: EnvironmentHealth
+      Dimensions:
+        - Name: EnvironmentName
+          Value: !Sub cmp-delightful-${DeploymentMode}
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 15
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: [ !Ref AlertsTopic ]
+
+  #########################################
+  # Nightly RDS Stop/Start – STAGING ONLY
+  #########################################
+
+  RDSStartStopRole:
+    Condition: IsStaging
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RDSStartStopPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:StartDBInstance
+                  - rds:StopDBInstance
+                Resource: !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:cmp-delightful-db-staging
+
+  RDSStartStopFunction:
+    Condition: IsStaging
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt RDSStartStopRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          DB_INSTANCE_ID: cmp-delightful-db-staging
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          rds = boto3.client("rds")
+          DB_ID = os.environ["DB_INSTANCE_ID"]
+
+          def handler(event, context):
+              action = event.get("action")
+              if action == "stop":
+                  rds.stop_db_instance(DBInstanceIdentifier=DB_ID)
+              elif action == "start":
+                  rds.start_db_instance(DBInstanceIdentifier=DB_ID)
+              return {"status": action}
+
+  StopRDSRule:
+    Condition: IsStaging
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: cron(0 14 * * ? *)   # 22:00 PH ~ 14:00 UTC
+      Targets:
+        - Arn: !GetAtt RDSStartStopFunction.Arn
+          Id: StopRDS
+          Input: '{"action":"stop"}'
+
+  StartRDSRule:
+    Condition: IsStaging
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: cron(0 0 * * ? *)    # 08:00 PH ~ 00:00 UTC
+      Targets:
+        - Arn: !GetAtt RDSStartStopFunction.Arn
+          Id: StartRDS
+          Input: '{"action":"start"}'
+
+  AllowEventsInvokeLambda1:
+    Condition: IsStaging
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RDSStartStopFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopRDSRule.Arn
+
+  AllowEventsInvokeLambda2:
+    Condition: IsStaging
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RDSStartStopFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartRDSRule.Arn
+
+Outputs:
+  EnvironmentURL:
+    Value: !GetAtt CMPDelightfulAppEnv.EndpointURL
+
+  DatabaseEndpoint:
+    Value: !GetAtt CMPDatabase.Endpoint.Address
+
+  DatabaseSecretArn:
+    Value: !Ref CMPDatabaseSecret
