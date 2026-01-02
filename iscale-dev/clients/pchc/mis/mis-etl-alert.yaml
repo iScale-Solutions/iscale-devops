@@ -45,7 +45,14 @@ Parameters:
   Email:
     Description: The email address where to send the notifications.
     Type: String
-    Default: ""
+  DomainName:
+    Description: The domain name for the source email address.
+    Type: String
+    Default: pchcdev.com
+  SESRecipients:
+    Description: Comma-separated list of verified SES email addresses to receive notifications.
+    Type: String
+  
 
 Mappings: 
   Fn::Transform:
@@ -109,5 +116,143 @@ Resources:
       State: ENABLED
       EventBusName: default
       Targets:
-        - Id: EtlJobStatusNotification
-          Arn: !GetAtt SnsTopic.TopicArn
+        # - Id: EtlJobStatusNotification #removed since we'll just use the SES + Lambda
+        #   Arn: !GetAtt SnsTopic.TopicArn
+        - Id: GlueJobLambdaTarget
+          Arn: !GetAtt GlueJobEmailLambda.Arn
+
+  GlueLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: "GlueLambdaSESPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ses:SendEmail"
+                  - "ses:SendRawEmail"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+
+  GlueJobEmailLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: pchc-test-uw2-etl-email-notification
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt GlueLambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.text import MIMEText
+          from email.mime.application import MIMEApplication
+
+          ses_client = boto3.client('ses')
+
+          def lambda_handler(event, context):
+              detail = event.get('detail', {})
+              job_name = detail.get('jobName', 'Unknown Job')
+              state = detail.get('state', 'Unknown')
+              job_run_id = detail.get('jobRunId', 'Unknown')
+              message = detail.get('message', '')
+              env_name = os.environ.get('ENV_NAME', 'UNKNOWN').upper()
+
+              # Color coding for email content
+              status_color = "#28a745" if state == "SUCCEEDED" else "#dc3545"
+              status_label = "SUCCESS" if state == "SUCCEEDED" else "FAILED"
+
+              html_body = f"""
+              <html>
+              <body style="font-family:Arial,sans-serif; line-height:1.5;">
+                  <h2>Glue Job Notification</h2>
+                  <table style="border-collapse: collapse; width: 100%;">
+                      <tr>
+                          <td style="padding: 8px; font-weight: bold;">Job Name:</td>
+                          <td style="padding: 8px;">{job_name}</td>
+                      </tr>
+                      <tr>
+                          <td style="padding: 8px; font-weight: bold;">Job Run ID:</td>
+                          <td style="padding: 8px;">{job_run_id}</td>
+                      </tr>
+                      <tr>
+                          <td style="padding: 8px; font-weight: bold;">State:</td>
+                          <td style="padding: 8px; color:{status_color}; font-weight: bold;">{state}</td>
+                      </tr>
+                      <tr>
+                          <td style="padding: 8px; font-weight: bold;">Message:</td>
+                          <td style="padding: 8px;">{message}</td>
+                      </tr>
+                  </table>
+                  <p style="margin-top:20px; color:#555;">This is an automated notification from AWS Glue.</p>
+              </body>
+              </html>
+              """
+              dest_emails = [email.strip() for email in os.environ['DEST_EMAIL'].split(',')]
+
+              for recipient in dest_emails:
+                # Create a fresh MIME message
+                msg = MIMEMultipart('mixed')
+                msg['Subject'] = f"[MIS][{env_name}][{status_label}] Glue Job {job_name} - RunID {job_run_id}"
+                msg['From'] = os.environ['SOURCE_EMAIL']
+                msg['To'] = recipient  # MUST be a string, not a list
+
+                # Add priority headers if FAILED
+                if state == "FAILED":
+                    msg['X-Priority'] = '1'
+                    msg['Importance'] = 'High'
+                    msg['Priority'] = 'urgent'
+
+                # Attach HTML body
+                msg.attach(MIMEText(html_body, 'html'))
+
+                # Attach EventBridge JSON
+                json_attachment = MIMEApplication(json.dumps(event, indent=2).encode('utf-8'))
+                json_attachment.add_header(
+                    'Content-Disposition',
+                    'attachment',
+                    filename=f'GlueJobEvent_{job_run_id}.json'
+                )
+                msg.attach(json_attachment)
+
+                # Send via SES
+                ses_client.send_raw_email(
+                    Source=os.environ['SOURCE_EMAIL'],
+                    Destinations=[recipient],  # MUST be a list of one string
+                    RawMessage={'Data': msg.as_string()}
+                )
+                print(f"Email sent to: {recipient} successfully")
+
+              return {"status": "sent"}
+
+      Environment:
+        Variables:
+          SOURCE_EMAIL: !Sub "no-reply@${DomainName}"
+          DEST_EMAIL: !Ref SESRecipients
+          ENV_NAME: !Ref EnvName
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GlueJobEmailLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EtlJobEventRule.Arn
