@@ -1,0 +1,221 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ProjectTemplate - Creates a VPC, a public subnet, an IAM user with access key, and restricts permissions to the VPC and region as much as possible.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Name of the project (used for resource naming)
+    MaxLength: 9
+  VPCCidr:
+    Type: String
+    Default: 10.0.0.0/24
+    Description: CIDR block for the VPC (default /24 = 256 IPs)
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.0.0.0/25
+    Description: CIDR block for the first public subnet (default /25 = 128 IPs)
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.0.0.128/25
+    Description: CIDR block for the second public subnet (default /25 = 128 IPs)
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.0.0.192/26
+    Description: CIDR block for the first private subnet (default /26 = 64 IPs)
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.0.0.256/26
+    Description: CIDR block for the second private subnet (default /26 = 64 IPs)
+
+Resources:
+
+  ProjectVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VPCCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  ProjectSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-subnet-1"
+
+  ProjectSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-subnet-2"
+
+  ProjectInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ProjectVPC
+      InternetGatewayId: !Ref ProjectInternetGateway
+
+  ProjectRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ProjectVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rtb"
+
+  ProjectRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref ProjectRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ProjectInternetGateway
+
+  Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ProjectSubnet1
+      RouteTableId: !Ref ProjectRouteTable
+
+  Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ProjectSubnet2
+      RouteTableId: !Ref ProjectRouteTable
+
+  ProjectIAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub "${ProjectName}-deploy-user"
+
+  ProjectIAMPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${ProjectName}-deploy-policy"
+      Users: [ !Ref ProjectIAMUser ]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Allow CloudFormation actions in this region only
+          - Effect: Allow
+            Action: cloudformation:*
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "aws:RequestedRegion": { "Ref": "AWS::Region" }
+          # Allow EC2, ELB, RDS, Lambda, API Gateway, ECS, EFS, etc. in this region
+          - Effect: Allow
+            Action:
+              - ec2:*
+              - elasticloadbalancing:*
+              - rds:*
+              - lambda:*
+              - apigateway:*
+              - ecs:*
+              - efs:*
+              - logs:*
+              - events:*
+              - cloudwatch:*
+              - elasticache:*
+              - eks:*
+              - kinesis:*
+              - glue:*
+              - athena:*
+              - redshift:*
+              - dms:*
+              - mq:*
+              - network-firewall:*
+              - route53resolver:*
+              - sagemaker:*
+              - secretsmanager:*
+              - servicediscovery:*
+              - sns:*
+              - sqs:*
+              - stepfunctions:*
+              - transfer:*
+              - vpc-lattice:*
+              - vpcendpoint:*
+              - vpcaccess:*
+              - xray:*
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "aws:RequestedRegion": { "Ref": "AWS::Region" }
+          # Deny EC2, ELB, RDS, Lambda, ECS, EFS outside the VPC
+          - Effect: Deny
+            Action:
+              - ec2:*
+              - elasticloadbalancing:*
+              - rds:*
+              - lambda:*
+              - ecs:*
+              - efs:*
+              - elasticache:*
+              - eks:*
+              - mq:*
+              - network-firewall:*
+              - route53resolver:*
+              - servicediscovery:*
+              - vpc-lattice:*
+              - vpcendpoint:*
+              - vpcaccess:*
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                "ec2:Vpc": !Ref ProjectVPC
+          # Allow IAM actions only for this user (for access key management)
+          - Effect: Allow
+            Action:
+              - iam:GetUser
+              - iam:ListAccessKeys
+              - iam:CreateAccessKey
+              - iam:DeleteAccessKey
+            Resource: !GetAtt ProjectIAMUser.Arn
+          # Allow S3 actions (optionally restrict to project-named buckets)
+          - Effect: Allow
+            Action: s3:*
+            Resource: "*"
+
+  ProjectAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref ProjectIAMUser
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref ProjectVPC
+  Subnet1Id:
+    Description: Public Subnet 1 ID
+    Value: !Ref ProjectSubnet1
+  Subnet2Id:
+    Description: Public Subnet 2 ID
+    Value: !Ref ProjectSubnet2
+  IAMUserName:
+    Description: IAM User Name
+    Value: !Ref ProjectIAMUser
+  AccessKeyId:
+    Description: Access Key ID (save this value)
+    Value: !Ref ProjectAccessKey
+  SecretAccessKey:
+    Description: Secret Access Key (save this value, will not be shown again)
+    Value: !GetAtt ProjectAccessKey.SecretAccessKey
