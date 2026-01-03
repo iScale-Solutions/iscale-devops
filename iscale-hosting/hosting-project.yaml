@@ -6,28 +6,39 @@ Parameters:
     Type: String
     Description: Name of the project (used for resource naming)
     MaxLength: 9
+    MinLength: 1
   VPCCidr:
     Type: String
-    Default: 10.0.0.0/24
+    Default: 10.0.2.0/24
     Description: CIDR block for the VPC (default /24 = 256 IPs)
   PublicSubnet1Cidr:
     Type: String
-    Default: 10.0.0.0/25
-    Description: CIDR block for the first public subnet (default /25 = 128 IPs)
+    Default: 10.0.2.0/26
+    Description: CIDR block for the first public subnet (default /26 = 64 IPs)
   PublicSubnet2Cidr:
     Type: String
-    Default: 10.0.0.128/25
-    Description: CIDR block for the second public subnet (default /25 = 128 IPs)
+    Default: 10.0.2.64/26
+    Description: CIDR block for the second public subnet (default /26 = 64 IPs)
   PrivateSubnet1Cidr:
     Type: String
-    Default: 10.0.0.192/26
+    Default: 10.0.2.128/26
     Description: CIDR block for the first private subnet (default /26 = 64 IPs)
   PrivateSubnet2Cidr:
     Type: String
-    Default: 10.0.0.256/26
+    Default: 10.0.2.192/26
     Description: CIDR block for the second private subnet (default /26 = 64 IPs)
 
 Resources:
+  ProjectIAMSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}-deploy-user-credentials"
+      Description: IAM access key and secret for GitHub Actions/CoPilot
+      SecretString: !Sub |
+        {
+          "AccessKeyId": "${ProjectAccessKey}",
+          "SecretAccessKey": "${ProjectAccessKey.SecretAccessKey}"
+        }
 
   ProjectVPC:
     Type: AWS::EC2::VPC
@@ -39,7 +50,7 @@ Resources:
         - Key: Name
           Value: !Sub "${ProjectName}-vpc"
 
-  ProjectSubnet1:
+  ProjectPublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref ProjectVPC
@@ -50,7 +61,7 @@ Resources:
         - Key: Name
           Value: !Sub "${ProjectName}-public-subnet-1"
 
-  ProjectSubnet2:
+  ProjectPublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref ProjectVPC
@@ -61,13 +72,35 @@ Resources:
         - Key: Name
           Value: !Sub "${ProjectName}-public-subnet-2"
 
+  ProjectPrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-subnet-1"
+
+  ProjectPrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-subnet-2"
+
   ProjectInternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-igw"
-
+  
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
@@ -90,22 +123,39 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref ProjectInternetGateway
 
-  Subnet1RouteTableAssociation:
+  PublicSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref ProjectSubnet1
+      SubnetId: !Ref ProjectPublicSubnet1
       RouteTableId: !Ref ProjectRouteTable
 
-  Subnet2RouteTableAssociation:
+  PublicSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref ProjectSubnet2
+      SubnetId: !Ref ProjectPublicSubnet2
+      RouteTableId: !Ref ProjectRouteTable
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ProjectPrivateSubnet1
+      RouteTableId: !Ref ProjectRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ProjectPrivateSubnet2
       RouteTableId: !Ref ProjectRouteTable
 
   ProjectIAMUser:
     Type: AWS::IAM::User
     Properties:
       UserName: !Sub "${ProjectName}-deploy-user"
+
+  ProjectAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref ProjectIAMUser
 
   ProjectIAMPolicy:
     Type: AWS::IAM::Policy
@@ -195,27 +245,36 @@ Resources:
             Action: s3:*
             Resource: "*"
 
-  ProjectAccessKey:
-    Type: AWS::IAM::AccessKey
-    Properties:
-      UserName: !Ref ProjectIAMUser
-
 Outputs:
+
   VPCId:
     Description: VPC ID
     Value: !Ref ProjectVPC
-  Subnet1Id:
+
+  PublicSubnet1Id:
     Description: Public Subnet 1 ID
-    Value: !Ref ProjectSubnet1
-  Subnet2Id:
+    Value: !Ref ProjectPublicSubnet1
+
+  PublicSubnet2Id:
     Description: Public Subnet 2 ID
-    Value: !Ref ProjectSubnet2
-  IAMUserName:
-    Description: IAM User Name
+    Value: !Ref ProjectPublicSubnet2
+  
+  PrivateSubnet1Id:
+    Description: Private Subnet 1 ID
+    Value: !Ref ProjectPrivateSubnet1
+  
+  PrivateSubnet2Id:
+    Description: Private Subnet 2 ID
+    Value: !Ref ProjectPrivateSubnet2
+
+  ProjectIAMUserName:
+    Description: IAM deploy user name
     Value: !Ref ProjectIAMUser
-  AccessKeyId:
-    Description: Access Key ID (save this value)
+  
+  ProjectAccessKeyId:
+    Description: IAM access key ID
     Value: !Ref ProjectAccessKey
-  SecretAccessKey:
-    Description: Secret Access Key (save this value, will not be shown again)
-    Value: !GetAtt ProjectAccessKey.SecretAccessKey
+
+  IAMSecretArn:
+    Description: ARN of the IAM credentials secret
+    Value: !Ref ProjectIAMSecret
