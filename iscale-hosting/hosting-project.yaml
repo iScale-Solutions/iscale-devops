@@ -1,288 +1,1028 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: ProjectTemplate - Creates a VPC, a public subnet, an IAM user with access key, and restricts permissions to the VPC and region as much as possible.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Project bootstrap stack (VPC + 2 public subnets + 2 private subnets + Route53 zone +
+  IAM permission boundary + Project deploy role + Project IAM user with access key).
+  Uses Project-tag ABAC for service access and IAM permission boundaries for role creation.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterLabels:
+      ProjectName:
+        default: 'Project Name'
+      DomainName:
+        default: 'Domain Name'
+      VpcCidr:
+        default: 'VPC CIDR Block'
+      ProjectTagKey:
+        default: 'Project Tag Key'
 
 Parameters:
   ProjectName:
     Type: String
-    Description: Name of the project (used for resource naming)
-    MaxLength: 9
-    MinLength: 1
-  VPCCidr:
+    Description: Project short name (1-9 letters/numbers) used in resource names and tag values.
+    AllowedPattern: '^[A-Za-z0-9]{1,9}$'
+    ConstraintDescription: 'Must be 1-9 characters of letters/numbers only.'
+
+  DomainName:
+    Type: String
+    Description: Domain name for this project hosted zone (e.g., example.com). Project access will be limited to this zone.
+    AllowedPattern: '^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.[A-Za-z]{2,63}$'
+    ConstraintDescription: 'Must be a valid DNS domain, e.g., example.com'
+
+  VpcCidr:
     Type: String
     Default: 10.0.2.0/24
-    Description: CIDR block for the VPC (default /24 = 256 IPs)
-  PublicSubnet1Cidr:
+    Description: CIDR for the project VPC (default 10.0.2.0/24). Will be split into 4 subnets (/26).
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/(1[6-9]|2[0-8])$'
+    ConstraintDescription: 'Must be a valid IPv4 CIDR between /16 and /28.'
+
+  ProjectTagKey:
     Type: String
-    Default: 10.0.2.0/26
-    Description: CIDR block for the first public subnet (default /26 = 64 IPs)
-  PublicSubnet2Cidr:
-    Type: String
-    Default: 10.0.2.64/26
-    Description: CIDR block for the second public subnet (default /26 = 64 IPs)
-  PrivateSubnet1Cidr:
-    Type: String
-    Default: 10.0.2.128/26
-    Description: CIDR block for the first private subnet (default /26 = 64 IPs)
-  PrivateSubnet2Cidr:
-    Type: String
-    Default: 10.0.2.192/26
-    Description: CIDR block for the second private subnet (default /26 = 64 IPs)
+    Default: Project
+    Description: Tag key used for ABAC. (Template enforces 'Project' to keep IAM conditions consistent.)
+    AllowedValues:
+      - Project
 
 Resources:
-  ProjectIAMSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: !Sub "${ProjectName}-deploy-user-credentials"
-      Description: IAM access key and secret for GitHub Actions/CoPilot
-      SecretString: !Sub |
-        {
-          "AccessKeyId": "${ProjectAccessKey}",
-          "SecretAccessKey": "${ProjectAccessKey.SecretAccessKey}"
-        }
-
-  ProjectVPC:
+  # -----------------------------
+  # Networking (project-specific)
+  # 4 subnets total from /24 -> 4 x /26 (256 IPs spread over 4 subnets)
+  # -----------------------------
+  Vpc:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: !Ref VPCCidr
+      CidrBlock: !Ref VpcCidr
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
         - Key: Name
-          Value: !Sub "${ProjectName}-vpc"
+          Value: !Sub '${ProjectName}-vpc'
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
 
-  ProjectPublicSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref ProjectVPC
-      CidrBlock: !Ref PublicSubnet1Cidr
-      AvailabilityZone: !Select [0, !GetAZs '']
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-public-subnet-1"
-
-  ProjectPublicSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref ProjectVPC
-      CidrBlock: !Ref PublicSubnet2Cidr
-      AvailabilityZone: !Select [1, !GetAZs '']
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-public-subnet-2"
-
-  ProjectPrivateSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref ProjectVPC
-      CidrBlock: !Ref PrivateSubnet1Cidr
-      AvailabilityZone: !Select [0, !GetAZs '']
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-private-subnet-1"
-
-  ProjectPrivateSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref ProjectVPC
-      CidrBlock: !Ref PrivateSubnet2Cidr
-      AvailabilityZone: !Select [1, !GetAZs '']
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-private-subnet-2"
-
-  ProjectInternetGateway:
+  InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
-          Value: !Sub "${ProjectName}-igw"
-  
-  AttachGateway:
+          Value: !Sub '${ProjectName}-igw'
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
+
+  AttachIgw:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
-      VpcId: !Ref ProjectVPC
-      InternetGatewayId: !Ref ProjectInternetGateway
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
 
-  ProjectRouteTable:
+  PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
-      VpcId: !Ref ProjectVPC
+      VpcId: !Ref Vpc
       Tags:
         - Key: Name
-          Value: !Sub "${ProjectName}-rtb"
+          Value: !Sub '${ProjectName}-rtb-public'
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
 
-  ProjectRoute:
+  DefaultPublicRoute:
     Type: AWS::EC2::Route
-    DependsOn: AttachGateway
+    DependsOn: AttachIgw
     Properties:
-      RouteTableId: !Ref ProjectRouteTable
+      RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref ProjectInternetGateway
+      GatewayId: !Ref InternetGateway
 
-  PublicSubnet1RouteTableAssociation:
+  # Private route table: NO default route (no NAT). Private subnets have no direct internet path.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rtb-private'
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
+
+  # Subnet CIDRs: 4 x /26 from the given VPC CIDR
+  # Index 0-3. We'll assign:
+  # 0 = public-a, 1 = public-b, 2 = private-a, 3 = private-b
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 6]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-subnet-public-a'
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 6]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-subnet-public-b'
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 6]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-subnet-private-a'
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 6]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-subnet-private-b'
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
+
+  AssocPublicSubnetARouteTable:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref ProjectPublicSubnet1
-      RouteTableId: !Ref ProjectRouteTable
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
 
-  PublicSubnet2RouteTableAssociation:
+  AssocPublicSubnetBRouteTable:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref ProjectPublicSubnet2
-      RouteTableId: !Ref ProjectRouteTable
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
 
-  PrivateSubnet1RouteTableAssociation:
+  AssocPrivateSubnetARouteTable:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref ProjectPrivateSubnet1
-      RouteTableId: !Ref ProjectRouteTable
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
 
-  PrivateSubnet2RouteTableAssociation:
+  AssocPrivateSubnetBRouteTable:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref ProjectPrivateSubnet2
-      RouteTableId: !Ref ProjectRouteTable
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
 
-  ProjectIAMUser:
-    Type: AWS::IAM::User
+  BaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      UserName: !Sub "${ProjectName}-deploy-user"
+      GroupDescription: !Sub 'Base SG for ${ProjectName}'
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-sg-base'
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
 
-  ProjectAccessKey:
-    Type: AWS::IAM::AccessKey
+  # -----------------------------
+  # Route 53 (zone-scoped)
+  # -----------------------------
+  ProjectHostedZone:
+    Type: AWS::Route53::HostedZone
     Properties:
-      UserName: !Ref ProjectIAMUser
+      Name: !Ref DomainName
+      HostedZoneTags:
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
 
-  ProjectIAMPolicy:
-    Type: AWS::IAM::Policy
+  # -----------------------------
+  # IAM: Permission Boundary (clamp)
+  # -----------------------------
+  ProjectPermissionBoundary:
+    Type: AWS::IAM::ManagedPolicy
     Properties:
-      PolicyName: !Sub "${ProjectName}-deploy-policy"
-      Users: [ !Ref ProjectIAMUser ]
+      ManagedPolicyName: !Sub 'PB-${ProjectName}'
+      Description: !Sub 'Permission boundary for project ${ProjectName}.'
       PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowReadOnlyDiscovery
+            Effect: Allow
+            Action:
+              - "ec2:Describe*"
+              - "eks:Describe*"
+              - "eks:List*"
+              - "ecs:Describe*"
+              - "ecs:List*"
+              - "ecr:Describe*"
+              - "ecr:List*"
+              - "iam:Get*"
+              - "iam:List*"
+              - "route53:List*"
+              - "cloudfront:List*"
+              - "acm:ListCertificates"
+              - "kms:List*"
+              - "kms:Describe*"
+              - "s3:ListAllMyBuckets"
+              - "backup:List*"
+              - "backup:Get*"
+              - "ssm:Get*"
+              - "ssm:List*"
+            Resource: "*"
+
+          - Sid: IAMRoleOps
+            Effect: Allow
+            Action:
+              - "iam:CreateRole"
+              - "iam:DeleteRole"
+              - "iam:UpdateRole"
+              - "iam:AttachRolePolicy"
+              - "iam:DetachRolePolicy"
+              - "iam:PutRolePolicy"
+              - "iam:DeleteRolePolicy"
+              - "iam:PutRolePermissionsBoundary"
+              - "iam:DeleteRolePermissionsBoundary"
+              - "iam:TagRole"
+              - "iam:UntagRole"
+              - "iam:PassRole"
+            Resource: "arn:aws:iam::*:role/*"
+
+          - Sid: DenyIAMPolicyEscalation
+            Effect: Deny
+            Action:
+              - "iam:CreatePolicyVersion"
+              - "iam:SetDefaultPolicyVersion"
+              - "iam:DeletePolicyVersion"
+              - "iam:PutUserPolicy"
+              - "iam:PutGroupPolicy"
+              - "iam:AttachUserPolicy"
+              - "iam:AttachGroupPolicy"
+              - "iam:CreateAccessKey"
+              - "iam:UpdateAssumeRolePolicy"
+            Resource: "*"
+
+  # -----------------------------
+  # IAM: Project deploy role (for CloudFormation)
+  # -----------------------------
+  ProjectDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "Project-${ProjectName}-DeployRole"
+      Description: !Sub "Project deploy role for ${ProjectName}. Use with CloudFormation. ABAC by Project tag."
+      PermissionsBoundary: !Ref ProjectPermissionBoundary
+      AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          # Allow CloudFormation actions in this region only
+          # Adjust this to your CI/SSO principal(s). Root here is a placeholder.
           - Effect: Allow
-            Action: cloudformation:*
-            Resource: "*"
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "sts:AssumeRole"
+      Tags:
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
+      Policies:
+        - PolicyName: !Sub "Project-${ProjectName}-Permissions"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EC2FullControlInsideProjectVpc
+                Effect: Allow
+                Action: "ec2:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "ec2:Vpc": !Ref Vpc
+
+              - Sid: ELBFullControl
+                Effect: Allow
+                Action: "elasticloadbalancing:*"
+                Resource: "*"
+
+              - Sid: ECRProjectOnly
+                Effect: Allow
+                Action: "ecr:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: ECRCreateMustTag
+                Effect: Allow
+                Action:
+                  - "ecr:CreateRepository"
+                  - "ecr:TagResource"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+
+              - Sid: ECSProjectOnly
+                Effect: Allow
+                Action: "ecs:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: ECSCreateMustTag
+                Effect: Allow
+                Action:
+                  - "ecs:CreateCluster"
+                  - "ecs:TagResource"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+
+              - Sid: EKSProjectOnly
+                Effect: Allow
+                Action: "eks:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: EKSCreateMustTag
+                Effect: Allow
+                Action:
+                  - "eks:CreateCluster"
+                  - "eks:CreateNodegroup"
+                  - "eks:TagResource"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+
+              - Sid: LambdaProjectOnly
+                Effect: Allow
+                Action: "lambda:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: LambdaCreateMustTag
+                Effect: Allow
+                Action:
+                  - "lambda:CreateFunction"
+                  - "lambda:TagResource"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+
+              - Sid: DataServicesProjectOnly
+                Effect: Allow
+                Action:
+                  - "rds:*"
+                  - "dynamodb:*"
+                  - "redshift:*"
+                  - "elasticache:*"
+                  - "docdb:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: SSMProjectOnly
+                Effect: Allow
+                Action: "ssm:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: SecretsProjectOnly
+                Effect: Allow
+                Action: "secretsmanager:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: KMSProjectOnly
+                Effect: Allow
+                Action: "kms:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: KMSCreateMustTag
+                Effect: Allow
+                Action:
+                  - "kms:CreateKey"
+                  - "kms:TagResource"
+                  - "kms:UntagResource"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+
+              - Sid: S3CreateBucketAndList
+                Effect: Allow
+                Action:
+                  - "s3:CreateBucket"
+                  - "s3:ListAllMyBuckets"
+                Resource: "*"
+
+              - Sid: S3TagBucketToClaimProject
+                Effect: Allow
+                Action:
+                  - "s3:PutBucketTagging"
+                  - "s3:GetBucketTagging"
+                Resource: "arn:aws:s3:::*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+                  ForAllValues:StringEquals:
+                    "aws:TagKeys":
+                      - "Project"
+
+              - Sid: S3FullControlOnlyOnProjectTaggedBuckets
+                Effect: Allow
+                Action: "s3:*"
+                Resource:
+                  - "arn:aws:s3:::*"
+                  - "arn:aws:s3:::*/*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: DenyS3TaggingIfProjectTagDoesNotMatch
+                Effect: Deny
+                Action: "s3:PutBucketTagging"
+                Resource: "arn:aws:s3:::*"
+                Condition:
+                  StringNotEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+
+              - Sid: BackupProjectOnly
+                Effect: Allow
+                Action: "backup:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: BackupCreateMustTag
+                Effect: Allow
+                Action:
+                  - "backup:CreateBackupVault"
+                  - "backup:CreateBackupPlan"
+                  - "backup:CreateBackupSelection"
+                  - "backup:TagResource"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+
+              - Sid: Route53FullControlOnProjectZoneOnly
+                Effect: Allow
+                Action: "route53:*"
+                Resource:
+                  - !Sub "arn:aws:route53:::hostedzone/${ProjectHostedZone}"
+                  - "arn:aws:route53:::change/*"
+                  - "arn:aws:route53:::healthcheck/*"
+
+              - Sid: ACMRequestOnlyForDomain
+                Effect: Allow
+                Action:
+                  - "acm:RequestCertificate"
+                  - "acm:AddTagsToCertificate"
+                  - "acm:RemoveTagsFromCertificate"
+                  - "acm:DeleteCertificate"
+                  - "acm:DescribeCertificate"
+                  - "acm:GetCertificate"
+                Resource: "*"
+                Condition:
+                  StringLike:
+                    "acm:RequestedDomainName":
+                      - !Ref DomainName
+                      - !Sub "*.${DomainName}"
+
+              - Sid: ACMManageOnlyForDomain
+                Effect: Allow
+                Action: "acm:*"
+                Resource: "*"
+                Condition:
+                  StringLike:
+                    "acm:DomainName":
+                      - !Ref DomainName
+                      - !Sub "*.${DomainName}"
+
+              - Sid: CloudFrontListAll
+                Effect: Allow
+                Action:
+                  - "cloudfront:List*"
+                  - "cloudfront:Get*"
+                Resource: "*"
+
+              - Sid: CloudFrontCreateMustTag
+                Effect: Allow
+                Action:
+                  - "cloudfront:CreateDistribution"
+                  - "cloudfront:CreateDistributionWithTags"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+
+              - Sid: CloudFrontWriteOnlyOnProjectTagged
+                Effect: Allow
+                Action:
+                  - "cloudfront:UpdateDistribution"
+                  - "cloudfront:DeleteDistribution"
+                  - "cloudfront:TagResource"
+                  - "cloudfront:UntagResource"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: MessagingAndIntegrationProjectOnly
+                Effect: Allow
+                Action:
+                  - "sqs:*"
+                  - "sns:*"
+                  - "events:*"
+                  - "appsync:*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+
+              - Sid: MessagingAndIntegrationCreateMustTag
+                Effect: Allow
+                Action:
+                  - "sqs:CreateQueue"
+                  - "sns:CreateTopic"
+                  - "events:CreateRule"
+                  - "appsync:CreateGraphqlApi"
+                  - "appsync:TagResource"
+                  - "events:TagResource"
+                  - "sns:TagResource"
+                  - "sqs:TagQueue"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+
+              - Sid: AllowCreateRoleOnlyWithBoundaryAndProjectTag
+                Effect: Allow
+                Action:
+                  - "iam:CreateRole"
+                  - "iam:TagRole"
+                  - "iam:UntagRole"
+                  - "iam:PutRolePermissionsBoundary"
+                Resource: "arn:aws:iam::*:role/*"
+                Condition:
+                  StringEquals:
+                    "aws:RequestTag/Project": !Ref ProjectName
+                    "iam:PermissionsBoundary": !Ref ProjectPermissionBoundary
+
+              - Sid: AllowPolicyAttachmentOnlyWhenRoleIsProjectTagged
+                Effect: Allow
+                Action:
+                  - "iam:AttachRolePolicy"
+                  - "iam:DetachRolePolicy"
+                  - "iam:PutRolePolicy"
+                  - "iam:DeleteRolePolicy"
+                Resource: "arn:aws:iam::*:role/*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+                    "iam:PermissionsBoundary": !Ref ProjectPermissionBoundary
+
+              - Sid: AllowPassRoleOnlyForProjectTaggedRolesWithBoundary
+                Effect: Allow
+                Action: "iam:PassRole"
+                Resource: "arn:aws:iam::*:role/*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Project": !Ref ProjectName
+                    "iam:PermissionsBoundary": !Ref ProjectPermissionBoundary
+
+              - Sid: DenyRemovingOrChangingPermissionsBoundary
+                Effect: Deny
+                Action:
+                  - "iam:DeleteRolePermissionsBoundary"
+                  - "iam:PutRolePermissionsBoundary"
+                Resource: "arn:aws:iam::*:role/*"
+                Condition:
+                  StringNotEquals:
+                    "iam:PermissionsBoundary": !Ref ProjectPermissionBoundary
+
+  # -----------------------------
+  # IAM: Project User + Access Key
+  # SecretAccessKey stored in Secrets Manager (output Secret ARN).
+  # -----------------------------
+  ProjectUserPolicy1:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'Project-${ProjectName}-UserPolicy1'
+      Description: !Sub 'Project user permissions (part 1) for ${ProjectName}.'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          # EC2, ELB, ECR, ECS, EKS, Lambda, DataServices, SSM, Secrets, KMS, S3 (basic)
+          - Sid: EC2FullControlInsideProjectVpc
+            Effect: Allow
+            Action: 'ec2:*'
+            Resource: '*'
             Condition:
               StringEquals:
-                "aws:RequestedRegion": { "Ref": "AWS::Region" }
-          # Allow IAM role policy management for project roles
-          - Effect: Allow
-            Action:
-              - iam:*
-            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/${ProjectName}*"
-          - Effect: Allow
-            Action:
-              - dynamodb:*
-            Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ProjectName}*"
-          # Allow EC2, ELB, RDS, Lambda, API Gateway, ECS, EFS, etc. in this region
-          - Effect: Allow
-            Action:
-              - ec2:*
-              - elasticloadbalancing:*
-              - rds:*
-              - lambda:*
-              - apigateway:*
-              - ecs:*
-              - efs:*
-              - logs:*
-              - events:*
-              - cloudwatch:*
-              - elasticache:*
-              - eks:*
-              - kinesis:*
-              - glue:*
-              - athena:*
-              - redshift:*
-              - dms:*
-              - mq:*
-              - network-firewall:*
-              - route53resolver:*
-              - sagemaker:*
-              - secretsmanager:*
-              - servicediscovery:*
-              - sns:*
-              - sqs:*
-              - stepfunctions:*
-              - transfer:*
-              - vpc-lattice:*
-              - vpcendpoint:*
-              - vpcaccess:*
-              - xray:*
-            Resource: "*"
+                'ec2:Vpc': !Ref Vpc
+          - Sid: ELBFullControl
+            Effect: Allow
+            Action: 'elasticloadbalancing:*'
+            Resource: '*'
+          - Sid: ECRProjectOnly
+            Effect: Allow
+            Action: 'ecr:*'
+            Resource: '*'
             Condition:
               StringEquals:
-                "aws:RequestedRegion": { "Ref": "AWS::Region" }
-          # Deny EC2, ELB, RDS, Lambda, ECS, EFS outside the VPC
-          - Effect: Deny
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: ECRCreateMustTag
+            Effect: Allow
             Action:
-              - ec2:*
-              - elasticloadbalancing:*
-              - rds:*
-              - ecs:*
-              - efs:*
-              - elasticache:*
-              - eks:*
-              - mq:*
-              - network-firewall:*
-              - route53resolver:*
-              - servicediscovery:*
-              - vpc-lattice:*
-              - vpcendpoint:*
-              - vpcaccess:*
-            Resource: "*"
+              - 'ecr:CreateRepository'
+              - 'ecr:TagResource'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+          - Sid: ECSProjectOnly
+            Effect: Allow
+            Action: 'ecs:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: ECSCreateMustTag
+            Effect: Allow
+            Action:
+              - 'ecs:CreateCluster'
+              - 'ecs:TagResource'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+          - Sid: EKSProjectOnly
+            Effect: Allow
+            Action: 'eks:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: EKSCreateMustTag
+            Effect: Allow
+            Action:
+              - 'eks:CreateCluster'
+              - 'eks:CreateNodegroup'
+              - 'eks:TagResource'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+          - Sid: LambdaProjectOnly
+            Effect: Allow
+            Action: 'lambda:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: LambdaCreateMustTag
+            Effect: Allow
+            Action:
+              - 'lambda:CreateFunction'
+              - 'lambda:TagResource'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+          - Sid: DataServicesProjectOnly
+            Effect: Allow
+            Action:
+              - 'rds:*'
+              - 'dynamodb:*'
+              - 'redshift:*'
+              - 'elasticache:*'
+              - 'docdb:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: SSMProjectOnly
+            Effect: Allow
+            Action: 'ssm:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: SecretsProjectOnly
+            Effect: Allow
+            Action: 'secretsmanager:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: KMSProjectOnly
+            Effect: Allow
+            Action: 'kms:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: KMSCreateMustTag
+            Effect: Allow
+            Action:
+              - 'kms:CreateKey'
+              - 'kms:TagResource'
+              - 'kms:UntagResource'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+          - Sid: S3CreateBucketAndList
+            Effect: Allow
+            Action:
+              - 's3:CreateBucket'
+              - 's3:ListAllMyBuckets'
+            Resource: '*'
+
+  ProjectUserPolicy2:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'Project-${ProjectName}-UserPolicy2'
+      Description: !Sub 'Project user permissions (part 2) for ${ProjectName}.'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          # S3 (tagging/full), Backup, Route53, ACM, CloudFront, Messaging, IAM
+          - Sid: S3TagBucketToClaimProject
+            Effect: Allow
+            Action:
+              - 's3:PutBucketTagging'
+              - 's3:GetBucketTagging'
+            Resource: 'arn:aws:s3:::*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+              ForAllValues:StringEquals:
+                'aws:TagKeys':
+                  - Project
+          - Sid: S3FullControlOnlyOnProjectTaggedBuckets
+            Effect: Allow
+            Action: 's3:*'
+            Resource:
+              - 'arn:aws:s3:::*'
+              - 'arn:aws:s3:::*/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: DenyS3TaggingIfProjectTagDoesNotMatch
+            Effect: Deny
+            Action: 's3:PutBucketTagging'
+            Resource: 'arn:aws:s3:::*'
             Condition:
               StringNotEquals:
-                "ec2:Vpc": !Ref ProjectVPC
-          # Allow IAM actions only for this user (for access key management)
-          - Effect: Allow
+                'aws:RequestTag/Project': !Ref ProjectName
+          - Sid: BackupProjectOnly
+            Effect: Allow
+            Action: 'backup:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: BackupCreateMustTag
+            Effect: Allow
             Action:
-              - iam:GetUser
-              - iam:ListAccessKeys
-              - iam:CreateAccessKey
-              - iam:DeleteAccessKey
-            Resource: !GetAtt ProjectIAMUser.Arn
-          # Allow S3 actions (optionally restrict to project-named buckets)
-          - Effect: Allow
-            Action: s3:*
-            Resource: "*"
+              - 'backup:CreateBackupVault'
+              - 'backup:CreateBackupPlan'
+              - 'backup:CreateBackupSelection'
+              - 'backup:TagResource'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+          - Sid: Route53FullControlOnProjectZoneOnly
+            Effect: Allow
+            Action: 'route53:*'
+            Resource:
+              - !Sub 'arn:aws:route53:::hostedzone/${ProjectHostedZone}'
+              - 'arn:aws:route53:::change/*'
+              - 'arn:aws:route53:::healthcheck/*'
+          - Sid: ACMRequestOnlyForDomain
+            Effect: Allow
+            Action:
+              - 'acm:RequestCertificate'
+              - 'acm:AddTagsToCertificate'
+              - 'acm:RemoveTagsFromCertificate'
+              - 'acm:DeleteCertificate'
+              - 'acm:DescribeCertificate'
+              - 'acm:GetCertificate'
+            Resource: '*'
+            Condition:
+              StringLike:
+                'acm:RequestedDomainName':
+                  - !Ref DomainName
+                  - !Sub '*.${DomainName}'
+          - Sid: ACMManageOnlyForDomain
+            Effect: Allow
+            Action: 'acm:*'
+            Resource: '*'
+            Condition:
+              StringLike:
+                'acm:DomainName':
+                  - !Ref DomainName
+                  - !Sub '*.${DomainName}'
+          - Sid: CloudFrontListAll
+            Effect: Allow
+            Action:
+              - 'cloudfront:List*'
+              - 'cloudfront:Get*'
+            Resource: '*'
+          - Sid: CloudFrontCreateMustTag
+            Effect: Allow
+            Action:
+              - 'cloudfront:CreateDistribution'
+              - 'cloudfront:CreateDistributionWithTags'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+          - Sid: CloudFrontWriteOnlyOnProjectTagged
+            Effect: Allow
+            Action:
+              - 'cloudfront:UpdateDistribution'
+              - 'cloudfront:DeleteDistribution'
+              - 'cloudfront:TagResource'
+              - 'cloudfront:UntagResource'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: MessagingAndIntegrationProjectOnly
+            Effect: Allow
+            Action:
+              - 'sqs:*'
+              - 'sns:*'
+              - 'events:*'
+              - 'appsync:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+          - Sid: MessagingAndIntegrationCreateMustTag
+            Effect: Allow
+            Action:
+              - 'sqs:CreateQueue'
+              - 'sns:CreateTopic'
+              - 'events:CreateRule'
+              - 'appsync:CreateGraphqlApi'
+              - 'appsync:TagResource'
+              - 'events:TagResource'
+              - 'sns:TagResource'
+              - 'sqs:TagQueue'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+          - Sid: AllowCreateRoleOnlyWithBoundaryAndProjectTag
+            Effect: Allow
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:TagRole'
+              - 'iam:UntagRole'
+              - 'iam:PutRolePermissionsBoundary'
+            Resource: 'arn:aws:iam::*:role/*'
+            Condition:
+              StringEquals:
+                'aws:RequestTag/Project': !Ref ProjectName
+                'iam:PermissionsBoundary': !Ref ProjectPermissionBoundary
+          - Sid: AllowPolicyAttachmentOnlyWhenRoleIsProjectTagged
+            Effect: Allow
+            Action:
+              - 'iam:AttachRolePolicy'
+              - 'iam:DetachRolePolicy'
+              - 'iam:PutRolePolicy'
+              - 'iam:DeleteRolePolicy'
+            Resource: 'arn:aws:iam::*:role/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+                'iam:PermissionsBoundary': !Ref ProjectPermissionBoundary
+          - Sid: AllowPassRoleOnlyForProjectTaggedRolesWithBoundary
+            Effect: Allow
+            Action: 'iam:PassRole'
+            Resource: 'arn:aws:iam::*:role/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': !Ref ProjectName
+                'iam:PermissionsBoundary': !Ref ProjectPermissionBoundary
+          - Sid: DenyRemovingOrChangingPermissionsBoundary
+            Effect: Deny
+            Action:
+              - 'iam:DeleteRolePermissionsBoundary'
+              - 'iam:PutRolePermissionsBoundary'
+            Resource: 'arn:aws:iam::*:role/*'
+            Condition:
+              StringNotEquals:
+                'iam:PermissionsBoundary': !Ref ProjectPermissionBoundary
+
+  ProjectUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub "project-${ProjectName}-user"
+      PermissionsBoundary: !Ref ProjectPermissionBoundary
+      Tags:
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
+      ManagedPolicyArns:
+        - !Ref ProjectUserPolicy1
+        - !Ref ProjectUserPolicy2
+
+  ProjectUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref ProjectUser
+      Status: Active
+
+  ProjectUserAccessKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "project/${ProjectName}/iam-access-key"
+      Description: !Sub "Access key secret for project user project-${ProjectName}-user"
+      Tags:
+        - Key: !Ref ProjectTagKey
+          Value: !Ref ProjectName
+      SecretString: !Sub
+        - |
+          {
+            "AccessKeyId": "${AKID}",
+            "SecretAccessKey": "${SAK}"
+          }
+        - AKID: !Ref ProjectUserAccessKey
+          SAK: !GetAtt ProjectUserAccessKey.SecretAccessKey
 
 Outputs:
+  ProjectName:
+    Value: !Ref ProjectName
 
-  VPCId:
-    Description: VPC ID
-    Value: !Ref ProjectVPC
+  ProjectTagKey:
+    Value: !Ref ProjectTagKey
 
-  PublicSubnet1Id:
-    Description: Public Subnet 1 ID
-    Value: !Ref ProjectPublicSubnet1
+  VpcId:
+    Value: !Ref Vpc
 
-  PublicSubnet2Id:
-    Description: Public Subnet 2 ID
-    Value: !Ref ProjectPublicSubnet2
-  
-  PrivateSubnet1Id:
-    Description: Private Subnet 1 ID
-    Value: !Ref ProjectPrivateSubnet1
-  
-  PrivateSubnet2Id:
-    Description: Private Subnet 2 ID
-    Value: !Ref ProjectPrivateSubnet2
+  PublicSubnetAId:
+    Value: !Ref PublicSubnetA
 
-  ProjectIAMUserName:
-    Description: IAM deploy user name
-    Value: !Ref ProjectIAMUser
-  
-  ProjectAccessKeyId:
-    Description: IAM access key ID
-    Value: !Ref ProjectAccessKey
+  PublicSubnetBId:
+    Value: !Ref PublicSubnetB
 
-  IAMSecretArn:
-    Description: ARN of the IAM credentials secret
-    Value: !Ref ProjectIAMSecret
+  PrivateSubnetAId:
+    Value: !Ref PrivateSubnetA
+
+  PrivateSubnetBId:
+    Value: !Ref PrivateSubnetB
+
+  BaseSecurityGroupId:
+    Value: !Ref BaseSecurityGroup
+
+  HostedZoneId:
+    Value: !Ref ProjectHostedZone
+
+  PermissionBoundaryArn:
+    Value: !Ref ProjectPermissionBoundary
+
+  ProjectDeployRoleArn:
+    Value: !GetAtt ProjectDeployRole.Arn
+
+  ProjectUserName:
+    Value: !Ref ProjectUser
+
+  ProjectUserAccessKeyId:
+    Description: AccessKeyId for the project user (safe to output).
+    Value: !Ref ProjectUserAccessKey
+
+  ProjectUserSecretArn:
+    Description: ARN of the Secrets Manager secret containing AccessKeyId + SecretAccessKey.
+    Value: !Ref ProjectUserAccessKeySecret
