@@ -9,21 +9,33 @@ Metadata:
         Parameters:
           - OrgName
           - EnvName
+          - DomainName
+          - PortalStackName
       - Label:
           default: Email Configuration
         Parameters:
           - Email
-          - EnableEmailSubscription
+          - SESRecipients
+      - Label:
+          default: Lambda Configuration
+        Parameters:
+          - PythonRuntimeVersion
 
     ParameterLabels:
       OrgName:
         default: Organization Name
       EnvName:
         default: Environment Name
+      DomainName:
+        default: Source Email Domain Name
       Email:
         default: Recipient Email Address
-      EnableEmailSubscription:
-        default: Enable Email Subscription
+      PortalStackName:
+        default: MIS Portal Stack Name
+      SESRecipients:
+        default: SES Recipient Emails
+      PythonRuntimeVersion: 
+        default: Python Lambda Runtime Version
 
 Parameters:
   OrgName:
@@ -52,7 +64,17 @@ Parameters:
   SESRecipients:
     Description: Comma-separated list of verified SES email addresses to receive notifications.
     Type: String
-  
+  PortalStackName:
+    Description: The name of the MIS Portal CloudFormation stack.
+    Type: String
+    Default: pchc-test-uw2-mis
+  PythonRuntimeVersion:
+    Description: The Python runtime version for Lambda functions.
+    Type: String
+    Default: python3.12
+    AllowedValues:
+      - python3.11
+      - python3.12
 
 Mappings: 
   Fn::Transform:
@@ -120,6 +142,8 @@ Resources:
         #   Arn: !GetAtt SnsTopic.TopicArn
         - Id: GlueJobLambdaTarget
           Arn: !GetAtt GlueJobEmailLambda.Arn
+        - Id: GlueJobPortalLambdaTarget
+          Arn: !GetAtt GlueJobPortalLambda.Arn
 
   GlueLambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -152,9 +176,9 @@ Resources:
   GlueJobEmailLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: pchc-test-uw2-etl-email-notification
+      FunctionName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], 'etl-email-notification']]
       Handler: index.lambda_handler
-      Runtime: python3.12
+      Runtime: !Ref PythonRuntimeVersion
       Role: !GetAtt GlueLambdaExecutionRole.Arn
       Timeout: 60
       Code:
@@ -256,3 +280,210 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt EtlJobEventRule.Arn
+
+  GlueJobPortalLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: "GlueJobPortalPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Glue permissions
+              - Effect: Allow
+                Action:
+                  - "glue:GetJobs"
+                  - "glue:GetJobRuns"
+                Resource: "*"
+              
+              # S3 permissions
+              - Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                  - "s3:PutObjectAcl"
+                Resource: "arn:aws:s3:::pchc-test-uw2-mis-serverstack-e74we2q-datas3bucket-r4ncgijsuzn8/glue_history/*"
+
+              # CloudWatch logs
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+
+
+  GlueJobPortalLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], 'etl-job-portal']]
+      Handler: index.lambda_handler
+      Runtime: !Ref PythonRuntimeVersion
+      Role: !GetAtt GlueJobPortalLambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+
+          glue = boto3.client('glue')
+          s3 = boto3.client('s3')
+          REGION = os.environ['REGION']
+          OUTPUT_BUCKET = os.environ['OUTPUT_BUCKET']
+
+          def lambda_handler(event, context):
+              try:
+                  # Step 1: Get all jobs
+                  jobs = glue.get_jobs()['Jobs']
+                  target_jobs = [j for j in jobs if 'to_redshift' in j['Name']]
+
+                  job_histories = []
+
+                  # Step 2: Get runs per job
+                  for job in target_jobs:
+                      runs_response = glue.get_job_runs(JobName=job['Name'], MaxResults=100)
+                      runs = runs_response.get('JobRuns', [])
+                      runs.sort(key=lambda x: x['StartedOn'], reverse=True)
+                      job_histories.append({
+                          'jobName': job['Name'],
+                          'runs': [
+                              {
+                                  'id': r['Id'],
+                                  'status': r['JobRunState'],
+                                  'startedOn': r['StartedOn'].isoformat(),
+                                  'completedOn': r.get('CompletedOn').isoformat() if r.get('CompletedOn') else None,
+                                  'attempt': r.get('Attempt'),
+                                  'executionTime': r.get('ExecutionTime'),  # in seconds
+                                  'errorMessage': r.get('ErrorMessage'),
+                                  'triggerName': r.get('TriggerName'),
+                                  'startedBy': r.get('StartedBy')
+                              } for r in runs
+                          ]
+                      })
+                  
+                  # Step 3: Prepare S3 object key
+                  timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+                  s3_key = f"glue_history/glue_job_history_{timestamp}.json"
+
+                  # Step 4: Save JSON to S3
+                  s3.put_object(
+                      Bucket=OUTPUT_BUCKET,
+                      Key=s3_key,
+                      Body=json.dumps(job_histories, indent=2)
+                  )
+
+                  print(f"Successfully uploaded job history to s3://{OUTPUT_BUCKET}/{s3_key}")
+                  return {'status': 'success', 's3_key': s3_key}
+
+              except Exception as e:
+                  print('Error:', e)
+                  return {'status': 'error', 'message': str(e)}
+
+      Environment:
+        Variables:
+          REGION: !Ref 'AWS::Region'
+          OUTPUT_BUCKET: 
+            Fn::ImportValue:
+              !Sub '${PortalStackName}-MisServerStackS3BucketName'
+  
+  GlueJobStartPortalLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], 'etl-job-portal-start']]
+      Handler: index.lambda_handler
+      Runtime: !Ref PythonRuntimeVersion
+      Role: !GetAtt GlueJobStartPortalLambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          glue = boto3.client('glue')
+
+          def lambda_handler(event, context):
+              # enables support for both direct invocation and API Gateway proxy integration
+              body = event.get('body')
+              if isinstance(body, str):
+                  body = json.loads(body)
+              elif body is None:
+                  body = event
+
+              job_name = body.get('jobName')
+              arguments = body.get('arguments', {})
+
+              if not job_name:
+                  return {
+                      "statusCode": 400,
+                      "body": json.dumps({"message": "jobName is required"})
+                  }
+
+              try:
+                  response = glue.start_job_run(
+                      JobName=job_name,
+                      Arguments=arguments
+                  )
+
+                  return {
+                      "statusCode": 200,
+                      "body": json.dumps({
+                          "message": "Glue job started",
+                          "jobName": job_name,
+                          "jobRunId": response["JobRunId"]
+                      })
+                  }
+
+              except glue.exceptions.EntityNotFoundException:
+                  return {
+                      "statusCode": 404,
+                      "body": json.dumps({"message": f"Glue job '{job_name}' not found"})
+                  }
+
+              except Exception as e:
+                  return {
+                      "statusCode": 500,
+                      "body": json.dumps({"message": str(e)})
+                  }
+  GlueJobStartPortalLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: "AllowStartGlueJobOnly"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Glue permissions
+              - Effect: Allow
+                Action:
+                  - "glue:StartJobRun"
+                Resource: 
+                - !Join ['', ['arn:aws:glue:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':job/*to_redshift*']]
+                - !Join ['', ['arn:aws:glue:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':job/Test Job']]           
+              # CloudWatch logs
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+
+
+
