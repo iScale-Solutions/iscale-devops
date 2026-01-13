@@ -22,7 +22,6 @@ Metadata:
           - LoadBalancerCertificateArn
           - LoadBalancerPriority
           - LoadBalancerHostName
-          - LoadBalancerEnabled 
       - Label:
           default: DB Instance Configuration
         Parameters:
@@ -117,13 +116,6 @@ Parameters:
     Description: Jump Instance AMI ID
     Type: AWS::EC2::Image::Id
     Default: ami-0e78ee77fdce864ed
-  LoadBalancerEnabled:
-    Description: LoadBalancer Enabled
-    Type: String
-    Default: true
-    AllowedValues:
-      - true
-      - false
   LoadBalancerCertificateArn:
     Description: Load Balancer Certificate ARN (only needed when using own ELB)
     Type: String
@@ -179,13 +171,10 @@ Conditions:
   HasMasterUserPassword: !Not [!Equals [!Ref MasterUserPassword, '']]
   HasDatabaseUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
   HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
-  IsLoadBalancerEnabled: !Equals [!Ref LoadBalancerEnabled, true]
-  IsStagingELB: !And [Condition: IsLoadBalancerEnabled, Condition: IsStaging]
 
 Resources:
 
   ELBStack:
-    Condition: IsLoadBalancerEnabled
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
@@ -292,7 +281,6 @@ Resources:
       Description: Allow connection from Odoo Server
 
   AllowEFSConnectionFromJumpServer:
-    Condition: IsProd
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !GetAtt EFSSecurityGroup.GroupId
@@ -302,7 +290,7 @@ Resources:
       SourceSecurityGroupId: !GetAtt JumpServerSecurityGroup.GroupId
       Description: Allow connection from Jump Server
 
-  ### Jump Host Section ###
+#   ### Jump Host Section ###
 
   ServerEC2Role:
     Type: AWS::IAM::Role
@@ -351,7 +339,6 @@ Resources:
         - !Ref ServerEC2Role
 
   JumpServerSecurityGroup:
-    Condition: IsProd
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump]]
@@ -367,7 +354,6 @@ Resources:
           Value: !Ref OrgName
 
   JumpServerTeamSecurityGroup:
-    Condition: IsProd
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump, team]]
@@ -384,7 +370,6 @@ Resources:
           Value: !Ref OrgName
 
   AllowJumpServerSSHConnectionFromTeamIPs:
-    Condition: IsProd
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !GetAtt JumpServerTeamSecurityGroup.GroupId
@@ -395,7 +380,6 @@ Resources:
       Description: Allow SSH from BN IP
 
   AllowJumpServerSSHConnectionFromCTower:
-    Condition: IsProd
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !GetAtt JumpServerSecurityGroup.GroupId
@@ -406,7 +390,6 @@ Resources:
       Description: Allow SSH from Volendra CTower
 
   JumpServerInstance:
-    Condition: IsProd
     Type: AWS::EC2::Instance
     Properties:
       DisableApiTermination: true
@@ -427,13 +410,12 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, jump]]
 
   JumpServerInstancePublicEIP:
-    Condition: IsProd
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
       InstanceId: !Ref JumpServerInstance
 
-  ### Server Section ###
+#   ### Server Section ###
   
   OdooServerIamInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -458,7 +440,6 @@ Resources:
           Value: !Ref OrgName
 
   AllowOdooWebConnectionFromELB:
-    Condition: IsLoadBalancerEnabled
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !GetAtt OdooServerSecurityGroup.GroupId
@@ -469,7 +450,6 @@ Resources:
       Description: Allow HTTP from ELB
 
   AllowOdooSSHConnectionFromJumpServer:
-    Condition: IsProd
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !GetAtt OdooServerSecurityGroup.GroupId
@@ -542,7 +522,6 @@ Resources:
           Value: !Ref OrgName
 
   OdooServerListenerRule:
-    Condition: IsLoadBalancerEnabled
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
       Actions: 
@@ -555,21 +534,9 @@ Resources:
       ListenerArn: !GetAtt [ELBStack, Outputs.ApplicationListenerArn]
       Priority: 100
 
-  StagingDNSRecord:
-    Condition: IsStagingELB
-    Type: AWS::Route53::RecordSet
-    Properties:
-      HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
-      Name: !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
-      Type: A
-      AliasTarget:
-        HostedZoneId: !GetAtt [ELBStack, Outputs.CanonicalHostedZoneID]
-        DNSName: !GetAtt [ELBStack, Outputs.DNSName] 
-
 ### Backup ###
 
   BackupStack:
-    Condition: IsProd
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -587,6 +554,5 @@ Resources:
 Outputs:
 
   JumpServerTeamSecurityGroup:
-    Condition: IsProd
     Description: Name of the security Group for the team to SSH in Jump Server
     Value: !Ref JumpServerTeamSecurityGroup
