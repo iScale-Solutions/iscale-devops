@@ -21,6 +21,7 @@ Metadata:
           - ClientDomainName
           - LoadBalancerCertificateArn
           - LoadBalancerPriority
+          - LoadBalancerStackName
           - LoadBalancerHostName
           - LoadBalancerEnabled 
       - Label:
@@ -49,6 +50,8 @@ Metadata:
         default: Allow Database remote access
       LoadBalancerCertificateArn:
         default: Load Balancer Certificate ARN
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
       NetworkStackName:
         default: Network Stack Name
       SNSStackName:
@@ -116,6 +119,10 @@ Parameters:
     Type: String
     Default: zion19e
     MaxLength: 12
+  LoadBalancerStackName:
+    Description: The name of the ELB stack (if using existing ELB).
+    Type: String
+    Default: iscale-hosting-prd-uw2-zion-elb-ELBStack-NRAR4FMBUYGC
   MasterUser:
     Description: The name of the master user for the database instance.
     Type: String
@@ -163,6 +170,7 @@ Conditions:
   HasDatabaseUserPassword: !Not [!Equals [!Ref DatabaseUserPassword, '']]
   HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
   IsLoadBalancerEnabled: !Equals [!Ref LoadBalancerEnabled, true]
+  IsLoadBalancerNotEnabled: !Equals [!Ref LoadBalancerEnabled, false]
   IsStagingELB: !And [Condition: IsLoadBalancerEnabled, Condition: IsStaging]
 
 Resources:
@@ -385,14 +393,18 @@ Resources:
           Value: !Ref OrgName
 
   AllowOdooWebConnectionFromELB:
-    Condition: IsLoadBalancerEnabled
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !GetAtt OdooServerSecurityGroup.GroupId
       IpProtocol: TCP
       FromPort: 80
       ToPort: 80
-      SourceSecurityGroupId: !GetAtt [ELBStack, Outputs.SecurityGroupId]
+      SourceSecurityGroupId: 
+        Fn::If:
+          - IsLoadBalancerEnabled
+          - !GetAtt [ELBStack, Outputs.SecurityGroupId]
+          - Fn::ImportValue:
+              !Sub "${LoadBalancerStackName}-SecurityGroupId"
       Description: Allow HTTP from ELB
 
   OdooServerInstance:
@@ -458,7 +470,6 @@ Resources:
           Value: !Ref OrgName
 
   OdooServerListenerRule:
-    Condition: IsLoadBalancerEnabled
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
       Actions: 
@@ -468,8 +479,23 @@ Resources:
         - Field: host-header
           Values: 
             - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
-      ListenerArn: !GetAtt [ELBStack, Outputs.ApplicationListenerArn]
-      Priority: 100
+      ListenerArn: 
+        Fn::If:
+          - IsLoadBalancerEnabled
+          - !GetAtt [ELBStack, Outputs.ApplicationListenerArn]
+          - Fn::ImportValue:
+              !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority: 200
+
+  OdooServerListenerCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Condition: IsLoadBalancerNotEnabled
+    Properties:
+      ListenerArn: 
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
+      Certificates:
+        - CertificateArn: !Ref LoadBalancerCertificateArn
 
   StagingDNSRecord:
     Condition: IsStagingELB
@@ -479,8 +505,17 @@ Resources:
       Name: !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
       Type: A
       AliasTarget:
-        HostedZoneId: !GetAtt [ELBStack, Outputs.CanonicalHostedZoneID]
-        DNSName: !GetAtt [ELBStack, Outputs.DNSName] 
+        HostedZoneId: 
+          Fn::If:
+            - IsLoadBalancerEnabled
+            - !GetAtt [ELBStack, Outputs.HostedZoneId]
+            - Fn::ImportValue:
+                !Sub "${LoadBalancerStackName}-HostedZoneId"
+        DNSName:
+            - IsLoadBalancerEnabled
+            - !GetAtt [ELBStack, Outputs.DNSName] 
+            - Fn::ImportValue:
+                !Sub "${LoadBalancerStackName}-DNSName"
 
 ### Backup ###
 

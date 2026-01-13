@@ -18,6 +18,7 @@ Metadata:
       - Label:
           default: Load Balancer Configuration
         Parameters:
+          - LoadBalancerStackName
           - ClientDomainName
           - LoadBalancerCertificateArn
           - LoadBalancerPriority
@@ -53,6 +54,8 @@ Metadata:
         default: Allow Database remote access
       JumpInstanceAMI:
         default: Jump Instance AMI
+      LoadBalancerStackName:
+        default: Load Balancer Stack Name
       LoadBalancerCertificateArn:
         default: Load Balancer Certificate ARN
       NetworkStackName:
@@ -116,6 +119,11 @@ Parameters:
     Description: Jump Instance AMI ID
     Type: AWS::EC2::Image::Id
     Default: ami-0e78ee77fdce864ed
+  LoadBalancerStackName:
+    Description: The name of the ELB stack
+    Type: String
+    Default: iscale-hosting-prd-uw2-zion-elb-ELBStack-NRAR4FMBUYGC
+    MinLength: 1
   LoadBalancerCertificateArn:
     Description: Load Balancer Certificate ARN (only needed when using own ELB)
     Type: String
@@ -173,19 +181,6 @@ Conditions:
   HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
 
 Resources:
-
-  ELBStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        CertificateArn: !Ref LoadBalancerCertificateArn
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
-        UseFriendlyNames: false
 
   DBStack:
     DeletionPolicy: Retain
@@ -439,6 +434,16 @@ Resources:
         - Key: Organization
           Value: !Ref OrgName
 
+  # AllowOdooWebConnectionFromELB:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties:
+  #     GroupId: !GetAtt OdooServerSecurityGroup.GroupId
+  #     IpProtocol: TCP
+  #     FromPort: 80
+  #     ToPort: 80
+  #     SourceSecurityGroupId: !GetAtt [ELBStack, Outputs.SecurityGroupId]
+  #     Description: Allow HTTP from ELB
+
   AllowOdooWebConnectionFromELB:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -446,7 +451,9 @@ Resources:
       IpProtocol: TCP
       FromPort: 80
       ToPort: 80
-      SourceSecurityGroupId: !GetAtt [ELBStack, Outputs.SecurityGroupId]
+      SourceSecurityGroupId: 
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-SecurityGroupId"
       Description: Allow HTTP from ELB
 
   AllowOdooSSHConnectionFromJumpServer:
@@ -521,6 +528,19 @@ Resources:
         - Key: Organization
           Value: !Ref OrgName
 
+  # OdooServerListenerRule:
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  #   Properties: 
+  #     Actions: 
+  #       - Type: forward
+  #         TargetGroupArn: !Ref OdooServerTargetGroup
+  #     Conditions: 
+  #       - Field: host-header
+  #         Values: 
+  #           - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+  #     ListenerArn: !GetAtt [ELBStack, Outputs.ApplicationListenerArn]
+  #     Priority: 100
+
   OdooServerListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties: 
@@ -531,7 +551,9 @@ Resources:
         - Field: host-header
           Values: 
             - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
-      ListenerArn: !GetAtt [ELBStack, Outputs.ApplicationListenerArn]
+      ListenerArn:
+        Fn::ImportValue: 
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
       Priority: 100
 
 ### Backup ###
