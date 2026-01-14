@@ -1,4 +1,3 @@
-
 AWSTemplateFormatVersion: 2010-09-09
 Description: >
   Project bootstrap stack (VPC + 2 public subnets + 2 private subnets + Route53 zone +
@@ -184,28 +183,42 @@ Resources:
       SubnetId: !Ref PrivateSubnetB
       RouteTableId: !Ref PrivateRouteTable
 
-  BaseSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
+  # -----------------------------
+  # Default S3 Bucket for Project
+  # -----------------------------
+  ProjectBucket:
+    Type: AWS::S3::Bucket
     Properties:
-      GroupDescription: !Sub 'Base SG for ${ProjectName}'
-      VpcId: !Ref Vpc
-      SecurityGroupEgress:
-        - IpProtocol: "-1"
-          CidrIp: "0.0.0.0/0"
+      BucketName: !Sub '${ProjectName}-bucket-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-sg-base'
         - Key: !Ref ProjectTagKey
           Value: !Ref ProjectName
 
   # -----------------------------
-  # Route 53 (zone-scoped)
+  # S3 VPC Endpoint
   # -----------------------------
-  ProjectHostedZone:
-    Type: AWS::Route53::HostedZone
+  S3VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
     Properties:
-      Name: !Ref DomainName
-      HostedZoneTags:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref Vpc
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref PrivateRouteTable
+      VpcEndpointType: Gateway
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 's3:*'
+            Resource: '*'
+      Tags:
         - Key: !Ref ProjectTagKey
           Value: !Ref ProjectName
 
@@ -242,7 +255,20 @@ Resources:
               - "backup:Get*"
               - "ssm:Get*"
               - "ssm:List*"
+              - "cloudformation:Describe*"
+              - "cloudformation:List*"
+              - "cloudformation:Get*"
             Resource: "*"
+          - Sid: AllowCreateUpdateProjectCloudFormationStacks
+            Effect: Allow
+            Action:
+              - "cloudformation:CreateStack"
+              - "cloudformation:UpdateStack"
+              - "cloudformation:TagResource"
+            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/*/*"
+            Condition:
+              StringEquals:
+                "aws:RequestTag/Project": !Ref ProjectName
 
           - Sid: IAMRoleOps
             Effect: Allow
@@ -496,7 +522,7 @@ Resources:
                 Effect: Allow
                 Action: "route53:*"
                 Resource:
-                  - !Sub "arn:aws:route53:::hostedzone/${ProjectHostedZone}"
+                  - !Sub "arn:aws:route53:::hostedzone/${DomainName}"
                   - "arn:aws:route53:::change/*"
                   - "arn:aws:route53:::healthcheck/*"
 
@@ -822,11 +848,11 @@ Resources:
             Condition:
               StringEquals:
                 'aws:RequestTag/Project': !Ref ProjectName
-          - Sid: Route53FullControlOnProjectZoneOnly
+          - Sid: Route53FullControlOnDomainHostedZone
             Effect: Allow
             Action: 'route53:*'
             Resource:
-              - !Sub 'arn:aws:route53:::hostedzone/${ProjectHostedZone}'
+              - !Sub 'arn:aws:route53:::hostedzone/${DomainName}'
               - 'arn:aws:route53:::change/*'
               - 'arn:aws:route53:::healthcheck/*'
           - Sid: ACMRequestOnlyForDomain
@@ -985,39 +1011,42 @@ Resources:
 Outputs:
   ProjectName:
     Value: !Ref ProjectName
+    Export:
+      Name: !Sub "${AWS::StackName}-ProjectName"
+
+  ProjectBucketName:
+    Description: Name of the default S3 bucket for the project.
+    Value: !Ref ProjectBucket
 
   ProjectTagKey:
     Value: !Ref ProjectTagKey
+    Export:
+      Name: !Sub "${AWS::StackName}-ProjectTagKey"
 
   VpcId:
     Value: !Ref Vpc
+    Export:
+      Name: !Sub "${AWS::StackName}-VpcId"
 
   PublicSubnetAId:
     Value: !Ref PublicSubnetA
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetAId"
 
   PublicSubnetBId:
     Value: !Ref PublicSubnetB
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetBId"
 
   PrivateSubnetAId:
     Value: !Ref PrivateSubnetA
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetAId"
 
   PrivateSubnetBId:
     Value: !Ref PrivateSubnetB
-
-  BaseSecurityGroupId:
-    Value: !Ref BaseSecurityGroup
-
-  HostedZoneId:
-    Value: !Ref ProjectHostedZone
-
-  PermissionBoundaryArn:
-    Value: !Ref ProjectPermissionBoundary
-
-  ProjectDeployRoleArn:
-    Value: !GetAtt ProjectDeployRole.Arn
-
-  ProjectUserName:
-    Value: !Ref ProjectUser
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetBId"
 
   ProjectUserAccessKeyId:
     Description: AccessKeyId for the project user (safe to output).
