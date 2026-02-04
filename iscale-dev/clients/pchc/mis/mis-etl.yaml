@@ -26,6 +26,14 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
+      - Label:
+          default: Pesonet20 Post Glue Upsert Configuration
+        Parameters:
+          - RedshiftHost
+          - RedshiftUser
+          - RedshiftPassword
+          - RedshiftDatabaseName
+          - GlueEmailLambdaName
 
     ParameterLabels:
       Name:
@@ -42,6 +50,16 @@ Metadata:
         default: Network Stack Name
       MisStackName:
         default: MIS Stack Name
+      GlueEmailLambdaName:
+        default: Glue Email Lambda ARN
+      RedshiftHost:
+        default: Redshift Cluster Host
+      RedshiftUser:
+        default: Redshift Cluster User
+      RedshiftPassword:
+        default: Redshift Cluster Password
+      RedshiftDatabaseName:
+        default: Redshift Database Name
       SNSStackName:
         default: SNS Topic Stack Name
       StartScheduleExpression:
@@ -96,6 +114,32 @@ Parameters:
     Description: The name of the network stack
     Type: String
     Default: pchc-dev-uw2-mis-network
+    MinLength: 1
+  GlueEmailLambdaName:
+    Description: Name of Glue Email Lambda
+    Type: String
+    Default: pchc-test-uw2-etl-email-notification
+    MinLength: 1
+  RedshiftHost:
+    Description: Redshift Cluster Host
+    Type: String
+    Default: redshift-cluster-1.abcdefghijk.us-west-2.redshift.amazonaws.com
+    MinLength: 1
+  RedshiftUser:
+    Description: Redshift Cluster User
+    Type: String
+    Default: redshiftuser
+    MinLength: 1
+  RedshiftPassword:
+    Description: Redshift Cluster Password
+    Type: String
+    NoEcho: true
+    MinLength: 1
+    Default: 'password'
+  RedshiftDatabaseName:
+    Description: Redshift Database Name
+    Type: String
+    Default: redshiftdbname
     MinLength: 1
   SNSStackName:
     Description: The name of the SNS stack
@@ -410,6 +454,342 @@ Resources:
             - Outputs.RedshiftClusterName
 
 ###
+# Pesonet20 Post Glue upsert lambda
+###
+  Pesonet20PostGlueUpsertLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-post-glue-upsert]]
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt Pesonet20PostGlueUpsertLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import time
+          import logging
+          import json
+          import traceback
+
+          # -----------------------------
+          # Logging setup
+          # -----------------------------
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # -----------------------------
+          # Redshift client
+          # -----------------------------
+          client = boto3.client("redshift-data")
+
+          CLUSTER_ID = os.environ["REDSHIFT_CLUSTER"]
+          DATABASE = os.environ["REDSHIFT_DATABASE"]
+          USER = os.environ["REDSHIFT_USER"]
+          PESONET20_SCHEMA = os.environ["PESONET20_SCHEMA_PREFIX"]
+          ALLOWED_SCHEMAS = {"pesonetf20", "pesonet20"}
+          if PESONET20_SCHEMA not in ALLOWED_SCHEMAS:
+            raise ValueError(f"Invalid PESONET20_SCHEMA: {PESONET20_SCHEMA}")
+          POLL_INTERVAL = 5  # seconds
+          
+          def execute_sql(sql: str, label: str):
+              """
+              Execute a SQL statement via Redshift Data API
+              and wait for completion with full status handling.
+              """
+              logger.info("Executing SQL [%s]", label)
+
+              response = client.execute_statement(
+                  ClusterIdentifier=CLUSTER_ID,
+                  Database=DATABASE,
+                  DbUser=USER,
+                  Sql=sql,
+              )
+
+              statement_id = response["Id"]
+              logger.info("Statement ID [%s]: %s", label, statement_id)
+
+              while True:
+                  desc = client.describe_statement(Id=statement_id)
+                  status = desc["Status"]
+
+                  if status in ["FINISHED", "FAILED", "ABORTED"]:
+                      break
+
+                  time.sleep(POLL_INTERVAL)
+
+              # -----------------------------
+              # Status handling
+              # -----------------------------
+              if status == "FINISHED":
+                  logger.info("SQL SUCCEEDED [%s]", label)
+                  return desc
+
+              if status == "FAILED":
+                  error_msg = desc.get("Error", "Unknown error")
+                  logger.error(
+                      "SQL FAILED [%s] | StatementId=%s | Error=%s",
+                      label,
+                      statement_id,
+                      error_msg,
+                  )
+                  raise Exception(f"SQL FAILED [{label}]: {error_msg}")
+
+              if status == "ABORTED":
+                  logger.error(
+                      "SQL CANCELLED [%s] | StatementId=%s",
+                      label,
+                      statement_id,
+                  )
+                  raise Exception(f"SQL CANCELLED [{label}]")
+
+              # Safety net (should never hit)
+              raise Exception(f"Unexpected status [{status}] for [{label}]")
+
+
+          def lambda_handler(event, context):
+              logger.info("Starting Pesonet20 post-glue upsert job")
+
+              try:
+                  # -----------------------------
+                  # PART 1
+                  # -----------------------------
+                  execute_sql(
+                      f"""
+                      BEGIN;
+
+                      TRUNCATE pesonet.banks;
+                      INSERT INTO pesonet.banks SELECT * FROM {PESONET20_SCHEMA}.banks;
+
+                      TRUNCATE pesonet.status_codes;
+                      INSERT INTO pesonet.status_codes SELECT * FROM {PESONET20_SCHEMA}.status_codes;
+
+                      TRUNCATE pesonet.limit_requests;
+                      INSERT INTO pesonet.limit_requests SELECT * FROM {PESONET20_SCHEMA}.limit_requests;
+
+                      COMMIT;
+                      """,
+                      label="PART_1_TRUNCATE_INSERT",
+                  )
+
+                  # -----------------------------
+                  # PART 2
+                  # -----------------------------
+                  execute_sql(
+                      f"""
+                      BEGIN;
+
+                      DELETE FROM pesonet.outward_transactions WHERE pesonet20_id IS NOT NULL;
+                      DELETE FROM pesonet.outward_batches WHERE pesonet20_id IS NOT NULL;
+                      DELETE FROM pesonet.inward_batches WHERE pesonet20_id IS NOT NULL;
+                      DELETE FROM pesonet.rates WHERE pesonet20_id IS NOT NULL;
+
+                      INSERT INTO pesonet.inward_batches (
+                          id, settlement_failed, posted_at, settlement_date, bank_id, pesonet20_id, cycle_seq
+                      )
+                      SELECT
+                          id + 111720624,
+                          settlement_failed,
+                          posted_at,
+                          settlement_date,
+                          bank_id,
+                          id,
+                          cycle_seq
+                      FROM {PESONET20_SCHEMA}.inward_batches;
+
+                      INSERT INTO pesonet.outward_batches (
+                          id, transferred_at, transaction_count, amount,
+                          "amount_decimal(12,2)", settlement_date,
+                          settlement_failed, bank_id, pesonet20_id
+                      )
+                      SELECT
+                          id + 101593671,
+                          transferred_at,
+                          transaction_count,
+                          amount,
+                          "amount_decimal(12,2)",
+                          settlement_date,
+                          settlement_failed,
+                          bank_id,
+                          id
+                      FROM {PESONET20_SCHEMA}.outward_batches;
+
+                      INSERT INTO pesonet.outward_transactions (
+                          id, creditor_bic, settlement_amount, inward_batch_id,
+                          status_code, transaction_code, bank_id, outward_batch_id,
+                          import_file_id, maker_id, updated_at, pesonet20_id, debtor_name
+                      )
+                      SELECT
+                          ot.id + 101593671,
+                          ot.creditor_bic,
+                          ot.settlement_amount,
+                          ot.inward_batch_id + 111720624,
+                          ot.status_code,
+                          ot.transaction_code,
+                          ot.bank_id,
+                          ot.outward_batch_id + 101593671,
+                          ot.import_file_id,
+                          ot.maker_id,
+                          ot.updated_at,
+                          ot.id,
+                          ot.debtor_name
+                      FROM {PESONET20_SCHEMA}.outward_transactions ot;
+
+                      INSERT INTO pesonet.rates (
+                          id, pesonet20_id, item_rate,
+                          updated_at, effective_date, minimum_rate, created_at
+                      )
+                      SELECT
+                          id + 9,
+                          id,
+                          item_rate,
+                          updated_at,
+                          effective_date,
+                          minimum_rate,
+                          created_at
+                      FROM {PESONET20_SCHEMA}.rates;
+
+                      COMMIT;
+                      """,
+                      label="PART_2_OFFSET_INSERT",
+                  )
+
+                  # -----------------------------
+                  # MATERIALIZED VIEWS
+                  # -----------------------------
+                  mviews = [
+                      "mv_count_transaction_per_day",
+                      "mv_inward_transaction_rejected_top_reasons",
+                      "mv_inward_transaction_status_count",
+                      "mv_inward_transaction_status_per_bank",
+                      "mv_inward_transactions_per_bank_per_all_status_code",
+                      "mv_inward_transactions_per_bank_per_status_code",
+                      "mv_outward_transactions_per_bank",
+                      "mv_peak_transaction_time",
+                  ]
+
+                  for view in mviews:
+                      execute_sql(
+                          f"REFRESH MATERIALIZED VIEW pesonet.{view};",
+                          label=f"REFRESH_{view}",
+                      )
+
+                  logger.info("Pesonet20 post-glue upsert job completed successfully")
+
+                  send_email_notification("SUCCEEDED", "Redshift upsert and materialized views completed successfully!")
+
+                  return {
+                      "statusCode": 200,
+                      "body": "Redshift post-upsert operations completed successfully!",
+                  }
+
+              except Exception as e:
+                  logger.exception("Pesonet20 post-glue upsert job FAILED")
+                  send_email_notification(
+                      "FAILED",
+                      f"Redshift upsert failed: {str(e)}"
+                  )
+                  raise
+                  
+          # -----------------------------
+          # Lambda client
+          # -----------------------------
+          lambda_client = boto3.client('lambda')
+          EMAIL_LAMBDA = os.environ['GLUE_EMAIL_LAMBDA']  # ARN or name of GlueJobEmailLambda
+          
+          # Trigger send email notif from etl-alerts       
+          def send_email_notification(status, message=""):
+            """
+            Sends a simulated Glue Job event to GlueJobEmailLambda.
+            Status should be "SUCCEEDED" or "FAILED".
+            """
+            payload = {
+                "version": "0",
+                "id": f"{PESONET20_SCHEMA}-post-script-" + os.urandom(4).hex(),
+                "detail-type": "Glue Job State Change",
+                "source": f"custom.{PESONET20_SCHEMA}.upsert",
+                "account": os.environ.get('AWS_ACCOUNT_ID', 'unknown'),
+                "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "region": os.environ.get('AWS_REGION', 'unknown'),
+                "resources": [],
+                "detail": {
+                    "jobName": f"{PESONET20_SCHEMA}_post-upsert-script",
+                    "severity": "INFO",
+                    "state": status,
+                    "jobRunId": f"{PESONET20_SCHEMA}-post-upsert-script-lambda-" + os.urandom(4).hex(),
+                    "message": message
+                }
+            }
+
+            try:
+                lambda_client.invoke(
+                    FunctionName=EMAIL_LAMBDA,
+                    InvocationType='Event',  # async
+                    Payload=json.dumps(payload).encode('utf-8')
+                )
+                print(f"Email Lambda invoked successfully with status {status}")
+            except Exception as e:
+                print(f"Failed to invoke Email Lambda: {e}")
+                traceback.print_exc()
+
+      
+      Environment:
+        Variables:
+          REDSHIFT_CLUSTER: !GetAtt RedshiftStack.Outputs.RedshiftClusterName
+          REDSHIFT_USER: !Ref RedshiftUser
+          REDSHIFT_DATABASE: !Ref RedshiftDatabaseName
+          PESONET20_SCHEMA_PREFIX: !If [ IsNotProd, pesonetf20, pesonet20 ]
+          GLUE_EMAIL_LAMBDA: !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', !Ref GlueEmailLambdaName]]
+          AWS_ACCOUNT_ID: !Ref 'AWS::AccountId'
+
+  Pesonet20PostGlueUpsertLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RedshiftAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RedshiftListAndGetClusterCredentials
+                Effect: Allow
+                Action:
+                  - redshift:List*
+                  - redshift:GetClusterCredentials
+                Resource: 
+                  - !Join ['', ['arn:', !Ref 'AWS::Partition', ':redshift:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':cluster:', !GetAtt RedshiftStack.Outputs.RedshiftClusterName]]
+                  - !Join ['', ['arn:', !Ref 'AWS::Partition', ':redshift:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':cluster:', !GetAtt RedshiftStack.Outputs.RedshiftClusterName, '/*']]
+                  - !Join ['', ['arn:', !Ref 'AWS::Partition', ':redshift:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':dbname:', !GetAtt RedshiftStack.Outputs.RedshiftClusterName, '/', !Ref RedshiftDatabaseName]]
+                  - !Join ['', ['arn:', !Ref 'AWS::Partition', ':redshift:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':dbuser:', !GetAtt RedshiftStack.Outputs.RedshiftClusterName, '/', !Ref RedshiftUser]]
+              - Sid: RedshiftDataAPIAccess
+                Effect: Allow
+                Action:
+                  - redshift-data:ExecuteStatement
+                  - redshift-data:DescribeStatement
+                  - redshift-data:ListStatements
+                Resource: '*'
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Sid: EmailLambdaInvoke
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', !Ref GlueEmailLambdaName]]
+
+                
 # Reports Queries section
 ###
 
@@ -590,3 +970,9 @@ Outputs:
         - Outputs.RedshiftSecurityGroupIdExport
     Export:
       Name: !Sub ${AWS::StackName}-RedshiftSecurityGroupId
+
+  Pesonet20PostGlueUpsertLambdaArn:
+    Description: ARN of Pesonet20 Post Glue Upsert Lambda
+    Value: !GetAtt Pesonet20PostGlueUpsertLambda.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-Pesonet20PostGlueUpsertLambdaArn
