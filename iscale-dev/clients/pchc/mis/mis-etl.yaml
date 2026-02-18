@@ -31,7 +31,6 @@ Metadata:
         Parameters:
           - RedshiftHost
           - RedshiftUser
-          - RedshiftPassword
           - RedshiftDatabaseName
           - GlueEmailLambdaName
 
@@ -130,12 +129,6 @@ Parameters:
     Type: String
     Default: redshiftuser
     MinLength: 1
-  RedshiftPassword:
-    Description: Redshift Cluster Password
-    Type: String
-    NoEcho: true
-    MinLength: 1
-    Default: 'password'
   RedshiftDatabaseName:
     Description: Redshift Database Name
     Type: String
@@ -672,6 +665,8 @@ Resources:
                           created_at
                       FROM {PESONET20_SCHEMA}.rates;
 
+                      UPDATE pesonet.banks SET sponsor_bank_id = NULL WHERE bank_code = '804';
+
                       COMMIT;
                       """,
                       label="PART_2_OFFSET_INSERT",
@@ -679,7 +674,9 @@ Resources:
 
                   logger.info("Pesonet20 post-glue upsert job completed successfully")
 
-                  send_email_notification("SUCCEEDED", "Redshift upsert and materialized views completed successfully!")
+                  send_email_notification("SUCCEEDED", "Redshift upsert completed successfully!")
+                  
+                  run_pesonet_refresh_materialized_views()
 
                   return {
                       "statusCode": 200,
@@ -735,9 +732,45 @@ Resources:
                 print(f"Failed to invoke Email Lambda: {e}")
                 traceback.print_exc()
 
+          # -----------------------------
+          # SSM client
+          # -----------------------------
+          ec2 = boto3.client("ec2")
+          ssm = boto3.client("ssm")
+
+          INSTANCE_ID = os.environ["INSTANCE_ID"]
+          SSM_DOCUMENT_NAME = os.environ["SSM_DOCUMENT_NAME"]
+
+          def run_pesonet_refresh_materialized_views():
+
+            # Check instance state
+            state = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
+            instance_state = state["Reservations"][0]["Instances"][0]["State"]["Name"]
+
+            if instance_state != "running":
+                ec2.start_instances(InstanceIds=[INSTANCE_ID])
+
+                # Wait until running
+                waiter = ec2.get_waiter("instance_running")
+                waiter.wait(InstanceIds=[INSTANCE_ID])
+
+                # Extra buffer for SSM agent to be ready
+                time.sleep(30)
+
+            response = ssm.send_command(
+                InstanceIds=[INSTANCE_ID],
+                DocumentName=SSM_DOCUMENT_NAME
+            )
+
+            logger.info("Triggered SSM Command to refresh materialized views. Command ID: %s", response["Command"]["CommandId"])
+
+            return {"CommandId": response["Command"]["CommandId"]}
+
       
       Environment:
         Variables:
+          INSTANCE_ID: !GetAtt ReportQueriesInstance.InstanceId
+          SSM_DOCUMENT_NAME: !Ref Pesonet20PostGlueUpsertSsmDocument
           REDSHIFT_CLUSTER: !GetAtt RedshiftStack.Outputs.RedshiftClusterName
           REDSHIFT_USER: !Ref RedshiftUser
           REDSHIFT_DATABASE: !Ref RedshiftDatabaseName
@@ -796,6 +829,18 @@ Resources:
                   - ec2:DescribeNetworkInterfaces
                   - ec2:DeleteNetworkInterface
                 Resource: '*'
+              - Sid: Ec2DescribeInstances
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                Resource: '*'
+              - Sid: SsmPolicy
+                Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                Resource: 
+                  - !Join ['', ['arn:aws:ec2:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':instance/', !GetAtt ReportQueriesInstance.InstanceId]]
+                  - !Join ['', ['arn:aws:ssm:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':document/', !Ref Pesonet20PostGlueUpsertSsmDocument] ]
   
   Pesonet20PostGlueUpsertSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -817,7 +862,61 @@ Resources:
       FromPort: 5439
       ToPort: 5439
       SourceSecurityGroupId: !GetAtt Pesonet20PostGlueUpsertSecurityGroup.GroupId
-                
+  
+  Pesonet20PostGlueUpsertSsmDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: "2.2"
+        description: "Refresh Redshift materialized views via psql on AL2023"
+        parameters:
+          SecretID:
+            type: "String"
+            description: "secrets manager ID"
+            default: !GetAtt ReportsQueriesSecret.Id
+          Region:
+            type: "String"
+            description: "region"
+            default: !Ref 'AWS::Region'
+        mainSteps:
+          - action: aws:runShellScript
+            name: RefreshMaterializedViews
+            inputs:
+              runCommand:
+                - |
+                  export REDSHIFT_HOST=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_HOST`
+                  export REDSHIFT_USER=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_USER`
+                  export REDSHIFT_PASSWORD=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_PASSWORD`
+                  export REDSHIFT_DATABASE=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_DATABASE`
+                  export REDSHIFT_PORT=5439
+                  export PGPASSWORD="$REDSHIFT_PASSWORD"
+                  psql -h $REDSHIFT_HOST -p $REDSHIFT_PORT -U $REDSHIFT_USER -d $REDSHIFT_DATABASE <<EOF
+                  REFRESH MATERIALIZED VIEW pesonet.mv_count_transaction_per_day;
+                  REFRESH MATERIALIZED VIEW pesonet.mv_inward_transaction_rejected_top_reasons;
+                  REFRESH MATERIALIZED VIEW pesonet.mv_inward_transaction_status_count;
+                  REFRESH MATERIALIZED VIEW pesonet.mv_inward_transaction_status_per_bank;
+                  REFRESH MATERIALIZED VIEW pesonet.mv_inward_transactions_per_bank_per_all_status_code;
+                  REFRESH MATERIALIZED VIEW pesonet.mv_inward_transactions_per_bank_per_status_code;
+                  REFRESH MATERIALIZED VIEW pesonet.mv_outward_transactions_per_bank;
+                  REFRESH MATERIALIZED VIEW pesonet.mv_peak_transaction_time;
+                  EOF
+
+                  if [ $? -eq 0 ]; then
+                    echo "All views refreshed successfully. Shutting down."
+                  else
+                    echo "psql failed. Shutting down anyway."
+                  fi
+
+                  sudo shutdown -h now +1 &
+      DocumentFormat: YAML
+      DocumentType: Command
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-refresh-mvs]]
+      UpdateMethod: NewVersion
+      TargetType: /AWS::EC2::Instance
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-refresh-mvs]]
+
 # Reports Queries section
 ###
 
@@ -1004,3 +1103,22 @@ Outputs:
     Value: !GetAtt Pesonet20PostGlueUpsertLambda.Arn
     Export:
       Name: !Sub ${AWS::StackName}-Pesonet20PostGlueUpsertLambdaArn
+
+  ReportsQueriesRunCommandDocumentName:
+    Description: SSM Document name for running reports queries
+    Value: !Ref ReportsQueriesRunCommand
+    Export:
+      Name: !Sub ${AWS::StackName}-ReportsQueriesRunCommandDocumentName
+  
+  ReportsQueriesInstanceId:
+    Description: Instance ID of EC2 instance for running reports queries
+    Value: !Ref ReportQueriesInstance
+    Export:
+      Name: !Sub ${AWS::StackName}-ReportsQueriesInstanceId
+
+  Pesonet20PostGlueUpsertSsmDocumentName:
+    Description: SSM Document name for refreshing materialized views after pesonet20 upsert
+    Value: !Ref Pesonet20PostGlueUpsertSsmDocument
+    Export:
+      Name: !Sub ${AWS::StackName}-Pesonet20PostGlueUpsertSsmDocumentName
+  
