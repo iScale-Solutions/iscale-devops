@@ -503,3 +503,175 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt EtlJobEventRule.Arn
 
+  PesonetSSMEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.ssm
+        detail-type:
+          - EC2 Command Status-change Notification
+        detail:
+          status:
+            - Success
+            - Failed
+          document-name:
+            - Fn::ImportValue:
+                !Sub '${MisEtlStackName}-Pesonet20PostGlueUpsertSsmDocumentName'
+      State: ENABLED
+      EventBusName: default
+      Targets:
+        - Id: SSMNotificationLambdaTarget
+          Arn: !GetAtt PesonetRefreshMvseEmailLambda.Arn
+
+  PesonetSSMEventRuleLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PesonetRefreshMvseEmailLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PesonetSSMEventRule.Arn
+  
+
+  PesonetRefreshMvseEmailLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], 'etl-pesonet-refresh-mvs-notification']]
+      Handler: index.lambda_handler
+      Runtime: !Ref PythonRuntimeVersion
+      Role: !GetAtt PesonetRefreshMvsLambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.text import MIMEText
+          from email.mime.application import MIMEApplication
+
+          ses_client = boto3.client('ses')
+
+          TARGET_DOCUMENT_NAME = os.environ.get("TARGET_DOCUMENT_NAME", "")
+          TARGET_INSTANCE_ID = os.environ.get("INSTANCE_ID", "")
+
+          def lambda_handler(event, context):
+              detail = event.get('detail', {})
+
+              document_name = detail.get('document-name', '')
+              instance_id = detail.get('instance-id', '')
+              command_id = detail.get('command-id', 'Unknown')
+              status = detail.get('status', 'Unknown')
+              env_name = os.environ.get('ENV_NAME', 'UNKNOWN').upper()
+
+              # Only process events from the specific document and instance
+              if document_name != TARGET_DOCUMENT_NAME:
+                  print(f"Ignoring SSM event for document: {document_name}")
+                  return {"status": "ignored"}
+
+              if TARGET_INSTANCE_ID and instance_id != TARGET_INSTANCE_ID:
+                  print(f"Ignoring SSM event for instance: {instance_id}")
+                  return {"status": "ignored"}
+
+              status_color = "#28a745" if status == "Success" else "#dc3545"
+              status_label = "SUCCESS" if status == "Success" else "FAILED"
+
+              html_body = f"""
+              <html>
+              <body style="font-family:Arial,sans-serif; line-height:1.5;">
+                  <h2>SSM Run Command Notification</h2>
+                  <table style="border-collapse: collapse; width: 100%;">
+                      <tr>
+                          <td style="padding: 8px; font-weight: bold;">Document Name:</td>
+                          <td style="padding: 8px;">{document_name}</td>
+                      </tr>
+                      <tr>
+                          <td style="padding: 8px; font-weight: bold;">Command ID:</td>
+                          <td style="padding: 8px;">{command_id}</td>
+                      </tr>
+                      <tr>
+                          <td style="padding: 8px; font-weight: bold;">Environment:</td>
+                          <td style="padding: 8px;">{env_name}</td>
+                      </tr>
+                      <tr>
+                          <td style="padding: 8px; font-weight: bold;">Status:</td>
+                          <td style="padding: 8px; color:{status_color}; font-weight: bold;">{status}</td>
+                      </tr>
+                  </table>
+                  <p style="margin-top:20px; color:#555;">This is an automated notification from AWS SSM Run Command.</p>
+              </body>
+              </html>
+              """
+
+              dest_emails = [email.strip() for email in os.environ['DEST_EMAIL'].split(',')]
+
+              for recipient in dest_emails:
+                  msg = MIMEMultipart('mixed')
+                  msg['Subject'] = f"[MIS][{env_name}][{status_label}] SSM {document_name} - {command_id}"
+                  msg['From'] = os.environ['SOURCE_EMAIL']
+                  msg['To'] = recipient
+
+                  if status != "Success":
+                      msg['X-Priority'] = '1'
+                      msg['Importance'] = 'High'
+                      msg['Priority'] = 'urgent'
+
+                  msg.attach(MIMEText(html_body, 'html'))
+
+                  json_attachment = MIMEApplication(json.dumps(event, indent=2).encode('utf-8'))
+                  json_attachment.add_header(
+                      'Content-Disposition',
+                      'attachment',
+                      filename=f'SSMCommandEvent_{command_id}.json'
+                  )
+                  msg.attach(json_attachment)
+
+                  ses_client.send_raw_email(
+                      Source=os.environ['SOURCE_EMAIL'],
+                      Destinations=[recipient],
+                      RawMessage={'Data': msg.as_string()}
+                  )
+                  print(f"Email sent to: {recipient} successfully")
+
+              return {"status": "sent"}
+
+      Environment:
+        Variables:
+          TARGET_DOCUMENT_NAME: 
+            Fn::ImportValue:
+                !Sub '${MisEtlStackName}-Pesonet20PostGlueUpsertSsmDocumentName'
+          TARGET_INSTANCE_ID:
+            Fn::ImportValue:
+                !Sub '${MisEtlStackName}-ReportsQueriesInstanceId'
+          ENV_NAME: !Ref EnvName
+          SOURCE_EMAIL: !Sub "no-reply@${DomainName}"
+          DEST_EMAIL: !Ref SESRecipients
+
+  PesonetRefreshMvsLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: "PesonetRefreshSESPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ses:SendEmail"
+                  - "ses:SendRawEmail"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+
