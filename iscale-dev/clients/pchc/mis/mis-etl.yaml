@@ -470,8 +470,6 @@ Resources:
           import os
           import time
           import logging
-          import json
-          import traceback
 
           # -----------------------------
           # Logging setup
@@ -480,261 +478,7 @@ Resources:
           logger.setLevel(logging.INFO)
 
           # -----------------------------
-          # Redshift client
-          # -----------------------------
-          client = boto3.client("redshift-data")
-
-          CLUSTER_ID = os.environ["REDSHIFT_CLUSTER"]
-          DATABASE = os.environ["REDSHIFT_DATABASE"]
-          USER = os.environ["REDSHIFT_USER"]
-          PESONET20_SCHEMA = os.environ["PESONET20_SCHEMA_PREFIX"]
-          ALLOWED_SCHEMAS = {"pesonetf20", "pesonet20"}
-          STATUS_CODES = os.environ.get("STATUS_CODES", "status_codes")  # default to status_codes if not set
-          if PESONET20_SCHEMA not in ALLOWED_SCHEMAS:
-            raise ValueError(f"Invalid PESONET20_SCHEMA: {PESONET20_SCHEMA}")
-          POLL_INTERVAL = 5  # seconds
-          
-          def execute_sql(sql: str, label: str):
-              """
-              Execute a SQL statement via Redshift Data API
-              and wait for completion with full status handling.
-              """
-              logger.info("Executing SQL [%s]", label)
-
-              response = client.execute_statement(
-                  ClusterIdentifier=CLUSTER_ID,
-                  Database=DATABASE,
-                  DbUser=USER,
-                  Sql=sql,
-              )
-
-              statement_id = response["Id"]
-              logger.info("Statement ID [%s]: %s", label, statement_id)
-
-              while True:
-                  desc = client.describe_statement(Id=statement_id)
-                  status = desc["Status"]
-
-                  if status in ["FINISHED", "FAILED", "ABORTED"]:
-                      break
-
-                  time.sleep(POLL_INTERVAL)
-
-              # -----------------------------
-              # Status handling
-              # -----------------------------
-              if status == "FINISHED":
-                  logger.info("SQL SUCCEEDED [%s]", label)
-                  return desc
-
-              if status == "FAILED":
-                  error_msg = desc.get("Error", "Unknown error")
-                  logger.error(
-                      "SQL FAILED [%s] | StatementId=%s | Error=%s",
-                      label,
-                      statement_id,
-                      error_msg,
-                  )
-                  raise Exception(f"SQL FAILED [{label}]: {error_msg}")
-
-              if status == "ABORTED":
-                  logger.error(
-                      "SQL CANCELLED [%s] | StatementId=%s",
-                      label,
-                      statement_id,
-                  )
-                  raise Exception(f"SQL CANCELLED [{label}]")
-
-              # Safety net (should never hit)
-              raise Exception(f"Unexpected status [{status}] for [{label}]")
-
-
-          def lambda_handler(event, context):
-              detail = event.get("detail", {})
-
-              job_name = detail.get("jobName", "")
-              state = detail.get("state", "")
-
-              # Skip non-pesonet20 jobs
-              if "pesonet20" not in job_name:
-                  print(f"Skipping Pesonet20 Post Glue Upsert Script because the Glue Job is not a pesonet20 job. Glue Job: {job_name}")
-                  return {"status": "skipped", "reason": "not pesonet20 job"}
-
-              # Skip failed / non-success states
-              if state != "SUCCEEDED":
-                  print(f"Skipping Pesonet20 Post Glue Upsert Script because the Glue job {job_name} is in state {state}")
-                  return {"status": "skipped", "reason": f"state={state}"}
-
-              logger.info("Starting Pesonet20 post-glue upsert job")
-
-              try:
-                  # -----------------------------
-                  # PART 1
-                  # -----------------------------
-                  execute_sql(
-                      f"""
-                      BEGIN;
-
-                      TRUNCATE pesonet.banks;
-                      INSERT INTO pesonet.banks SELECT * FROM {PESONET20_SCHEMA}.banks;
-
-                      TRUNCATE pesonet.status_codes;
-                      INSERT INTO pesonet.status_codes SELECT * FROM {PESONET20_SCHEMA}.{STATUS_CODES};
-
-                      TRUNCATE pesonet.limit_requests;
-                      INSERT INTO pesonet.limit_requests SELECT * FROM {PESONET20_SCHEMA}.limit_requests;
-
-                      COMMIT;
-                      """,
-                      label="PART_1_TRUNCATE_INSERT",
-                  )
-
-                  # -----------------------------
-                  # PART 2
-                  # -----------------------------
-                  execute_sql(
-                      f"""
-                      BEGIN;
-
-                      DELETE FROM pesonet.outward_transactions WHERE pesonet20_id IS NOT NULL;
-                      DELETE FROM pesonet.outward_batches WHERE pesonet20_id IS NOT NULL;
-                      DELETE FROM pesonet.inward_batches WHERE pesonet20_id IS NOT NULL;
-                      DELETE FROM pesonet.rates WHERE pesonet20_id IS NOT NULL;
-
-                      INSERT INTO pesonet.inward_batches (
-                          id, settlement_failed, posted_at, settlement_date, bank_id, pesonet20_id, cycle_seq
-                      )
-                      SELECT
-                          id + 111720624,
-                          settlement_failed,
-                          posted_at,
-                          settlement_date,
-                          bank_id,
-                          id,
-                          cycle_seq
-                      FROM {PESONET20_SCHEMA}.inward_batches;
-
-                      INSERT INTO pesonet.outward_batches (
-                          id, transferred_at, transaction_count, amount,
-                          "amount_decimal(12,2)", settlement_date,
-                          settlement_failed, bank_id, pesonet20_id
-                      )
-                      SELECT
-                          id + 101593671,
-                          transferred_at,
-                          transaction_count,
-                          amount,
-                          "amount_decimal(12,2)",
-                          settlement_date,
-                          settlement_failed,
-                          bank_id,
-                          id
-                      FROM {PESONET20_SCHEMA}.outward_batches;
-
-                      INSERT INTO pesonet.outward_transactions (
-                          id, creditor_bic, settlement_amount, inward_batch_id,
-                          status_code, transaction_code, bank_id, outward_batch_id,
-                          import_file_id, maker_id, updated_at, pesonet20_id, debtor_name
-                      )
-                      SELECT
-                          ot.id + 101593671,
-                          ot.creditor_bic,
-                          ot.settlement_amount,
-                          ot.inward_batch_id + 111720624,
-                          ot.status_code,
-                          ot.transaction_code,
-                          ot.bank_id,
-                          ot.outward_batch_id + 101593671,
-                          ot.import_file_id,
-                          ot.maker_id,
-                          ot.updated_at,
-                          ot.id,
-                          ot.debtor_name
-                      FROM {PESONET20_SCHEMA}.outward_transactions ot;
-
-                      INSERT INTO pesonet.rates (
-                          id, pesonet20_id, item_rate,
-                          updated_at, effective_date, minimum_rate, created_at
-                      )
-                      SELECT
-                          id + 9,
-                          id,
-                          item_rate,
-                          updated_at,
-                          effective_date,
-                          minimum_rate,
-                          created_at
-                      FROM {PESONET20_SCHEMA}.rates;
-
-                      UPDATE pesonet.banks SET sponsor_bank_id = NULL WHERE bank_code = '804';
-
-                      COMMIT;
-                      """,
-                      label="PART_2_OFFSET_INSERT",
-                  )
-
-                  logger.info("Pesonet20 post-glue upsert job completed successfully")
-
-                  send_email_notification("SUCCEEDED", "Redshift upsert completed successfully!")
-                  
-                  run_pesonet_refresh_materialized_views()
-
-                  return {
-                      "statusCode": 200,
-                      "body": "Redshift post-upsert operations completed successfully!",
-                  }
-
-              except Exception as e:
-                  logger.exception("Pesonet20 post-glue upsert job FAILED")
-                  send_email_notification(
-                      "FAILED",
-                      f"Redshift upsert failed: {str(e)}"
-                  )
-                  raise
-                  
-          # -----------------------------
-          # Lambda client
-          # -----------------------------
-          lambda_client = boto3.client('lambda')
-          EMAIL_LAMBDA = os.environ['GLUE_EMAIL_LAMBDA']  # ARN or name of GlueJobEmailLambda
-          
-          # Trigger send email notif from etl-alerts       
-          def send_email_notification(status, message=""):
-            """
-            Sends a simulated Glue Job event to GlueJobEmailLambda.
-            Status should be "SUCCEEDED" or "FAILED".
-            """
-            payload = {
-                "version": "0",
-                "id": f"{PESONET20_SCHEMA}-post-script-" + os.urandom(4).hex(),
-                "detail-type": "Glue Job State Change",
-                "source": f"custom.{PESONET20_SCHEMA}.upsert",
-                "account": os.environ.get('AWS_ACCOUNT_ID', 'unknown'),
-                "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "region": os.environ.get('AWS_REGION', 'unknown'),
-                "resources": [],
-                "detail": {
-                    "jobName": f"{PESONET20_SCHEMA}_post-upsert-script",
-                    "severity": "INFO",
-                    "state": status,
-                    "jobRunId": f"{PESONET20_SCHEMA}-post-upsert-script-lambda-" + os.urandom(4).hex(),
-                    "message": message
-                }
-            }
-
-            try:
-                lambda_client.invoke(
-                    FunctionName=EMAIL_LAMBDA,
-                    InvocationType='Event',  # async
-                    Payload=json.dumps(payload).encode('utf-8')
-                )
-                print(f"Email Lambda invoked successfully with status {status}")
-            except Exception as e:
-                print(f"Failed to invoke Email Lambda: {e}")
-                traceback.print_exc()
-
-          # -----------------------------
-          # SSM client
+          # AWS clients
           # -----------------------------
           ec2 = boto3.client("ec2")
           ssm = boto3.client("ssm")
@@ -742,43 +486,72 @@ Resources:
           INSTANCE_ID = os.environ["INSTANCE_ID"]
           SSM_DOCUMENT_NAME = os.environ["SSM_DOCUMENT_NAME"]
 
-          def run_pesonet_refresh_materialized_views():
 
-            # Check instance state
-            state = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
-            instance_state = state["Reservations"][0]["Instances"][0]["State"]["Name"]
+          def ensure_instance_running():
+              """Starts the EC2 instance if not already running and waits until it's ready."""
+              resp = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
+              instance_state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
+              logger.info("EC2 instance %s current state: %s", INSTANCE_ID, instance_state)
 
-            if instance_state != "running":
-                ec2.start_instances(InstanceIds=[INSTANCE_ID])
+              if instance_state == "running":
+                  return
 
-                # Wait until running
-                waiter = ec2.get_waiter("instance_running")
-                waiter.wait(InstanceIds=[INSTANCE_ID])
+              if instance_state in ("stopped", "stopping"):
+                  logger.info("Starting EC2 instance %s...", INSTANCE_ID)
+                  ec2.start_instances(InstanceIds=[INSTANCE_ID])
+              else:
+                  logger.warning("EC2 instance is in state '%s'. Waiting for it to reach running...", instance_state)
 
-                # Extra buffer for SSM agent to be ready
-                time.sleep(30)
+              waiter = ec2.get_waiter("instance_running")
+              waiter.wait(InstanceIds=[INSTANCE_ID])
+              logger.info("EC2 instance %s is now running. Waiting 30s for SSM agent to be ready...", INSTANCE_ID)
 
-            response = ssm.send_command(
-                InstanceIds=[INSTANCE_ID],
-                DocumentName=SSM_DOCUMENT_NAME
-            )
+              # Buffer time for SSM agent to come online after instance starts
+              time.sleep(30)
 
-            logger.info("Triggered SSM Command to refresh materialized views. Command ID: %s", response["Command"]["CommandId"])
 
-            return {"CommandId": response["Command"]["CommandId"]}
+          def trigger_ssm_command():
+              """Fires the SSM Run Command without waiting for it to complete."""
+              response = ssm.send_command(
+                  InstanceIds=[INSTANCE_ID],
+                  DocumentName=SSM_DOCUMENT_NAME,
+              )
 
-      
+              command_id = response["Command"]["CommandId"]
+              logger.info("SSM Run Command triggered successfully. Command ID: %s", command_id)
+
+              return command_id
+
+
+          def lambda_handler(event, context):
+              detail = event.get("detail", {})
+              job_name = detail.get("jobName", "")
+              state = detail.get("state", "")
+
+              # Skip non-pesonet20 jobs
+              if "pesonet20" not in job_name:
+                  logger.info("Skipping: not a pesonet20 job. Glue Job: %s", job_name)
+                  return {"status": "skipped", "reason": "not pesonet20 job"}
+
+              # Only proceed on success
+              if state != "SUCCEEDED":
+                  logger.info("Skipping: Glue job %s is in state %s", job_name, state)
+                  return {"status": "skipped", "reason": f"state={state}"}
+
+              logger.info("Glue job %s succeeded. Triggering SSM Run Command...", job_name)
+
+              ensure_instance_running()
+              command_id = trigger_ssm_command()
+
+              return {
+                  "statusCode": 200,
+                  "body": f"SSM Run Command triggered successfully. Command ID: {command_id}",
+              }
+
       Environment:
         Variables:
           INSTANCE_ID: !GetAtt ReportQueriesInstance.InstanceId
           SSM_DOCUMENT_NAME: !Ref Pesonet20PostGlueUpsertSsmDocument
-          REDSHIFT_CLUSTER: !GetAtt RedshiftStack.Outputs.RedshiftClusterName
-          REDSHIFT_USER: !Ref RedshiftUser
-          REDSHIFT_DATABASE: !Ref RedshiftDatabaseName
-          PESONET20_SCHEMA_PREFIX: !If [ IsNotProd, pesonetf20, pesonet20 ]
-          STATUS_CODES: !If [ IsNotProd, status_codes, status_code ]
-          GLUE_EMAIL_LAMBDA: !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', !Ref GlueEmailLambdaName]]
-          AWS_ACCOUNT_ID: !Ref 'AWS::AccountId'
 
   Pesonet20PostGlueUpsertLambdaRole:
     Type: AWS::IAM::Role
@@ -791,27 +564,10 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: RedshiftAccessPolicy
+        - PolicyName: Pesonet20PostGlueUpsertLambdaPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: RedshiftListAndGetClusterCredentials
-                Effect: Allow
-                Action:
-                  - redshift:List*
-                  - redshift:GetClusterCredentials
-                Resource: 
-                  - !Join ['', ['arn:', !Ref 'AWS::Partition', ':redshift:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':cluster:', !GetAtt RedshiftStack.Outputs.RedshiftClusterName]]
-                  - !Join ['', ['arn:', !Ref 'AWS::Partition', ':redshift:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':cluster:', !GetAtt RedshiftStack.Outputs.RedshiftClusterName, '/*']]
-                  - !Join ['', ['arn:', !Ref 'AWS::Partition', ':redshift:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':dbname:', !GetAtt RedshiftStack.Outputs.RedshiftClusterName, '/', !Ref RedshiftDatabaseName]]
-                  - !Join ['', ['arn:', !Ref 'AWS::Partition', ':redshift:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':dbuser:', !GetAtt RedshiftStack.Outputs.RedshiftClusterName, '/', !Ref RedshiftUser]]
-              - Sid: RedshiftDataAPIAccess
-                Effect: Allow
-                Action:
-                  - redshift-data:ExecuteStatement
-                  - redshift-data:DescribeStatement
-                  - redshift-data:ListStatements
-                Resource: '*'
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
@@ -852,26 +608,13 @@ Resources:
       VpcId:
         Fn::ImportValue:
           !Sub "${NetworkStackName}-VpcId"
-
-  AllowPesonet20PostGlueUpsertToRedshift:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from Pesonet20 Post Glue Upsert Lambda
-      IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-          - RedshiftStack
-          - Outputs.RedshiftSecurityGroupIdExport
-      FromPort: 5439
-      ToPort: 5439
-      SourceSecurityGroupId: !GetAtt Pesonet20PostGlueUpsertSecurityGroup.GroupId
   
   Pesonet20PostGlueUpsertSsmDocument:
     Type: AWS::SSM::Document
     Properties:
       Content:
         schemaVersion: "2.2"
-        description: "Refresh Redshift materialized views via psql on AL2023"
+        description: "SSM Document to perform post-glue upsert from PESONet20 to PESONet tables and refresh materialized views"
         parameters:
           SecretID:
             type: "String"
@@ -883,7 +626,7 @@ Resources:
             default: !Ref 'AWS::Region'
         mainSteps:
           - action: aws:runShellScript
-            name: RefreshMaterializedViews
+            name: Pesonet20PostGlueUpsert
             inputs:
               runCommand:
                 - |
@@ -893,7 +636,166 @@ Resources:
                   export REDSHIFT_DATABASE=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_DATABASE`
                   export REDSHIFT_PORT=5439
                   export PGPASSWORD="$REDSHIFT_PASSWORD"
+
+                  # check environment
+                  if [[ "$REDSHIFT_HOST" == *test* ]]; then
+                      export PESONET20_SCHEMA=pesonetf20
+                      export STATUS_CODES=status_codes
+
+                  elif [[ "$REDSHIFT_HOST" == *prd* ]]; then
+                      export PESONET20_SCHEMA=pesonet20
+                      export STATUS_CODES=status_code
+
+                  else
+                      echo "No valid environment detected"
+                      exit 1
+                  fi
+
+                  export PESONET20_SCHEMA=$PESONET20_SCHEMA
+                  export STATUS_CODES=$STATUS_CODES
+
+                  # Execute PESONet20 post-glue upsert SQL script via psql CLI
                   psql -h $REDSHIFT_HOST -p $REDSHIFT_PORT -U $REDSHIFT_USER -d $REDSHIFT_DATABASE <<EOF
+                  -- --- PESONET20 post glue job upsert to PESONET ---
+                  BEGIN;
+
+                  -- --- PART 1: Simple replace tables (truncate + insert) ---
+
+                  TRUNCATE pesonet.banks;
+                  INSERT INTO pesonet.banks
+                  SELECT * FROM ${PESONET20_SCHEMA}.banks;
+
+                  TRUNCATE pesonet.status_codes;
+                  INSERT INTO pesonet.status_codes
+                  SELECT * FROM ${PESONET20_SCHEMA}.${STATUS_CODES};
+
+                  TRUNCATE pesonet.limit_requests;
+                  INSERT INTO pesonet.limit_requests
+                  SELECT * FROM ${PESONET20_SCHEMA}.limit_requests;
+
+                  -- --- PART 2: Offset ID tables (delete previous + insert new with offset) ---
+
+                  -- Ensure pesonet20_id tracking columns exist
+
+                  -- Define offsets
+                  -- These must remain consistent unless data is inserted from other sources
+                  -- inward_batches: 111720624
+                  -- outward_batches: 101593671
+                  -- outward_transactions: 101593671
+
+                  -- Step 1: Delete previously inserted pesonet20 entries
+                  DELETE FROM pesonet.outward_transactions
+                  WHERE pesonet20_id IS NOT NULL;
+
+                  DELETE FROM pesonet.outward_batches
+                  WHERE pesonet20_id IS NOT NULL;
+
+                  DELETE FROM pesonet.inward_batches
+                  WHERE pesonet20_id IS NOT NULL;
+
+                  DELETE FROM pesonet.rates
+                  WHERE pesonet20_id IS NOT NULL;
+
+                  -- Step 2: Insert with ID offset and pesonet20_id tracking
+
+                  -- Insert into inward_batches
+                  INSERT INTO pesonet.inward_batches (
+                      id,
+                      settlement_failed,
+                      posted_at,
+                      settlement_date,
+                      bank_id,
+                      pesonet20_id,
+                      cycle_seq
+                  )
+                  SELECT
+                      id + 111720624,
+                      settlement_failed,
+                      posted_at,
+                      settlement_date,
+                      bank_id,
+                      id,
+                      cycle_seq
+                  FROM ${PESONET20_SCHEMA}.inward_batches;
+
+                  -- Insert into outward_batches
+                  INSERT INTO pesonet.outward_batches (
+                      id,
+                      transferred_at,
+                      transaction_count,
+                      amount,
+                      "amount_decimal(12,2)",
+                      settlement_date,
+                      settlement_failed,
+                      bank_id,
+                      pesonet20_id
+                  )
+                  SELECT
+                      id + 101593671,
+                      transferred_at,
+                      transaction_count,
+                      amount,
+                      "amount_decimal(12,2)",
+                      settlement_date,
+                      settlement_failed,
+                      bank_id,
+                      id
+                  FROM ${PESONET20_SCHEMA}.outward_batches;
+
+                  -- Insert into outward_transactions
+                  INSERT INTO pesonet.outward_transactions (
+                      id,
+                      creditor_bic,
+                      settlement_amount,
+                      inward_batch_id,
+                      status_code,
+                      transaction_code,
+                      bank_id,
+                      outward_batch_id,
+                      import_file_id,
+                      maker_id,
+                      updated_at,
+                      pesonet20_id,
+                      debtor_name
+                  )
+                  SELECT
+                      ot.id + 101593671,
+                      ot.creditor_bic,
+                      ot.settlement_amount,
+                      ot.inward_batch_id + 111720624,
+                      ot.status_code,
+                      ot.transaction_code,
+                      ot.bank_id,
+                      ot.outward_batch_id + 101593671,
+                      ot.import_file_id,
+                      ot.maker_id,
+                      ot.updated_at,
+                      ot.id,
+                      ot.debtor_name
+                  FROM ${PESONET20_SCHEMA}.outward_transactions ot;
+
+                  -- Insert from ${PESONET20_SCHEMA}.rates with ID offset of +9
+                  INSERT INTO pesonet.rates (
+                      id,
+                      pesonet20_id,
+                      item_rate,
+                      updated_at,
+                      effective_date,
+                      minimum_rate,
+                      created_at
+                  )
+                  SELECT
+                      id + 9,           -- new id
+                      id,               -- original id from ${PESONET20_SCHEMA}
+                      item_rate,
+                      updated_at,
+                      effective_date,
+                      minimum_rate,
+                      created_at
+                  FROM ${PESONET20_SCHEMA}.rates;
+
+                  COMMIT;
+
                   REFRESH MATERIALIZED VIEW pesonet.mv_count_transaction_per_day;
                   REFRESH MATERIALIZED VIEW pesonet.mv_inward_transaction_rejected_top_reasons;
                   REFRESH MATERIALIZED VIEW pesonet.mv_inward_transaction_status_count;
@@ -902,6 +804,9 @@ Resources:
                   REFRESH MATERIALIZED VIEW pesonet.mv_inward_transactions_per_bank_per_status_code;
                   REFRESH MATERIALIZED VIEW pesonet.mv_outward_transactions_per_bank;
                   REFRESH MATERIALIZED VIEW pesonet.mv_peak_transaction_time;
+
+                  -- Turn off GCASH sponsor code
+                  UPDATE pesonet.banks SET sponsor_bank_id = NULL WHERE bank_code = '804';
                   EOF
 
                   if [ $? -eq 0 ]; then
@@ -913,12 +818,12 @@ Resources:
                   sudo shutdown -h now +1 &
       DocumentFormat: YAML
       DocumentType: Command
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-refresh-mvs]]
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-post-glue-upsert-ssm-document]]
       UpdateMethod: NewVersion
       TargetType: /AWS::EC2::Instance
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-refresh-mvs]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-post-glue-upsert-ssm-document]]
 
 # Reports Queries section
 ###
