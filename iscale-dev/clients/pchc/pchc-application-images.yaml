@@ -19,6 +19,7 @@ Metadata:
           default: EC2 Image Builder Configuration
         Parameters:
           - InstanceTypeName
+          - AmazonLinux2023Version
       - Label:
           default: Sharing Configuration
         Parameters:
@@ -33,6 +34,8 @@ Metadata:
         default: Environment Name
       InstanceTypeName:
         default: EC2 Instance Type
+      AmazonLinux2023Version:
+        default: Amazon Linux 2023 Image Version
       NetworkStackName:
         default: Network Stack Name
       ShareImage:
@@ -72,6 +75,10 @@ Parameters:
       - t3.large
       - t3.xlarge
       - t3.2xlarge
+  AmazonLinux2023Version:
+    Description: The version of Amazon Linux 2023 to use as the base image.
+    Type: String
+    Default: 1.1.1
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
@@ -1073,8 +1080,8 @@ Resources:
       Description: Installs RoR v2.4.1
       ChangeDescription: Initial version
       Data: |
-        name: RoR2 - InlineData
-        description: Installation of RoR v2.4.1
+        name: RoR2 - ec2-user-optimized
+        description: Installation of RoR v2.4.1 for ec2-user
         schemaVersion: 1.0
         phases:
           - name: build
@@ -1085,7 +1092,8 @@ Resources:
                   commands:
                     - sudo dnf update -y
                     - sudo dnf groupinstall "Development Tools" -y
-                    - sudo dnf install -y gcc make bzip2 bzip2-devel libffi-devel zlib-devel gdbm-devel ncurses-devel openssl-devel readline-devel libxml2 libxml2-devel libxslt libxslt-devel git tar curl readline
+                    - sudo dnf install -y gcc make bzip2 bzip2-devel libffi-devel zlib-devel gdbm-devel ncurses-devel openssl-devel readline-devel libxml2 libxml2-devel libxslt libxslt-devel git tar curl
+                    # Install OpenSSL 1.1.1 (Required for Ruby 2.4.x)
                     - mkdir -p /usr/local/src && cd /usr/local/src
                     - curl -L -O https://www.openssl.org/source/openssl-1.1.1w.tar.gz
                     - tar xzf openssl-1.1.1w.tar.gz
@@ -1093,36 +1101,46 @@ Resources:
                     - ./config --prefix=/usr/local/openssl-1.1.1 --openssldir=/usr/local/openssl-1.1.1 shared zlib
                     - make -j$(nproc)
                     - make install
-              - name: InstallRbenvRubyBuildRubyAndRoR
+
+              - name: SetupRbenvForEc2User
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - git clone https://github.com/rbenv/rbenv.git /usr/local/rbenv
-                    - mkdir -p /usr/local/rbenv/plugins
-                    - git clone https://github.com/rbenv/ruby-build.git /usr/local/rbenv/plugins/ruby-build
-                    - echo 'export RBENV_ROOT="/usr/local/rbenv"' | sudo tee /etc/profile.d/rbenv.sh
-                    - echo 'export PATH="$RBENV_ROOT/bin:$PATH"' | sudo tee -a /etc/profile.d/rbenv.sh
-                    - echo 'eval "$(rbenv init - bash)"' | sudo tee -a /etc/profile.d/rbenv.sh
-                    - chmod +x /etc/profile.d/rbenv.sh
-                    - source /etc/profile.d/rbenv.sh
-                    - rbenv -v
-                    - sudo yum install -y readline-devel
-                    - rpm -q readline-devel >/dev/null 2>&1 || exit 1
-                    - set -x
-                    - RUBY_CONFIGURE_OPTS="--with-openssl-dir=/usr/local/openssl-1.1.1 --with-readline-dir=/usr/include" rbenv install -v 2.4.1
-                    - echo $(rbenv versions --bare | grep -Fx 2.4.1)
-                    - echo "Done installing Ruby 2.4.1"
-                    - ln -s /etc/pki/tls/certs/ca-bundle.crt /usr/local/openssl-1.1.1/cert.pem
-                    - rbenv global 2.4.1
-                    - ruby -v
-                    - ruby -ropenssl -e 'puts OpenSSL::OPENSSL_LIBRARY_VERSION'
-              - name: InstallRbenvGemset
+                    # 1. Clone rbenv into ec2-user's home
+                    - sudo -u ec2-user git clone https://github.com/rbenv/rbenv.git /home/ec2-user/.rbenv
+                    - sudo -u ec2-user mkdir -p /home/ec2-user/.rbenv/plugins
+                    - sudo -u ec2-user git clone https://github.com/rbenv/ruby-build.git /home/ec2-user/.rbenv/plugins/ruby-build
+                    - sudo -u ec2-user git clone https://github.com/jf/rbenv-gemset.git /home/ec2-user/.rbenv/plugins/rbenv-gemset
+                    
+                    # 2. Add rbenv to ec2-user's bashrc
+                    - |
+                      sudo -u ec2-user tee -a /home/ec2-user/.bashrc <<EOF
+                      export PATH="\$HOME/.rbenv/bin:\$PATH"
+                      eval "\$(rbenv init - bash)"
+                      EOF
+
+              - name: InstallRubyAsEc2User
                 action: ExecuteBash
                 inputs:
                   commands:
-                    - mkdir -p "$(rbenv root)"/plugins
-                    - git clone https://github.com/jf/rbenv-gemset.git "$(rbenv root)"/plugins/rbenv-gemset
-                    - exec $SHELL
+                    # 3. Use a login shell (-i) to run the install. This ensures PATH is correct.
+                    - |
+                      sudo -u ec2-user -i bash -c '
+                        export RUBY_CONFIGURE_OPTS="--with-openssl-dir=/usr/local/openssl-1.1.1 --with-readline-dir=/usr/include"
+                        rbenv install -v 2.4.1
+                        rbenv global 2.4.1
+                        
+                        # Install Bundler and update gems as ec2-user
+                        gem update --system 3.0.8
+                        gem install bundler -v 1.17.3
+                        rbenv rehash
+                        
+                        # Verify
+                        ruby -v
+                        ruby -ropenssl -e "puts OpenSSL::OPENSSL_LIBRARY_VERSION"
+                      '
+                    # 4. Final Permission Fix (Just in case)
+                    - sudo chown -R ec2-user:ec2-user /home/ec2-user/.rbenv
 
 # Recipe
 
@@ -1226,8 +1244,8 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pddts', 'eod']]
-      Version: 2026.01.092220
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/1.1.1']]
+      Version: 2026.01.221447
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/', !Ref AmazonLinux2023Version]]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pddts eod']]
       Components: #Max 20
@@ -1276,7 +1294,7 @@ Resources:
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'pesonet20']]
       Version: 2025.11.241448
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/1.1.0']]
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/', !Ref AmazonLinux2023Version]]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'pesonet20']]
       Components: #Max 20
@@ -1348,8 +1366,8 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'mis']]
-      Version: 2025.08.27
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/1.1.0']]
+      Version: 2026.03.06
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/', !Ref AmazonLinux2023Version]]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'mis']]
       Components: #Max 20
@@ -1373,7 +1391,7 @@ Resources:
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'cics2']]
       Version: 2025.11.19
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/1.1.1']]
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/', !Ref AmazonLinux2023Version]]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'cics2']]
       Components: #Max 20
