@@ -1,0 +1,688 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This cloudformation template provisions resources for DPWH-PMMS Windows 2019 (ADDC and DB+SSRS)
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Resource Configuration"
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+          - AssociatePublicIp
+          - AssociateEIP
+          - InstanceAMI
+          - InstanceAMI2
+          - InstanceType
+          - PolicyArns
+          - EnableMonitoring
+          - KeyName
+          - TopicArn
+          - EnableCPUCreditAlarm
+      -
+        Label:
+          default: "Stack Configuration"
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      -
+        Label:
+          default: "Scheduler Configuration"
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: "Resource Name"
+      OrgName:
+        default: "Organization Name"
+      EnvName:
+        default: "Environment Name"
+      NetworkStackName:
+        default: "Network Stack Name"
+      SNSStackName:
+        default: "SNS Topic Stack Name"
+      AssociatePublicIp:
+        default: "Associate Public IP"
+      AssociateEIP:
+        default: "Associate Elastic IP"
+      InstanceAMI:
+        default: "Instance AMI ID - AD"
+      InstanceAMI2:
+        default: "Instance AMI ID - DB"
+      InstanceType:
+        default: "Instance Type"
+      PolicyArns:
+        default: "Policy ARNs"
+      EnableMonitoring:
+        default: "Enable Monitoring"
+      KeyName:
+        default: "Key Name"
+      EnableCPUCreditAlarm:
+        default: "Enable CPU Credit Alarm"
+      StartScheduleExpression:
+        default: "Scheduled Expression (Start)"
+      StopScheduleExpression:
+        default: "Scheduled Expression (Stop)"
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: pmms-win2019-ad-db
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-sns
+  AssociatePublicIp:
+    Description: Set to true if associating public ip address to instance is enabled. Enable only if AssociateEIP is false. Otherwise, disabled.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  AssociateEIP:
+    Description: Set to true if associating elastic ip address to instance is enabled. Enable only if AssociatePublicIp is false. Otherwise, disabled.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  InstanceAMI:
+    Description: AMI image used by the EC2 instance.
+    Type: String
+    #Default: ami-01f14dc60171d8d7b # Microsoft Windows Server 2019 Base
+    Default: ami-02172b169db4720d6 # Microsoft Windows Server 2019 Base
+  InstanceAMI2:
+    Description: AMI image used by the EC2 instance.
+    Type: String
+    #Default: ami-0e92c3f7325e54f02 # Microsoft Windows Server 2019 with SQL Server 2017 Standard
+    Default: ami-0d8e4112fa3a4f229 # Microsoft Windows Server 2019 with SQL Server 2017 Web
+  InstanceType:
+    Description: The instnace type of the EC2 instance (e.g. t2.micro, t2.small, c4.large, etc).
+    Type: String
+    Default: t3.small
+  PolicyArns:
+    Description: List of policy Arns associated to the EC2 instance.
+    Type: String
+    Default: "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  EnableMonitoring:
+    Description: Set to true if monitoring is enabled for the EC2 instance. Otherwise, disabled.
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  KeyName:
+    Description: Name of the Key Pair to use.
+    Type: String
+    Default: ceng-key | RSA
+  EnableCPUCreditAlarm:
+    Description: Set to true if CPU credit alarm is enabled (Applicable only for t* instance types. E.g. t2.small, t3.small). Otherwise, disabled.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  StartScheduleExpression:
+    Description: Schedule expression when to start the the ec2 instance.
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the the ec2 instance.
+    Type: String
+    Default: cron(0 9 ? * MON-FRI *)
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+  IsEnableCPUCreditAlarm: !Equals [!Ref EnableCPUCreditAlarm, true]
+  IsAssociatePublicIp: !Equals [!Ref AssociatePublicIp, true]
+  IsAssociateEIP: !Equals [!Ref AssociateEIP, true]
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+
+Resources:
+
+####
+# EC2 Section
+####
+
+  InstanceAD:
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: !Ref InstanceAMI
+      KeyName: !Ref KeyName
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref DefaultIamInstanceProfile
+      Monitoring: !Ref EnableMonitoring
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: !Ref AssociatePublicIp
+          DeviceIndex: 0
+          GroupSet: [!GetAtt DefaultSecurityGroup.GroupId]
+          SubnetId: 
+            Fn::ImportValue:
+              !Sub "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-addc]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  DefaultEIP1:
+    Type: AWS::EC2::EIP
+    Condition: IsAssociateEIP
+    Properties:
+      InstanceId: !Ref InstanceAD
+
+  InstanceDB:
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: !Ref InstanceAMI2
+      KeyName: !Ref KeyName
+      InstanceType: t3.small
+      IamInstanceProfile: !Ref DefaultIamInstanceProfile
+      Monitoring: !Ref EnableMonitoring
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: !Ref AssociatePublicIp
+          DeviceIndex: 0
+          GroupSet: [!GetAtt DefaultSecurityGroup.GroupId]
+          SubnetId: 
+            Fn::ImportValue:
+              !Sub "${NetworkStackName}-PublicSubnetId1"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-db]]
+        - 
+          Key: Environment
+          Value: !Ref EnvName
+        - 
+          Key: Organization
+          Value: !Ref OrgName
+
+  DefaultEIP2:
+    Type: AWS::EC2::EIP
+    Condition: IsAssociateEIP
+    Properties:
+      InstanceId: !Ref InstanceDB
+
+
+####
+# VPC Section
+####
+
+  DefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${NetworkStackName}-VpcId"
+      Tags:
+        - 
+          Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  # RDP access
+  DefaultSecurityGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt DefaultSecurityGroup.GroupId
+      IpProtocol: "tcp"
+      FromPort: 3389
+      ToPort: 3389
+      CidrIp: "0.0.0.0/0"
+
+  # Allow traffic from VPC
+  DefaultSecurityGroupIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt DefaultSecurityGroup.GroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: "10.0.0.0/16"
+  
+  DefaultSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt DefaultSecurityGroup.GroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: "0.0.0.0/0"
+
+####
+# IAM Section
+####
+
+  DefaultIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Roles:
+        - !Ref DefaultIamRole
+
+  DefaultIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+#      ManagedPolicyArns:
+#        - !Ref PolicyArns
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com" 
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - 
+          PolicyName: "LambdaDefaultFunctionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - 
+                Effect: Allow
+                Action: 
+                  - ec2:DescribeInstances
+                  - ec2:Start*
+                  - ec2:Stop*
+                Resource: "*"
+              - 
+                Effect: "Allow"
+                Action: 
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+####
+# Lambda Section
+####
+
+  StartLambdaFunction1:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which starts the instance on a given schedule"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-addc, start]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.9
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_IDS: !Ref InstanceAD
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            instanceIds=os.environ['INSTANCE_IDS']
+            
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+
+              logger.info('Starting Instance: ' + str(instanceIds))
+              ec2.start_instances(InstanceIds=[instanceIds],DryRun=False)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopLambdaFunction1:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which stops the instance on a given schedule"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-addc, stop]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.9
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_IDS: !Ref InstanceAD
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            instanceIds=os.environ['INSTANCE_IDS']
+            
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+
+              logger.info('Stopping Instance: ' + str(instanceIds))
+              ec2.stop_instances(InstanceIds=[instanceIds],DryRun=False)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StartLambdaFunction2:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which starts the instance on a given schedule"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-db, start]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.9
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_IDS: !Ref InstanceDB
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            instanceIds=os.environ['INSTANCE_IDS']
+            
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+
+              logger.info('Starting Instance: ' + str(instanceIds))
+              ec2.start_instances(InstanceIds=[instanceIds],DryRun=False)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+  StopLambdaFunction2:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda Function which stops the instance on a given schedule"
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-db, stop]]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn 
+      Runtime: python3.9
+      Timeout: 900
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          INSTANCE_IDS: !Ref InstanceDB
+      Code:
+        ZipFile: |
+
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+              
+          def lambda_handler(event, context):
+            region=os.environ['REGION']
+            instanceIds=os.environ['INSTANCE_IDS']
+            
+            try:
+              ec2 = boto3.client('ec2',region_name=region)
+
+              logger.info('Stopping Instance: ' + str(instanceIds))
+              ec2.stop_instances(InstanceIds=[instanceIds],DryRun=False)
+
+            except Exception:
+              logger.exception('Error Encountered')
+
+
+####
+# Event Rule Section
+####
+
+  StartEventRule1:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Starts the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-addc, start]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  "DISABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StartLambdaFunction1.Arn 
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-addc, start]]
+
+  StopEventRule1:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Stops the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-addc, stop]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StopLambdaFunction1.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-addc, stop]]
+
+  PermissionForEventsToInvokeLambdaStop1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopLambdaFunction1
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StopEventRule1.Arn
+
+
+  PermissionForEventsToInvokeLambdaStart1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartLambdaFunction1
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StartEventRule1.Arn
+
+  StartEventRule2:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Starts the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-db, start]]
+      ScheduleExpression: !Ref StartScheduleExpression
+      State:  "DISABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StartLambdaFunction2.Arn 
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-db, start]]
+
+  StopEventRule2:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Stops the instance at a specific time
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-db, stop]]
+      ScheduleExpression: !Ref StopScheduleExpression
+      State:  "ENABLED"
+      Targets:
+      - 
+        Arn: !GetAtt StopLambdaFunction2.Arn
+        Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pmms-db, stop]]
+
+  PermissionForEventsToInvokeLambdaStop2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopLambdaFunction2
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StopEventRule2.Arn
+
+
+  PermissionForEventsToInvokeLambdaStart2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartLambdaFunction2
+      Action:  "lambda:InvokeFunction"
+      Principal:  "events.amazonaws.com"
+      SourceArn: !GetAtt StartEventRule2.Arn              
+
+
+####
+# Cloudwatch Section
+####
+
+#  StartLambdaLogGroup:
+#    Type: AWS::Logs::LogGroup
+#    Properties:
+#      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StartLambdaFunction]]
+#
+#  StopLambdaLogGroup:
+#    Type: AWS::Logs::LogGroup
+#    Properties:
+#      LogGroupName: !Join ['/', ['/aws/lambda', !Ref StopLambdaFunction]]
+#
+#  CPUUtilizationCloudWatchAlarm:
+#    Type: AWS::CloudWatch::Alarm
+#    Properties:
+#      AlarmName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], cpu-utilization]]
+#      MetricName: CPUUtilization
+#      Namespace: "AWS/EC2"
+#      ComparisonOperator: GreaterThanOrEqualToThreshold
+#      EvaluationPeriods: 1
+#      Period: 300
+#      Statistic: Average
+#      Threshold: 80
+#      AlarmActions: 
+#        - Fn::ImportValue:
+#            !Sub "${SNSStackName}-TopicArn"
+#      OKActions: 
+#        - Fn::ImportValue:
+#            !Sub "${SNSStackName}-TopicArn"
+#      Dimensions:
+#        - Name: InstanceId
+#          Value: !Ref InstanceAD
+#
+#  StatusChecksCloudWatchAlarm:
+#    Type: AWS::CloudWatch::Alarm
+#    Properties:
+#      AlarmName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], status-checks]]
+#      MetricName: StatusCheckFailed
+#      Namespace: "AWS/EC2"
+#      ComparisonOperator: GreaterThanOrEqualToThreshold
+#      EvaluationPeriods: 1
+#      Period: 300
+#      Statistic: Minimum
+#      Threshold: 1
+#      AlarmActions: 
+#        - Fn::ImportValue: 
+#            !Sub "${SNSStackName}-TopicArn"
+#      OKActions: 
+#        - Fn::ImportValue:
+#            !Sub "${SNSStackName}-TopicArn"
+#      Dimensions:
+#        - Name: InstanceId
+#          Value: !Ref InstanceAD
+#
+#  CPUCreditBalanceCloudWatchAlarm:
+#    Type: AWS::CloudWatch::Alarm
+#    Condition: IsEnableCPUCreditAlarm
+#    Properties:
+#      AlarmName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], cpu-credit-balance]]
+#      MetricName: CPUCreditBalance
+#      Namespace: "AWS/EC2"
+#      ComparisonOperator: LessThanOrEqualToThreshold
+#      EvaluationPeriods: 1
+#      Period: 300
+#      Statistic: Minimum
+#      Threshold: 24
+#      AlarmActions: 
+#        - Fn::ImportValue: 
+#            !Sub "${SNSStackName}-TopicArn"
+#      OKActions: 
+#        - Fn::ImportValue: 
+#            !Sub "${SNSStackName}-TopicArn"
+#      Dimensions:
+#        - Name: InstanceId
+#          Value: !Ref InstanceAD
+
+Outputs:
+
+  Name:
+    Description: Unique name/identifier
+    Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+    Export: 
+      Name: !Sub ${AWS::StackName}-Name
+
+  SecurityGroupId:
+    Description: The security group id of the EC2 instance
+    Value: !GetAtt DefaultSecurityGroup.GroupId
+    Export: 
+      Name: !Sub ${AWS::StackName}-SecurityGroupId
+
+  InstanceRoleArn:
+    Description: The instance role arn attached to the EC2 Instance
+    Value: !GetAtt DefaultIamRole.Arn
+    Export: 
+      Name: !Sub ${AWS::StackName}-InstanceRoleArn
