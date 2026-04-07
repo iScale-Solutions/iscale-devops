@@ -891,19 +891,54 @@ Resources:
           inputs:
             runCommand:
             - |
+              LOG_FILE="/var/log/mis-report-queries.log"
+              MAX_LOG_FILES=5
+
+              # Rotate logs if the log file already exists
+              if [ -f "$LOG_FILE" ]; then
+                for i in $(seq $((MAX_LOG_FILES - 1)) -1 1); do
+                  [ -f "${LOG_FILE}.$i" ] && mv "${LOG_FILE}.$i" "${LOG_FILE}.$((i + 1))"
+                done
+                mv "$LOG_FILE" "${LOG_FILE}.1"
+              fi
+
+              log() {
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+              }
+
+              log "========== MIS Report Queries - Execution Start =========="
+
+              log "[update_deploy] Step 1/6: Pulling latest report queries from git"
               cd /home/ec2-user/pchc-mis-report-queries/
-              git pull
+              git pull 2>&1 | tee -a "$LOG_FILE"
+              log "[update_deploy] git pull completed with exit code $?"
+
+              log "[update_deploy] Step 2/6: Syncing queries to deploy directory"
               cd /home/ec2-user/queries-deploy/
-              rsync -avz /home/ec2-user/pchc-mis-report-queries/ /home/ec2-user/queries-deploy/
+              rsync -avz /home/ec2-user/pchc-mis-report-queries/ /home/ec2-user/queries-deploy/ 2>&1 | tee -a "$LOG_FILE"
+              log "[update_deploy] rsync completed with exit code $?"
+
+              log "[update_deploy] Step 3/6: Retrieving Redshift credentials from Secrets Manager"
               export REDSHIFT_HOST=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_HOST`
               export REDSHIFT_USER=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_USER`
               export REDSHIFT_PASSWORD=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_PASSWORD`
               export REDSHIFT_DATABASE=`aws secretsmanager get-secret-value --secret-id {{SecretID}} --region {{Region}} | jq -r .SecretString | jq -r .REDSHIFT_DATABASE`
+              log "[update_deploy] Secrets retrieved - REDSHIFT_HOST=${REDSHIFT_HOST}, REDSHIFT_USER=${REDSHIFT_USER}, REDSHIFT_DATABASE=${REDSHIFT_DATABASE}"
+
+              log "[update_deploy] Step 4/6: Injecting Redshift credentials into update_deploy.sh"
               sed -i "s|XXREDSHIFT_HOSTXX|$REDSHIFT_HOST|g" update_deploy.sh
               sed -i "s|XXREDSHIFT_USERXX|$REDSHIFT_USER|g" update_deploy.sh
               sed -i "s|XXREDSHIFT_PASSWORDXX|$REDSHIFT_PASSWORD|g" update_deploy.sh
               sed -i "s|XXREDSHIFT_DATABASEXX|$REDSHIFT_DATABASE|g" update_deploy.sh
-              /bin/bash update_deploy.sh
+              log "[update_deploy] Credential injection completed"
+
+              log "[update_deploy] Step 5/6: Executing update_deploy.sh"
+              /bin/bash update_deploy.sh 2>&1 | tee -a "$LOG_FILE"
+              DEPLOY_EXIT_CODE=$?
+              log "[update_deploy] Step 6/6: update_deploy.sh finished with exit code ${DEPLOY_EXIT_CODE}"
+
+              log "========== MIS Report Queries - Execution End =========="
+              exit $DEPLOY_EXIT_CODE
       DocumentFormat: YAML
       DocumentType: Command
       Name: run-reports-queries
