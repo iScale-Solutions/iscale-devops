@@ -81,7 +81,7 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-05f071c65e32875a8 # base amazon-linux2023 AMI Singapore
+    Default: ami-03c3282f979a6a9b0 # base amazon-linux2023 AMI Singapore
   InstanceType:
     Description: Instance Type
     Type: String
@@ -210,3 +210,51 @@ Resources:
               Service: ec2.amazonaws.com
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+####
+# CloudWatch Alarms Section
+####
+
+  SystemStatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'system-status-check']]
+      AlarmDescription: Recover EC2 instance on system status check failure (underlying host issue)
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_System
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EC2Instance
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Sub 'arn:aws:automate:${AWS::Region}:ec2:recover'
+        - Fn::ImportValue: !Sub '${SNSStackName}-SNSTopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-SNSTopicArn'
+
+  InstanceStatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'instance-status-check']]
+      AlarmDescription: Reboot EC2 instance on instance status check failure (OS/software issue)
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_Instance
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EC2Instance
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Sub 'arn:aws:automate:${AWS::Region}:ec2:reboot'
+        - Fn::ImportValue: !Sub '${SNSStackName}-SNSTopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-SNSTopicArn'

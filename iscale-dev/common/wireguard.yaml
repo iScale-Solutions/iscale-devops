@@ -1,0 +1,307 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: WireGuard VPN server (wg-easy) on Amazon Linux 2023 — single UDP port exposed to the internet, admin UI reachable only via SSM port-forwarding. Auto-bootstraps in user-data.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Cloudformation Stack Configuration
+        Parameters:
+          - NetworkStackName
+      - Label:
+          default: WireGuard Configuration
+        Parameters:
+          - AdminPassword
+          - WgPort
+          - ClientDns
+          - WgEasyImageTag
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceType
+          - LatestAmiId
+          - VolumeSize
+          - VolumeType
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      AdminPassword:
+        default: wg-easy Admin UI Password
+      WgPort:
+        default: WireGuard UDP Port
+      ClientDns:
+        default: DNS servers pushed to WireGuard clients
+      WgEasyImageTag:
+        default: wg-easy Docker Image Tag
+      InstanceType:
+        default: Instance Type
+      LatestAmiId:
+        default: Amazon Linux 2023 AMI (SSM Parameter)
+      VolumeSize:
+        default: Root Volume Size (GiB)
+      VolumeType:
+        default: Root Volume Type
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (typically the service name).
+    Type: String
+    MinLength: 3
+    MaxLength: 20
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters and hyphens.
+  EnvName:
+    Description: The name of the environment.
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  NetworkStackName:
+    Description: Network stack exporting VpcId and PublicSubnetId1.
+    Type: String
+    MinLength: 1
+  AdminPassword:
+    Description: Password for the wg-easy web UI. Reach the UI via SSM port-forward to 51821/tcp (never exposed to the internet).
+    Type: String
+    NoEcho: true
+    MinLength: 12
+  WgPort:
+    Description: UDP port WireGuard listens on. This is the only port open to the internet.
+    Type: Number
+    Default: 51820
+    MinValue: 1024
+    MaxValue: 65535
+  ClientDns:
+    Description: Comma-separated DNS servers pushed to connected WireGuard clients.
+    Type: String
+    Default: 1.1.1.1,1.0.0.1
+  WgEasyImageTag:
+    Description: wg-easy container image tag. Pin for reproducibility.
+    Type: String
+    Default: "13"
+  InstanceType:
+    Description: EC2 instance type.
+    Type: String
+    Default: t3a.small
+    AllowedValues:
+      - t3a.small
+      - t3a.medium
+  LatestAmiId:
+    Description: Public SSM parameter that resolves to the current AL2023 x86_64 AMI.
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  VolumeSize:
+    Description: Root volume size in GiB.
+    Type: Number
+    Default: 20
+    MinValue: 10
+  VolumeType:
+    Type: String
+    Default: gp3
+    AllowedValues:
+      - gp3
+      - gp2
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  ####
+  # IAM — SSM-only access (no SSH, no bastion)
+  ####
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  ####
+  # Security Group — the WireGuard UDP port is the ONLY thing open to the internet.
+  # Admin UI (51821/tcp) is reached via SSM port-forwarding and is not in the SG at all.
+  ####
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: WireGuard server - UDP tunnel port only
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupIngress:
+        - Description: WireGuard tunnel
+          IpProtocol: udp
+          FromPort: !Ref WgPort
+          ToPort: !Ref WgPort
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - Description: All outbound
+          IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  ####
+  # Elastic IP — stable public IP baked into every client .conf generated by wg-easy
+  ####
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+
+  EIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      InstanceId: !Ref EC2Instance
+
+  ####
+  # EC2 Instance
+  ####
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      Monitoring: true
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 2
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: [!GetAtt SecurityGroup.GroupId]
+          SubnetId:
+            Fn::ImportValue: !Sub '${NetworkStackName}-PublicSubnetId1'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: !Ref VolumeType
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euxo pipefail
+              exec > >(tee -a /var/log/wg-easy-bootstrap.log | logger -t wg-easy-bootstrap -s 2>/dev/console) 2>&1
+
+              dnf -y update
+              dnf -y install docker iptables
+
+              systemctl enable --now docker
+
+              # Enable kernel IP forwarding (required for WireGuard to route peer traffic)
+              cat > /etc/sysctl.d/99-wireguard.conf <<SYSCTL
+              net.ipv4.ip_forward = 1
+              net.ipv4.conf.all.src_valid_mark = 1
+              SYSCTL
+              sysctl --system
+
+              # Env file keeps the admin password out of `docker inspect` and `ps -ef`
+              install -d -m 0700 /opt/wg-easy
+              install -d -m 0700 /opt/wg-easy/data
+              umask 077
+              cat > /opt/wg-easy/.env <<ENVFILE
+              WG_HOST=${PublicIp}
+              PASSWORD=${AdminPasswordValue}
+              WG_PORT=${WgPortValue}
+              WG_DEFAULT_DNS=${ClientDnsValue}
+              ENVFILE
+              chmod 600 /opt/wg-easy/.env
+
+              docker run -d \
+                --name wg-easy \
+                --restart unless-stopped \
+                --env-file /opt/wg-easy/.env \
+                -v /opt/wg-easy/data:/etc/wireguard \
+                -p ${WgPortValue}:51820/udp \
+                -p 127.0.0.1:51821:51821/tcp \
+                --cap-add NET_ADMIN \
+                --cap-add SYS_MODULE \
+                --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+                --sysctl net.ipv4.ip_forward=1 \
+                ghcr.io/wg-easy/wg-easy:${WgEasyImageTagValue}
+
+              echo "wg-easy bootstrap finished. Admin UI: SSM port-forward 51821/tcp -> http://localhost:51821"
+            - PublicIp: !Ref ElasticIP
+              AdminPasswordValue: !Ref AdminPassword
+              WgPortValue: !Ref WgPort
+              ClientDnsValue: !Ref ClientDns
+              WgEasyImageTagValue: !Ref WgEasyImageTag
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+Outputs:
+  InstanceId:
+    Description: WireGuard server instance ID (use as --target for SSM port-forwarding).
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+  PublicIp:
+    Description: Elastic IP — baked into every client .conf. Clients connect here on UDP/${WgPort}.
+    Value: !Ref ElasticIP
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicIp'
+  SecurityGroupId:
+    Value: !GetAtt SecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroupId'
+  AdminUiAccess:
+    Description: Command to reach the wg-easy admin UI from a workstation.
+    Value: !Sub 'aws ssm start-session --target ${EC2Instance} --document-name AWS-StartPortForwardingSession --parameters ''{"portNumber":["51821"],"localPortNumber":["51821"]}'' then open http://localhost:51821'
