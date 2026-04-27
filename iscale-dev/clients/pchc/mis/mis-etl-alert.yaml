@@ -220,11 +220,21 @@ Resources:
               state = detail.get('state', 'Unknown')
               job_run_id = detail.get('jobRunId', 'Unknown')
               message = detail.get('message', '')
+              retry_count = detail.get('retryCount')  # present only for SSM timeout failures
               env_name = os.environ.get('ENV_NAME', 'UNKNOWN').upper()
 
               # Color coding for email content
               status_color = "#28a745" if state == "SUCCEEDED" else "#dc3545"
               status_label = "SUCCESS" if state == "SUCCEEDED" else "FAILED"
+
+              retry_row = (
+                  f"""
+                      <tr>
+                          <td style="padding: 8px; font-weight: bold;">Retry Attempts:</td>
+                          <td style="padding: 8px; color:#dc3545; font-weight: bold;">{retry_count['count']}/{retry_count['max']} (SSM command timed out on every attempt)</td>
+                      </tr>"""
+                  if retry_count else ""
+              )
 
               html_body = f"""
               <html>
@@ -242,7 +252,7 @@ Resources:
                       <tr>
                           <td style="padding: 8px; font-weight: bold;">State:</td>
                           <td style="padding: 8px; color:{status_color}; font-weight: bold;">{state}</td>
-                      </tr>
+                      </tr>{retry_row}
                       <tr>
                           <td style="padding: 8px; font-weight: bold;">Message:</td>
                           <td style="padding: 8px;">{message}</td>
@@ -556,6 +566,50 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt PesonetSSMEventRule.Arn
+
+  # Separate rule for TimedOut — retries the upsert Lambda with an incremented RetryCount
+  PesonetSSMTimeoutRetryRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Re-invokes the pesonet20 upsert Lambda when an SSM Run Command times out, passing the retry count for circuit-breaker logic."
+      EventPattern:
+        source:
+          - aws.ssm
+        detail-type:
+          - EC2 Command Status-change Notification
+        detail:
+          status:
+            - TimedOut
+          document-name:
+            - Fn::ImportValue:
+                !Sub '${MisEtlStackName}-Pesonet20PostGlueUpsertSsmDocumentName'
+      State: ENABLED
+      EventBusName: default
+      Targets:
+        - Id: Pesonet20UpsertRetryLambdaTarget
+          Arn:
+            Fn::ImportValue:
+              !Sub '${MisEtlStackName}-Pesonet20PostGlueUpsertLambdaArn'
+          InputTransformer:
+            InputPathsMap:
+              retryCount: "$.detail.parameters.RetryCount[0]"
+              commandId: "$.detail.command-id"
+            InputTemplate: |
+              {
+                "source": "ssm-timeout-retry",
+                "retry_count": "<retryCount>",
+                "command_id": "<commandId>"
+              }
+
+  PesonetSSMTimeoutRetryRuleLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::ImportValue:
+          !Sub '${MisEtlStackName}-Pesonet20PostGlueUpsertLambdaArn'
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PesonetSSMTimeoutRetryRule.Arn
   
 
   PesonetRefreshMvseEmailLambda:
