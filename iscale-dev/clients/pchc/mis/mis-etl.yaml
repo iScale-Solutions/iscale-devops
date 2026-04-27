@@ -467,6 +467,7 @@ Resources:
       Code:
         ZipFile: |
           import boto3
+          import json
           import os
           import time
           import logging
@@ -510,48 +511,103 @@ Resources:
               time.sleep(30)
 
 
-          def trigger_ssm_command():
-              """Fires the SSM Run Command without waiting for it to complete."""
+          MAX_RETRIES = 3
+          EMAIL_LAMBDA_NAME = os.environ["EMAIL_LAMBDA_NAME"]
+
+          lambda_client = boto3.client("lambda")
+
+
+          def trigger_ssm_command(retry_count):
+              """Fires the SSM Run Command with the current retry count embedded as a parameter."""
               response = ssm.send_command(
                   InstanceIds=[INSTANCE_ID],
                   DocumentName=SSM_DOCUMENT_NAME,
+                  Parameters={"RetryCount": [str(retry_count)]},
               )
-
               command_id = response["Command"]["CommandId"]
-              logger.info("SSM Run Command triggered successfully. Command ID: %s", command_id)
-
+              logger.info("SSM Run Command triggered. Command ID: %s, RetryCount: %d", command_id, retry_count)
               return command_id
 
 
+          def send_failure_email(command_id, attempts):
+              """Invokes the Glue email Lambda to notify that all retry attempts were exhausted."""
+              payload = {
+                  "detail": {
+                      "jobName": "pesonet20-post-glue-upsert",
+                      "state": "FAILED",
+                      "jobRunId": command_id,
+                      "retryCount": {"count": attempts, "max": MAX_RETRIES},
+                      "message": (
+                          f"PESONet20 upsert SSM command timed out on all {attempts} attempt(s) "
+                          f"and will not be retried. Last Command ID: {command_id}"
+                      ),
+                  }
+              }
+              lambda_client.invoke(
+                  FunctionName=EMAIL_LAMBDA_NAME,
+                  InvocationType="Event",
+                  Payload=json.dumps(payload).encode(),
+              )
+              logger.info("Failure email dispatched after %d exhausted attempt(s). Command ID: %s", attempts, command_id)
+
+
           def lambda_handler(event, context):
+              source = event.get("source", "")
+
+              # -------------------------------------------------------
+              # Path 1: Retry invocation from EventBridge SSM timeout rule
+              # -------------------------------------------------------
+              if source == "ssm-timeout-retry":
+                  retry_count = int(event.get("retry_count", "0"))
+                  command_id = event.get("command_id", "unknown")
+                  logger.info(
+                      "SSM timeout retry received. Command ID: %s, RetryCount so far: %d",
+                      command_id, retry_count,
+                  )
+
+                  if retry_count >= MAX_RETRIES:
+                      logger.error("Max retries (%d) exceeded. Sending failure notification.", MAX_RETRIES)
+                      send_failure_email(command_id, retry_count)
+                      return {
+                          "statusCode": 200,
+                          "body": f"Max retries exceeded. Failure email sent. Last Command ID: {command_id}",
+                      }
+
+                  ensure_instance_running()
+                  new_command_id = trigger_ssm_command(retry_count + 1)
+                  return {
+                      "statusCode": 200,
+                      "body": f"SSM retry triggered. Command ID: {new_command_id}, Attempt: {retry_count + 1}/{MAX_RETRIES}",
+                  }
+
+              # -------------------------------------------------------
+              # Path 2: Normal invocation from Glue job success event
+              # -------------------------------------------------------
               detail = event.get("detail", {})
               job_name = detail.get("jobName", "")
               state = detail.get("state", "")
 
-              # Skip non-pesonet20 jobs
               if "pesonet20" not in job_name:
                   logger.info("Skipping: not a pesonet20 job. Glue Job: %s", job_name)
                   return {"status": "skipped", "reason": "not pesonet20 job"}
 
-              # Only proceed on success
               if state != "SUCCEEDED":
                   logger.info("Skipping: Glue job %s is in state %s", job_name, state)
                   return {"status": "skipped", "reason": f"state={state}"}
 
-              logger.info("Glue job %s succeeded. Triggering SSM Run Command...", job_name)
-
+              logger.info("Glue job %s succeeded. Triggering initial SSM Run Command...", job_name)
               ensure_instance_running()
-              command_id = trigger_ssm_command()
-
+              command_id = trigger_ssm_command(0)
               return {
                   "statusCode": 200,
-                  "body": f"SSM Run Command triggered successfully. Command ID: {command_id}",
+                  "body": f"SSM Run Command triggered. Command ID: {command_id}",
               }
 
       Environment:
         Variables:
           INSTANCE_ID: !GetAtt ReportQueriesInstance.InstanceId
           SSM_DOCUMENT_NAME: !Ref Pesonet20PostGlueUpsertSsmDocument
+          EMAIL_LAMBDA_NAME: !Ref GlueEmailLambdaName
 
   Pesonet20PostGlueUpsertLambdaRole:
     Type: AWS::IAM::Role
@@ -597,7 +653,7 @@ Resources:
                 Action:
                   - ssm:SendCommand
                   - ec2:StartInstances
-                Resource: 
+                Resource:
                   - !Join ['', ['arn:aws:ec2:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':instance/', !GetAtt ReportQueriesInstance.InstanceId]]
                   - !Join ['', ['arn:aws:ssm:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':document/', !Ref Pesonet20PostGlueUpsertSsmDocument] ]
   
@@ -624,6 +680,10 @@ Resources:
             type: "String"
             description: "region"
             default: !Ref 'AWS::Region'
+          RetryCount:
+            type: "String"
+            description: "Retry attempt number — embedded so EventBridge can extract it on timeout"
+            default: "0"
         mainSteps:
           - action: aws:runShellScript
             name: Pesonet20PostGlueUpsert
