@@ -472,49 +472,101 @@ Resources:
           import time
           import logging
 
-          # -----------------------------
-          # Logging setup
-          # -----------------------------
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
-          # -----------------------------
-          # AWS clients
-          # -----------------------------
           ec2 = boto3.client("ec2")
           ssm = boto3.client("ssm")
+          lambda_client = boto3.client("lambda")
 
           INSTANCE_ID = os.environ["INSTANCE_ID"]
           SSM_DOCUMENT_NAME = os.environ["SSM_DOCUMENT_NAME"]
+          EMAIL_LAMBDA_NAME = os.environ["EMAIL_LAMBDA_NAME"]
+
+          MAX_RETRIES = 3
+          SSM_HEALTH_POLL_INTERVAL = 10  # seconds between SSM ping checks
+          SSM_HEALTH_TIMEOUT = 120       # max seconds to wait for SSM agent online
+          MAX_INSTANCE_RESTARTS = 2      # extra restarts if SSM stays unresponsive
 
 
-          def ensure_instance_running():
-              """Starts the EC2 instance if not already running and waits until it's ready."""
+          def _wait_for_ec2_running():
+              """Starts the instance if not running and waits for running state."""
               resp = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
-              instance_state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
-              logger.info("EC2 instance %s current state: %s", INSTANCE_ID, instance_state)
+              state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
+              logger.info("EC2 instance %s state: %s", INSTANCE_ID, state)
 
-              if instance_state == "running":
+              if state == "running":
                   return
 
-              if instance_state in ("stopped", "stopping"):
+              if state in ("stopped", "stopping"):
                   logger.info("Starting EC2 instance %s...", INSTANCE_ID)
                   ec2.start_instances(InstanceIds=[INSTANCE_ID])
               else:
-                  logger.warning("EC2 instance is in state '%s'. Waiting for it to reach running...", instance_state)
+                  logger.warning("EC2 instance in state '%s', waiting for running...", state)
 
-              waiter = ec2.get_waiter("instance_running")
-              waiter.wait(InstanceIds=[INSTANCE_ID])
-              logger.info("EC2 instance %s is now running. Waiting 30s for SSM agent to be ready...", INSTANCE_ID)
-
-              # Buffer time for SSM agent to come online after instance starts
-              time.sleep(30)
+              ec2.get_waiter("instance_running").wait(InstanceIds=[INSTANCE_ID])
+              logger.info("EC2 instance %s is now running.", INSTANCE_ID)
 
 
-          MAX_RETRIES = 3
-          EMAIL_LAMBDA_NAME = os.environ["EMAIL_LAMBDA_NAME"]
+          def _is_ssm_online():
+              """Returns True if the SSM agent is reporting Online for the instance."""
+              resp = ssm.describe_instance_information(
+                  Filters=[{"Key": "InstanceIds", "Values": [INSTANCE_ID]}]
+              )
+              items = resp.get("InstanceInformationList", [])
+              return bool(items) and items[0].get("PingStatus") == "Online"
 
-          lambda_client = boto3.client("lambda")
+
+          def _wait_for_ssm_online():
+              """Polls until SSM agent is Online or SSM_HEALTH_TIMEOUT is exceeded."""
+              elapsed = 0
+              while elapsed < SSM_HEALTH_TIMEOUT:
+                  if _is_ssm_online():
+                      logger.info("SSM agent online after %ds.", elapsed)
+                      return True
+                  logger.info("Waiting for SSM agent... (%ds elapsed)", elapsed)
+                  time.sleep(SSM_HEALTH_POLL_INTERVAL)
+                  elapsed += SSM_HEALTH_POLL_INTERVAL
+              return False
+
+
+          def _restart_instance():
+              """Stops then starts the EC2 instance and waits for running state."""
+              logger.info("Stopping EC2 instance %s...", INSTANCE_ID)
+              ec2.stop_instances(InstanceIds=[INSTANCE_ID])
+              ec2.get_waiter("instance_stopped").wait(InstanceIds=[INSTANCE_ID])
+              logger.info("Instance stopped. Starting...")
+              ec2.start_instances(InstanceIds=[INSTANCE_ID])
+              ec2.get_waiter("instance_running").wait(InstanceIds=[INSTANCE_ID])
+              logger.info("EC2 instance %s restarted and running.", INSTANCE_ID)
+
+
+          def ensure_instance_healthy(force_restart=False):
+              """
+              Ensures the EC2 instance is running and the SSM agent is responding.
+              If force_restart=True, stops and restarts the instance first — used on
+              timeout retries to guarantee a clean state before the next SSM attempt.
+              Restarts up to MAX_INSTANCE_RESTARTS additional times if SSM stays unresponsive.
+              """
+              if force_restart:
+                  _restart_instance()
+              else:
+                  _wait_for_ec2_running()
+
+              for attempt in range(MAX_INSTANCE_RESTARTS + 1):
+                  if _wait_for_ssm_online():
+                      return
+
+                  if attempt < MAX_INSTANCE_RESTARTS:
+                      logger.warning(
+                          "SSM agent unresponsive (attempt %d/%d). Restarting instance...",
+                          attempt + 1, MAX_INSTANCE_RESTARTS,
+                      )
+                      _restart_instance()
+                  else:
+                      raise RuntimeError(
+                          f"SSM agent unresponsive after {MAX_INSTANCE_RESTARTS} restart(s). Aborting."
+                      )
 
 
           def trigger_ssm_command(retry_count):
@@ -573,7 +625,7 @@ Resources:
                           "body": f"Max retries exceeded. Failure email sent. Last Command ID: {command_id}",
                       }
 
-                  ensure_instance_running()
+                  ensure_instance_healthy(force_restart=True)
                   new_command_id = trigger_ssm_command(retry_count + 1)
                   return {
                       "statusCode": 200,
@@ -596,7 +648,7 @@ Resources:
                   return {"status": "skipped", "reason": f"state={state}"}
 
               logger.info("Glue job %s succeeded. Triggering initial SSM Run Command...", job_name)
-              ensure_instance_running()
+              ensure_instance_healthy()
               command_id = trigger_ssm_command(0)
               return {
                   "statusCode": 200,
@@ -653,9 +705,15 @@ Resources:
                 Action:
                   - ssm:SendCommand
                   - ec2:StartInstances
+                  - ec2:StopInstances
                 Resource:
                   - !Join ['', ['arn:aws:ec2:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':instance/', !GetAtt ReportQueriesInstance.InstanceId]]
                   - !Join ['', ['arn:aws:ssm:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':document/', !Ref Pesonet20PostGlueUpsertSsmDocument] ]
+              - Sid: SsmHealthCheck
+                Effect: Allow
+                Action:
+                  - ssm:DescribeInstanceInformation
+                Resource: "*"
   
   Pesonet20PostGlueUpsertSecurityGroup:
     Type: AWS::EC2::SecurityGroup
