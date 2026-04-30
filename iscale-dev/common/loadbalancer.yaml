@@ -275,6 +275,15 @@ Parameters:
     AllowedValues:
       - true
       - false
+  DeployPaidResources:
+    Description: |
+      Option 1 (default, true): Deploy everything — Load Balancer, EIPs, access log bucket, and listeners are created.
+      Option 2 (false): Deploy only free-tier resources. Load Balancer, EIPs, access log bucket, and all listeners are suppressed. Target groups and security groups are still created.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
@@ -327,6 +336,13 @@ Conditions:
   IsEnableAlarm: !Equals [!Ref EnableAlarm, true]
   UseFriendlyNames: !Equals [!Ref UseFriendlyNames, true]
   IsStickinessEnabled: !Equals [!Ref TgStickinessEnable, true]
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, true]
+  IsNetworkAndPaid: !And [Condition: IsNetwork, Condition: IsDeployPaidResources]
+  IsInternetApplicationAndPaid: !And [Condition: IsInternetApplication, Condition: IsDeployPaidResources]
+  IsInternalApplicationAndPaid: !And [Condition: IsInternalApplication, Condition: IsDeployPaidResources]
+  IsInternetApplicationSSLAndPaid: !And [Condition: IsInternetApplicationSSL, Condition: IsDeployPaidResources]
+  IsApplicationHTTPEnabledAndPaid: !And [Condition: IsApplicationHTTPEnabled, Condition: IsDeployPaidResources]
+  IsEnableWebAclAndPaid: !And [Condition: IsEnableWebAcl, Condition: IsDeployPaidResources]
 
 Resources: 
 
@@ -384,18 +400,19 @@ Resources:
 
   ELBElasticIp1:
     Type: AWS::EC2::EIP
-    Condition: IsNetwork
+    Condition: IsNetworkAndPaid
     Properties:
       Domain: vpc
 
   ELBElasticIp2:
     Type: AWS::EC2::EIP
-    Condition: IsNetwork
+    Condition: IsNetworkAndPaid
     Properties:
       Domain: vpc
 
   LoadBalancerAccessLogsBucket:
     Type: AWS::S3::Bucket
+    Condition: IsDeployPaidResources
     Properties:
       #AccessControl: LogDeliveryWrite
       BucketName: !Join [ '-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !FindInMap [ ElbTypeShort, !Ref ElbType, Name ], !Ref Name, access, logs]]
@@ -416,6 +433,7 @@ Resources:
 
   LoadBalancerAccessLogsBucketPolicy:
     Type: AWS::S3::BucketPolicy
+    Condition: IsDeployPaidResources
     Properties:
       Bucket: !Ref LoadBalancerAccessLogsBucket
       PolicyDocument:
@@ -448,6 +466,7 @@ Resources:
 
   LoadBalancer:
     DependsOn: LoadBalancerAccessLogsBucketPolicy
+    Condition: IsDeployPaidResources
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       IpAddressType: ipv4
@@ -525,7 +544,7 @@ Resources:
   # This listener redirects HTTP request to https
   LoadBalancerHTTPListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsInternetApplication
+    Condition: IsInternetApplicationAndPaid
     Properties:
       DefaultActions:
         - Type: redirect
@@ -542,7 +561,7 @@ Resources:
 
   LoadBalancerHTTPListenerInternal:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsInternalApplication
+    Condition: IsInternalApplicationAndPaid
     Properties:
       Port: !Ref ElbHTTPPort
       Protocol: HTTP
@@ -554,7 +573,7 @@ Resources:
   # Listener for application load balancer
   LoadBalancerHTTPSListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsInternetApplicationSSL
+    Condition: IsInternetApplicationSSLAndPaid
     Properties:
       Certificates:
         - CertificateArn: !Ref CertificateArn
@@ -569,7 +588,7 @@ Resources:
   # Listener for application load balancer
   LoadBalancerNetworkListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: IsNetwork
+    Condition: IsNetworkAndPaid
     Properties:
       DefaultActions:
         - Type: forward
@@ -635,7 +654,7 @@ Resources:
 
   WebAcl:
     Type: AWS::WAFRegional::WebACL
-    Condition: IsEnableWebAcl
+    Condition: IsEnableWebAclAndPaid
     Properties:
       Name: !Join ['-', [!Ref Name,webacl]]
       MetricName: !Join
@@ -648,7 +667,7 @@ Resources:
 
   WebAclAssociation:
     Type: AWS::WAFRegional::WebACLAssociation
-    Condition: IsEnableWebAcl
+    Condition: IsEnableWebAclAndPaid
     Properties:
       ResourceArn: !Ref LoadBalancer
       WebACLId: !Ref WebAcl
@@ -656,36 +675,42 @@ Resources:
 Outputs:
 
   LoadBalancerArn:
+    Condition: IsDeployPaidResources
     Description: The Arn of the Load Balancer
     Value: !Ref LoadBalancer
     Export:
       Name: !Sub '${AWS::StackName}-LoadBalancerArn'
 
   CanonicalHostedZoneID:
+    Condition: IsDeployPaidResources
     Description: The ID of the Amazon Route 53 hosted zone associated with the load balancer
     Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
     Export:
       Name: !Sub '${AWS::StackName}-CanonicalHostedZoneID'
 
   DNSName:
+    Condition: IsDeployPaidResources
     Description: The DNS name for the load balancer
     Value: !GetAtt LoadBalancer.DNSName
     Export:
       Name: !Sub '${AWS::StackName}-DNSName'
 
   LoadBalancerFullName:
+    Condition: IsDeployPaidResources
     Description: The full name of the load balancer
     Value: !GetAtt LoadBalancer.LoadBalancerFullName
     Export:
       Name: !Sub '${AWS::StackName}-LoadBalancerFullName'
 
   LoadBalancerName:
+    Condition: IsDeployPaidResources
     Description: The name of the load balancer
     Value: !GetAtt LoadBalancer.LoadBalancerName
     Export:
       Name: !Sub '${AWS::StackName}-LoadBalancerName'
 
   LoadBalancerType:
+    Condition: IsDeployPaidResources
     Description: The type of the load balancer
     Value: !If [IsApplication, 'Application', 'Network']
     Export:
@@ -699,7 +724,7 @@ Outputs:
       Name: !Sub '${AWS::StackName}-SecurityGroupId'
 
   HttpListenerArn:
-    Condition: IsApplicationHTTPEnabled
+    Condition: IsApplicationHTTPEnabledAndPaid
     Description: The HTTP listener ARN of the application load balancer
     Value: !If
       - IsInternetApplication
@@ -709,14 +734,14 @@ Outputs:
       Name: !Sub '${AWS::StackName}-HttpListenerArn'
 
   ApplicationListenerArn:
-    Condition: IsInternetApplicationSSL
+    Condition: IsInternetApplicationSSLAndPaid
     Description: The HTTPS listener ARN of the application load balancer
     Value: !Ref LoadBalancerHTTPSListener
     Export:
       Name: !Sub '${AWS::StackName}-ApplicationListenerArn'
 
   NetworkListenerArn:
-    Condition: IsNetwork
+    Condition: IsNetworkAndPaid
     Description: The listener ARN of the network load balancer
     Value: !Ref LoadBalancerNetworkListener
     Export:
