@@ -1,0 +1,367 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  DR Failover Automation for pesonet20 and network stacks.
+  Deploys a Lambda function that triggers CloudFormation stack updates to activate
+  paid resources (DB, Cache, LBs, App Servers) in the DR region.
+  Lambda is non-blocking — it fires the CF update and returns immediately.
+  CloudFormation handles the actual provisioning (20-60 min for DB snapshot restore).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Stack References
+        Parameters:
+          - NetworkStackName
+          - AppStackName
+          - SNSStackName
+      - Label:
+          default: DR Configuration
+        Parameters:
+          - DBInstanceIdentifier
+          - SourceRegion
+
+    ParameterLabels:
+      NetworkStackName:
+        default: DR Network Stack Name
+      AppStackName:
+        default: DR Application Stack Name (pesonet20)
+      SNSStackName:
+        default: SNS Stack Name (for notifications)
+      DBInstanceIdentifier:
+        default: Source DB Instance Identifier (used to auto-discover latest snapshot)
+      SourceRegion:
+        default: Live/Source Region (where the primary DB runs)
+
+Parameters:
+  NetworkStackName:
+    Description: Name of the DR network CloudFormation stack to update
+    Type: String
+    Default: pchc-productiondr-ase1-network
+  AppStackName:
+    Description: Name of the DR application CloudFormation stack to update (pesonet20)
+    Type: String
+    Default: pchc-productiondr-ase1-pesonet20
+  SNSStackName:
+    Description: Name of the SNS stack to import the topic ARN for notifications
+    Type: String
+    Default: pchc-productiondr-ase1-sns
+  DBInstanceIdentifier:
+    Description: |
+      RDS DB instance identifier in the DR region to auto-discover the latest available snapshot.
+      Cross-region snapshot copies appear as manual snapshots in the DR region.
+      Leave blank to skip auto-discovery and require snapshot_identifier in the Lambda event payload.
+    Type: String
+    Default: ''
+  SourceRegion:
+    Description: AWS region where the primary/live environment runs (used for informational purposes)
+    Type: String
+    Default: ap-southeast-1
+
+Resources:
+
+####
+# IAM
+####
+
+  FailoverLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-failover-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DRFailoverPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudFormationUpdate
+                Effect: Allow
+                Action:
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:GetTemplate
+                Resource:
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${NetworkStackName}/*'
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*'
+              - Sid: PassRoleForCloudFormation
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: '*'
+              - Sid: RDSSnapshotDiscovery
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBSnapshots
+                  - rds:DescribeDBInstances
+                Resource: '*'
+              - Sid: SNSPublish
+                Effect: Allow
+                Action: sns:Publish
+                Resource:
+                  Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+####
+# Lambda
+####
+
+  FailoverLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-dr-failover'
+      Description: |
+        Triggers DR failover by updating CloudFormation stacks to activate paid resources.
+        Non-blocking — fires CF update_stack and returns immediately.
+        CloudFormation handles provisioning asynchronously (DB restore: 20-60 min).
+      Handler: index.lambda_handler
+      Role: !GetAtt FailoverLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          NETWORK_STACK_NAME: !Ref NetworkStackName
+          APP_STACK_NAME: !Ref AppStackName
+          DB_INSTANCE_IDENTIFIER: !Ref DBInstanceIdentifier
+          SOURCE_REGION: !Ref SourceRegion
+          SNS_TOPIC_ARN:
+            Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            """
+            Triggers DR failover by updating CloudFormation stacks.
+
+            Event payload (all optional — falls back to env vars / auto-discovery):
+              snapshot_identifier  : RDS snapshot ARN to restore DB from (cross-region copy ARN)
+              db_master_password   : Master password of the source DB (for Secrets Manager sync)
+              network_stack_name   : Override the network stack name
+              app_stack_name       : Override the app stack name
+              db_instance_identifier: Override the DB instance ID for snapshot auto-discovery
+
+            Lambda is non-blocking. It calls update_stack() and returns immediately.
+            CloudFormation handles the actual provisioning (20-60 min for DB restore).
+            """
+
+            region = os.environ['AWS_REGION']
+            network_stack = event.get('network_stack_name', os.environ['NETWORK_STACK_NAME'])
+            app_stack = event.get('app_stack_name', os.environ['APP_STACK_NAME'])
+            sns_topic = os.environ.get('SNS_TOPIC_ARN', '')
+            db_instance_id = event.get('db_instance_identifier', os.environ.get('DB_INSTANCE_IDENTIFIER', ''))
+
+            snapshot_identifier = event.get('snapshot_identifier', '')
+            db_master_password = event.get('db_master_password', '')
+
+            cf = boto3.client('cloudformation', region_name=region)
+
+            try:
+              # Auto-discover latest snapshot if not provided
+              if not snapshot_identifier and db_instance_id:
+                logger.info(f'Auto-discovering latest snapshot for: {db_instance_id}')
+                snapshot_identifier = find_latest_snapshot(region, db_instance_id)
+                logger.info(f'Using snapshot: {snapshot_identifier}')
+
+              # Step 1: Update network stack — activate paid resources (NAT GW, EIPs, VPC endpoints)
+              logger.info(f'[1/2] Updating network stack: {network_stack}')
+              update_stack_deploy_paid(cf, network_stack, extra_params={})
+              logger.info(f'[1/2] Network stack update initiated.')
+
+              # Step 2: Update app stack — activate DB, Cache, LBs, App Servers
+              logger.info(f'[2/2] Updating app stack: {app_stack}')
+              update_stack_deploy_paid(cf, app_stack, extra_params={
+                'SnapshotIdentifier': snapshot_identifier,
+                'DBMasterUserPassword': db_master_password
+              })
+              logger.info(f'[2/2] App stack update initiated.')
+
+              summary = (
+                f'DR failover initiated successfully.\n'
+                f'Network stack : {network_stack}\n'
+                f'App stack     : {app_stack}\n'
+                f'Snapshot      : {snapshot_identifier or "(none provided)"}\n\n'
+                f'CloudFormation is now provisioning resources. '
+                f'DB restore from snapshot takes 20-60 minutes. '
+                f'You will receive a separate notification when stacks complete.'
+              )
+
+              logger.info(summary)
+              notify(sns_topic, 'DR Failover Initiated', summary)
+
+              return {'statusCode': 200, 'body': summary}
+
+            except Exception as e:
+              error_msg = f'DR failover FAILED: {str(e)}'
+              logger.exception(error_msg)
+              notify(sns_topic, 'DR Failover FAILED', error_msg)
+              raise
+
+
+          def find_latest_snapshot(region, db_instance_identifier):
+            """
+            Auto-discovers the latest available RDS snapshot in the DR region.
+            Cross-region snapshot copies appear as 'manual' type snapshots.
+            Falls back to 'automated' snapshots if no manual ones found.
+            """
+            rds = boto3.client('rds', region_name=region)
+
+            for snapshot_type in ['manual', 'automated']:
+              response = rds.describe_db_snapshots(
+                DBInstanceIdentifier=db_instance_identifier,
+                SnapshotType=snapshot_type,
+                Filters=[{'Name': 'status', 'Values': ['available']}]
+              )
+              snapshots = response.get('DBSnapshots', [])
+
+              if snapshots:
+                snapshots.sort(key=lambda x: x['SnapshotCreateTime'], reverse=True)
+                latest = snapshots[0]
+                logger.info(
+                  f'Found {snapshot_type} snapshot: {latest["DBSnapshotArn"]} '
+                  f'created at {latest["SnapshotCreateTime"]}'
+                )
+                return latest['DBSnapshotArn']
+
+            raise Exception(
+              f'No available snapshots found for DB instance: {db_instance_identifier}. '
+              f'Ensure cross-region snapshot replication is enabled on the primary RDS instance, '
+              f'or provide snapshot_identifier explicitly in the event payload.'
+            )
+
+
+          def get_current_parameters(cf, stack_name):
+            """Fetches current stack parameters as a dict."""
+            response = cf.describe_stacks(StackName=stack_name)
+            stack = response['Stacks'][0]
+            return {p['ParameterKey']: p['ParameterValue'] for p in stack.get('Parameters', [])}
+
+
+          def update_stack_deploy_paid(cf, stack_name, extra_params):
+            """
+            Updates a CloudFormation stack setting DeployPaidResources=true.
+            All other parameters are preserved using UsePreviousValue=True.
+            extra_params: dict of additional parameters to override (e.g. SnapshotIdentifier).
+            Non-blocking — returns as soon as update_stack API call succeeds.
+            """
+            current_params = get_current_parameters(cf, stack_name)
+
+            parameters = []
+            for key in current_params:
+              if key == 'DeployPaidResources':
+                parameters.append({'ParameterKey': key, 'ParameterValue': 'true'})
+              elif key in extra_params and extra_params[key]:
+                parameters.append({'ParameterKey': key, 'ParameterValue': extra_params[key]})
+              else:
+                parameters.append({'ParameterKey': key, 'UsePreviousValue': True})
+
+            cf.update_stack(
+              StackName=stack_name,
+              UsePreviousTemplate=True,
+              Parameters=parameters,
+              Capabilities=[
+                'CAPABILITY_IAM',
+                'CAPABILITY_NAMED_IAM',
+                'CAPABILITY_AUTO_EXPAND'
+              ]
+            )
+
+
+          def notify(sns_topic_arn, subject, message):
+            """Publishes a notification to SNS. Silently skips if no topic configured."""
+            if not sns_topic_arn:
+              return
+            try:
+              sns = boto3.client('sns')
+              sns.publish(TopicArn=sns_topic_arn, Subject=subject, Message=message)
+            except Exception:
+              logger.warning('Failed to publish SNS notification', exc_info=True)
+
+####
+# EventBridge — monitors CF stack events and notifies when failover completes or fails
+####
+
+  StackEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-stack-completion'
+      Description: Notifies when the DR network or app stack update completes or fails
+      EventPattern:
+        source:
+          - aws.cloudformation
+        detail-type:
+          - CloudFormation Stack Status Change
+        detail:
+          stack-id:
+            - prefix: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${NetworkStackName}/'
+            - prefix: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/'
+          status-details:
+            status:
+              - UPDATE_COMPLETE
+              - UPDATE_ROLLBACK_COMPLETE
+              - UPDATE_FAILED
+              - UPDATE_ROLLBACK_FAILED
+      State: ENABLED
+      Targets:
+        - Id: NotifyStackCompletion
+          Arn:
+            Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+          InputTransformer:
+            InputPathsMap:
+              stack: '$.detail.stack-id'
+              status: '$.detail.status-details.status'
+              time: '$.time'
+            InputTemplate: |
+              "DR Stack Update Notification"
+              "Stack  : <stack>"
+              "Status : <status>"
+              "Time   : <time>"
+
+  StackEventRuleSNSPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource:
+              Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+Outputs:
+
+  FailoverLambdaArn:
+    Description: ARN of the DR failover Lambda function
+    Value: !GetAtt FailoverLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FailoverLambdaArn'
+
+  FailoverLambdaName:
+    Description: Name of the DR failover Lambda — invoke this to trigger failover
+    Value: !Ref FailoverLambdaFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-FailoverLambdaName'
+
+  HowToInvoke:
+    Description: AWS CLI command to trigger DR failover
+    Value: !Sub |
+      aws lambda invoke \
+        --function-name ${FailoverLambdaFunction} \
+        --region ${AWS::Region} \
+        --payload '{"snapshot_identifier":"<arn>","db_master_password":"<password>"}' \
+        response.json
