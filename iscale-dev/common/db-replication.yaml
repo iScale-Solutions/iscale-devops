@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: |
-  Enables RDS cross-region automated backup replication for a source DB instance.
-  Deploy this stack in the DESTINATION (DR) region, pointing to the source DB instance ARN
-  in the live region. Replicates daily snapshots + continuous transaction logs, enabling
-  PITR (Point-in-Time Recovery) with ~5 minute RPO in the DR region.
-  This stack is intentionally minimal — it only provisions the replication configuration.
+  Enables RDS cross-region automated backup replication for a source DB instance
+  via a Lambda custom resource (AWS::RDS::DBInstanceAutomatedBackupsReplication is
+  not supported in all regions). Deploy in the DESTINATION (DR) region, pointing
+  SourceDbInstanceArn to the live region DB. Replicates daily snapshots + transaction
+  logs enabling PITR with ~5 minute RPO. On stack delete, replication is stopped.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -99,16 +99,121 @@ Conditions:
 
 Resources:
 
-  # Enables cross-region automated backup replication.
-  # Must be deployed in the DESTINATION (DR) region.
-  # Replicates: daily snapshot + continuous transaction logs.
-  # Enables PITR with ~5 minute RPO in the DR region.
-  DBInstanceAutomatedBackupsReplication:
-    Type: AWS::RDS::DBInstanceAutomatedBackupsReplication
+####
+# IAM
+####
+
+  ReplicationLambdaRole:
+    Type: AWS::IAM::Role
     Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RDSReplicationPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:StartDBInstanceAutomatedBackupsReplication
+                  - rds:StopDBInstanceAutomatedBackupsReplication
+                  - rds:DescribeDBInstanceAutomatedBackups
+                Resource: '*'
+
+####
+# Lambda custom resource
+####
+
+  ReplicationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-', [!Ref OrgName, !Ref Name, db, replication]]
+      Description: |
+        Custom resource Lambda that enables/disables RDS cross-region automated
+        backup replication. Calls start/stop replication APIs on Create/Delete.
+      Handler: index.lambda_handler
+      Role: !GetAtt ReplicationLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            logger.info(event)
+            request_type = event['RequestType']
+            props = event['ResourceProperties']
+
+            source_arn = props['SourceDbInstanceArn']
+            retention = int(props['BackupRetentionPeriod'])
+            kms_key = props.get('KmsKeyId', '')
+
+            rds = boto3.client('rds')
+
+            try:
+              if request_type == 'Create':
+                kwargs = dict(
+                  SourceDbInstanceArn=source_arn,
+                  BackupRetentionPeriod=retention
+                )
+                if kms_key:
+                  kwargs['KmsKeyId'] = kms_key
+                rds.start_db_instance_automated_backups_replication(**kwargs)
+                logger.info(f'Replication started from {source_arn}')
+
+              elif request_type == 'Update':
+                # Stop old replication and start new one if source ARN changed
+                old_source = event.get('OldResourceProperties', {}).get('SourceDbInstanceArn', source_arn)
+                if old_source != source_arn:
+                  rds.stop_db_instance_automated_backups_replication(
+                    SourceDbInstanceArn=old_source
+                  )
+                  logger.info(f'Stopped old replication from {old_source}')
+                kwargs = dict(
+                  SourceDbInstanceArn=source_arn,
+                  BackupRetentionPeriod=retention
+                )
+                if kms_key:
+                  kwargs['KmsKeyId'] = kms_key
+                rds.start_db_instance_automated_backups_replication(**kwargs)
+                logger.info(f'Replication restarted from {source_arn}')
+
+              elif request_type == 'Delete':
+                rds.stop_db_instance_automated_backups_replication(
+                  SourceDbInstanceArn=source_arn
+                )
+                logger.info(f'Replication stopped from {source_arn}')
+
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                'SourceDbInstanceArn': source_arn,
+                'BackupRetentionPeriod': str(retention)
+              })
+
+            except Exception as e:
+              logger.exception('Error managing replication')
+              cfnresponse.send(event, context, cfnresponse.FAILED, {
+                'Error': str(e)
+              })
+
+  DBReplication:
+    Type: Custom::DBInstanceBackupsReplication
+    Properties:
+      ServiceToken: !GetAtt ReplicationLambdaFunction.Arn
       SourceDbInstanceArn: !Ref SourceDbInstanceArn
       BackupRetentionPeriod: !Ref BackupRetentionPeriod
-      KmsKeyId: !If [HasKmsKey, !Ref KmsKeyId, !Ref 'AWS::NoValue']
+      KmsKeyId: !If [HasKmsKey, !Ref KmsKeyId, '']
 
 Outputs:
 
@@ -124,5 +229,6 @@ Outputs:
     Description: How to use replicated backups at failover
     Value: !Sub |
       At failover, restore using PITR in ${AWS::Region}.
-      Use aws rds restore-db-instance-to-point-in-time with --source-db-instance-automated-backups-arn
-      or provide the replicated snapshot ARN to the pesonet20 stack SnapshotIdentifier parameter.
+      Use aws rds restore-db-instance-to-point-in-time
+      with --source-db-instance-automated-backups-arn
+      or provide the snapshot ARN to the pesonet20 SnapshotIdentifier parameter.
