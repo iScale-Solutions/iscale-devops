@@ -191,10 +191,18 @@ Resources:
                 logger.info(f'Replication restarted from {source_arn}')
 
               elif request_type == 'Delete':
-                rds.stop_db_instance_automated_backups_replication(
-                  SourceDbInstanceArn=source_arn
-                )
-                logger.info(f'Replication stopped from {source_arn}')
+                try:
+                  rds.stop_db_instance_automated_backups_replication(
+                    SourceDbInstanceArn=source_arn
+                  )
+                  logger.info(f'Replication stopped from {source_arn}')
+                except rds.exceptions.DBInstanceAutomatedBackupNotFoundFault:
+                  # Replication was never started (e.g. CREATE failed before API call)
+                  # Safe to ignore — nothing to stop
+                  logger.warning(f'No active replication found for {source_arn} — skipping stop')
+                except Exception as e:
+                  # Log but do not fail DELETE — always allow stack cleanup
+                  logger.warning(f'Could not stop replication: {str(e)} — continuing delete')
 
               cfnresponse.send(event, context, cfnresponse.SUCCESS, {
                 'SourceDbInstanceArn': source_arn,
@@ -203,9 +211,14 @@ Resources:
 
             except Exception as e:
               logger.exception('Error managing replication')
-              cfnresponse.send(event, context, cfnresponse.FAILED, {
-                'Error': str(e)
-              })
+              # On Delete, always succeed to allow stack cleanup
+              if request_type == 'Delete':
+                logger.warning('Returning SUCCESS on Delete despite error to allow stack cleanup')
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              else:
+                cfnresponse.send(event, context, cfnresponse.FAILED, {
+                  'Error': str(e)
+                })
 
   DBReplication:
     Type: Custom::DBInstanceBackupsReplication
