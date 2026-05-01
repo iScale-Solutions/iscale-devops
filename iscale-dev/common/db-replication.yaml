@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  Enables RDS cross-region automated backup replication for a source DB instance.
+  Deploy this stack in the DESTINATION (DR) region, pointing to the source DB instance ARN
+  in the live region. Replicates daily snapshots + continuous transaction logs, enabling
+  PITR (Point-in-Time Recovery) with ~5 minute RPO in the DR region.
+  This stack is intentionally minimal — it only provisions the replication configuration.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Replication Configuration
+        Parameters:
+          - SourceDbInstanceArn
+          - BackupRetentionPeriod
+          - KmsKeyId
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      SourceDbInstanceArn:
+        default: Source DB Instance ARN (live region)
+      BackupRetentionPeriod:
+        default: Backup Retention Period in DR region (days)
+      KmsKeyId:
+        default: KMS Key ID for encrypted backup replication (optional)
+
+Parameters:
+  Name:
+    Description: Unique name/identifier matching the source app stack name
+    Type: String
+    MinLength: 3
+    MaxLength: 12
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+  EnvName:
+    Description: The name of the environment (DR region environment name)
+    Type: String
+    Default: ProductionDR
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+      - PreProd
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+  SourceDbInstanceArn:
+    Description: |
+      ARN of the source RDS DB instance in the live region.
+      Format: arn:aws:rds:<live-region>:<account-id>:db:<db-instance-identifier>
+      Obtain from the live region DBStack output: DBInstanceARN
+    Type: String
+    AllowedPattern: '^arn:aws:rds:[a-z0-9-]+:[0-9]+:db:[a-z0-9-]+$'
+    ConstraintDescription: Must be a valid RDS DB instance ARN
+  BackupRetentionPeriod:
+    Description: Number of days to retain replicated backups in the DR region (1-35)
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+  KmsKeyId:
+    Description: |
+      (Optional) KMS Key ARN or ID in the DR region for encrypting replicated backups.
+      Required only if the source DB is encrypted with a customer-managed KMS key.
+      Leave blank to use the default AWS-managed key.
+    Type: String
+    Default: ''
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyId, '']]
+
+Resources:
+
+  # Enables cross-region automated backup replication.
+  # Must be deployed in the DESTINATION (DR) region.
+  # Replicates: daily snapshot + continuous transaction logs.
+  # Enables PITR with ~5 minute RPO in the DR region.
+  DBInstanceAutomatedBackupsReplication:
+    Type: AWS::RDS::DBInstanceAutomatedBackupsReplication
+    Properties:
+      SourceDbInstanceArn: !Ref SourceDbInstanceArn
+      BackupRetentionPeriod: !Ref BackupRetentionPeriod
+      KmsKeyId: !If [HasKmsKey, !Ref KmsKeyId, !Ref 'AWS::NoValue']
+
+Outputs:
+
+  SourceDbInstanceArn:
+    Description: ARN of the source DB instance being replicated
+    Value: !Ref SourceDbInstanceArn
+
+  BackupRetentionPeriod:
+    Description: Retention period for replicated backups in DR region
+    Value: !Ref BackupRetentionPeriod
+
+  ReplicationNote:
+    Description: How to use replicated backups at failover
+    Value: !Sub |
+      At failover, restore using PITR in ${AWS::Region}.
+      Use aws rds restore-db-instance-to-point-in-time with --source-db-instance-automated-backups-arn
+      or provide the replicated snapshot ARN to the pesonet20 stack SnapshotIdentifier parameter.

@@ -38,6 +38,12 @@ Metadata:
           - DeployPaidResources
           - SnapshotIdentifier
           - DBMasterUserPassword
+      - Label:
+          default: DR / Cross-Region Backup Replication
+        Parameters:
+          - EnableCrossRegionBackupReplication
+          - SourceDbInstanceArn
+          - BackupReplicationRetentionPeriod
 
     ParameterLabels:
       Name:
@@ -72,6 +78,12 @@ Metadata:
         default: DB Snapshot Identifier (DR failover restore — leave blank for normal)
       DBMasterUserPassword:
         default: DB Master Password (DR failover only — leave blank for normal)
+      EnableCrossRegionBackupReplication:
+        default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
+      SourceDbInstanceArn:
+        default: Source DB Instance ARN (live region — required when replication is enabled)
+      BackupReplicationRetentionPeriod:
+        default: Backup Retention Period in DR region (days)
 
 Parameters:
   Name:
@@ -173,6 +185,31 @@ Parameters:
     Type: String
     Default: ''
     NoEcho: true
+  EnableCrossRegionBackupReplication:
+    Description: |
+      Set to true to enable cross-region automated backup replication for the DB.
+      Deploy with this enabled in the DR region stack, pointing SourceDbInstanceArn to the live DB.
+      Replicates daily snapshots + transaction logs — enables PITR with ~5 minute RPO in the DR region.
+      Default false — existing deployments are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  SourceDbInstanceArn:
+    Description: |
+      ARN of the live region RDS DB instance to replicate from.
+      Required when EnableCrossRegionBackupReplication=true.
+      Format: arn:aws:rds:<live-region>:<account-id>:db:<db-identifier>
+      Obtain from the live stack DBStack output: DBInstanceARN.
+    Type: String
+    Default: ''
+  BackupReplicationRetentionPeriod:
+    Description: Number of days to retain replicated backups in the DR region (1-35)
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
 
 Mappings:
   Fn::Transform:
@@ -198,6 +235,7 @@ Conditions:
   # TO ACTIVATE FAILOVER: update the stack with DeployPaidResources=true and provide
   # SnapshotIdentifier (cross-region snapshot ARN) and DBMasterUserPassword to restore the DB.
   IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
   IsNotProdAndDeployPaidResources: !And
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
@@ -262,6 +300,22 @@ Resources:
           Fn::GetAtt:
             - DBStack
             - Outputs.DBInstanceName
+
+  # Cross-region backup replication — independent from DBStack.
+  # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
+  # Deploy in the DR region stack pointing to the live region DB ARN.
+  # Provides ~5 minute RPO via PITR without running a permanent read replica.
+  DBReplicationStack:
+    Condition: IsEnableCrossRegionBackupReplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-replication.yaml
+      Parameters:
+        Name: !Ref Name
+        OrgName: !Ref OrgName
+        EnvName: !Ref EnvName
+        SourceDbInstanceArn: !Ref SourceDbInstanceArn
+        BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
 
   AllowJumpHostIntoDB:
     Condition: IsDeployPaidResources
