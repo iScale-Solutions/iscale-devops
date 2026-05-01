@@ -32,6 +32,12 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
+      - Label:
+          default: DR / Failover Configuration
+        Parameters:
+          - DeployPaidResources
+          - SnapshotIdentifier
+          - DBMasterUserPassword
 
     ParameterLabels:
       Name:
@@ -60,6 +66,12 @@ Metadata:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      SnapshotIdentifier:
+        default: DB Snapshot Identifier (DR failover restore — leave blank for normal)
+      DBMasterUserPassword:
+        default: DB Master Password (DR failover only — leave blank for normal)
 
 Parameters:
   Name:
@@ -136,6 +148,31 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
+  DeployPaidResources:
+    Description: |
+      true (default): Deploy all paid resources — DB, Cache, LBs, and App Servers. Normal operation for all environments.
+      false: DR standby mode — suppress all paid resources to minimize idle cost. Only CodeDeploy infra stays alive.
+      DR failover: set back to true and provide SnapshotIdentifier to restore DB from the cross-region backup.
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  SnapshotIdentifier:
+    Description: |
+      (DR Failover only) ARN of the RDS snapshot to restore the database from.
+      Obtain by copying the latest automated backup from the live region into the DR region before failover.
+      Leave blank for normal fresh DB creation — existing deployments are unaffected.
+    Type: String
+    Default: ''
+  DBMasterUserPassword:
+    Description: |
+      (DR Failover only) Master user password of the source database.
+      Provide this during snapshot restore so the Secrets Manager secret stays in sync with the restored DB credentials.
+      Leave blank for auto-generated password — existing deployments are unaffected.
+    Type: String
+    Default: ''
+    NoEcho: true
 
 Mappings:
   Fn::Transform:
@@ -156,12 +193,11 @@ Conditions:
   IsProdOrProductionDR: !Or
     - Condition: IsProd
     - !Equals [!Ref EnvName, ProductionDR]
-  # IsDeployPaidResources is automatically false for DR environments.
-  # DR standby: DB, Cache, App Servers, and LBs are all suppressed to minimize idle cost.
-  # TO ACTIVATE FAILOVER: Update the stack EnvName from *DR to its non-DR equivalent
-  # (e.g., ProductionDR → Production). CloudFormation will then create all suppressed
-  # resources. Alternatively, this stack can be redeployed fresh from a DB snapshot.
-  IsDeployPaidResources: !Not [Condition: IsDR]
+  # IsDeployPaidResources is driven by the explicit DeployPaidResources parameter (default true).
+  # DR standby: set DeployPaidResources=false to suppress DB, Cache, LBs, and App Servers.
+  # TO ACTIVATE FAILOVER: update the stack with DeployPaidResources=true and provide
+  # SnapshotIdentifier (cross-region snapshot ARN) and DBMasterUserPassword to restore the DB.
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
   IsNotProdAndDeployPaidResources: !And
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
@@ -202,6 +238,8 @@ Resources:
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
         StorageType: gp3 # more IOPS
+        SnapshotIdentifier: !Ref SnapshotIdentifier
+        MasterUserPassword: !Ref DBMasterUserPassword
 
   DBSchedulerStack:
     DependsOn:
@@ -348,7 +386,7 @@ Resources:
         InstancePort: 80
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        DeployPaidResources: !If [IsDR, 'false', 'true']
+        DeployPaidResources: !Ref DeployPaidResources
 
   TreasuryDeployStack:
     Type: AWS::CloudFormation::Stack
@@ -463,7 +501,7 @@ Resources:
         InstancePort: 443
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        DeployPaidResources: !If [IsDR, 'false', 'true']
+        DeployPaidResources: !Ref DeployPaidResources
 
   APIServerDeployStack:
     Type: AWS::CloudFormation::Stack
@@ -601,7 +639,7 @@ Resources:
         InstancePort: 443
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        DeployPaidResources: !If [IsDR, 'false', 'true']
+        DeployPaidResources: !Ref DeployPaidResources
 
   SidekiqServerDeployStack:
     Type: AWS::CloudFormation::Stack
@@ -724,7 +762,7 @@ Resources:
         InstancePort: 80
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        DeployPaidResources: !If [IsDR, 'false', 'true']
+        DeployPaidResources: !Ref DeployPaidResources
 
   CustomerServiceDeployStack:
     Type: AWS::CloudFormation::Stack
