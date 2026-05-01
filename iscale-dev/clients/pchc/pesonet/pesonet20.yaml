@@ -201,6 +201,9 @@ Conditions:
   IsNotProdAndDeployPaidResources: !And
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
+  IsProdOrProductionDRAndDeployPaidResources: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResources
   IsDashboardDeployed: !And
     - Condition: IsProdOrProductionDR
     - Condition: IsDeployPaidResources
@@ -401,9 +404,7 @@ Resources:
 
   TreasuryServerStack:
     DependsOn:
-      - DBStack
       - TreasuryDeployStack
-    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -412,55 +413,53 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ASGMaxSize: 3
-        ASGDesiredSize: 3
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
+        ASGDesiredSize: !If [IsDR, 0, 3]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 80
-        #InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
         InstanceSubnet: Private
         InstanceType: t3.large
-        LoadBalancerHostName: pesonet20 #!If [IsTest, pesonet20-test, pesonet20]
+        LoadBalancerHostName: pesonet20
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref TreasuryELBStack]]
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
-        VolumeSize: 10 #GB 
+        VolumeSize: 10 #GB
         VolumeType: gp2
         LaunchTemplate: True
 
   TreasurySchedulerStack:
     DependsOn:
-      - DBStack
       - TreasuryServerStack
     Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
@@ -516,9 +515,8 @@ Resources:
 
   APIServerStack:
     DependsOn:
-      - DBStack
       - APIServerDeployStack
-    Condition: IsDeployPaidResources
+      - TreasuryServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -527,63 +525,57 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ASGMaxSize: 3
-        ASGDesiredSize: 3
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
+        ASGDesiredSize: !If [IsDR, 0, 3]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
         ExternalEFSID:
-          Fn::GetAtt:
-            - TreasuryServerStack
-            - Outputs.AppServerEFS
+          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFS]
         ExternalEFSSecurityGroup:
-          Fn::GetAtt:
-            - TreasuryServerStack
-            - Outputs.AppServerEFSSecurityGroup
+          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFSSecurityGroup]
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 443
-        #InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
         InstanceSubnet: Private
         InstanceType: t3.large
-        LoadBalancerHostName: api-pesonet20 #!If [IsTest, 'api-pesonet20-test', api-pesonet20]
+        LoadBalancerHostName: api-pesonet20
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkAPIELBStack]]
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
-        VolumeSize: 10 #GB 
+        VolumeSize: 10 #GB
         VolumeType: gp2
         LaunchTemplate: True
 
   AllowHTTPtoPesonetAPIAppServer:
-    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow HTTP
@@ -598,7 +590,6 @@ Resources:
 
   APIServerSchedulerStack:
     DependsOn:
-      - DBStack
       - APIServerStack
     Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
@@ -654,9 +645,8 @@ Resources:
 
   SidekiqServerStack:
     DependsOn:
-      - DBStack
       - SidekiqServerDeployStack
-    Condition: IsDeployPaidResources
+      - TreasuryServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -665,64 +655,58 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ASGMaxSize: 1
-        ASGDesiredSize: 1
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
+        ASGDesiredSize: !If [IsDR, 0, 1]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
         ExternalEFSID:
-          Fn::GetAtt:
-            - TreasuryServerStack
-            - Outputs.AppServerEFS
+          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFS]
         ExternalEFSSecurityGroup:
-          Fn::GetAtt:
-            - TreasuryServerStack
-            - Outputs.AppServerEFSSecurityGroup
+          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFSSecurityGroup]
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 443
-        #InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
         InstanceSubnet: Private
         InstanceType: !If [IsProd, t3.2xlarge, t3.medium]
         LoadBalancerHostName: !If [IsTest, pesonet20-skiq, 'AWS::NoValue']
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref NetworkSidekiqELBStack]]
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
-        VolumeSize: 10 #GB 
+        VolumeSize: 10 #GB
         VolumeType: gp2
         LaunchTemplate: True
 
   SidekiqServerSchedulerStack:
     DependsOn:
-      - DBStack
       - SidekiqServerStack
     Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
@@ -777,9 +761,7 @@ Resources:
 
   CustomerServiceServerStack:
     DependsOn:
-      - DBStack
       - CustomerServiceDeployStack
-    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -788,55 +770,53 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ASGMaxSize: 3
-        ASGDesiredSize: 3
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
+        ASGDesiredSize: !If [IsDR, 0, 3]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 80
-        #InstanceSpotPrice: !If [IsProd, !Ref 'AWS::NoValue', 1]
         InstanceSubnet: Private
         InstanceType: t3.large
-        LoadBalancerHostName: pesonet20-cs #!If [IsTest, pesonet20-test, pesonet20]
+        LoadBalancerHostName: pesonet20-cs
         LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref CustomerServiceELBStack]]
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
-        VolumeSize: 10 #GB 
+        VolumeSize: 10 #GB
         VolumeType: gp2
         LaunchTemplate: True
 
   CustomerServiceSchedulerStack:
     DependsOn:
-      - DBStack
       - CustomerServiceServerStack
     Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
@@ -862,7 +842,7 @@ Resources:
     DependsOn:
       - DBStack
       - TreasuryServerStack
-    Condition: IsProdOrProductionDR
+    Condition: IsProdOrProductionDRAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
