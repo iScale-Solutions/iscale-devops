@@ -156,7 +156,15 @@ Conditions:
   IsProdOrProductionDR: !Or
     - Condition: IsProd
     - !Equals [!Ref EnvName, ProductionDR]
+  # IsDeployPaidResources is automatically false for DR environments.
+  # DR standby: DB, Cache, App Servers, and LBs are all suppressed to minimize idle cost.
+  # TO ACTIVATE FAILOVER: Update the stack EnvName from *DR to its non-DR equivalent
+  # (e.g., ProductionDR → Production). CloudFormation will then create all suppressed
+  # resources. Alternatively, this stack can be redeployed fresh from a DB snapshot.
   IsDeployPaidResources: !Not [Condition: IsDR]
+  IsNotProdAndDeployPaidResources: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
   IsDashboardDeployed: !And
     - Condition: IsProdOrProductionDR
     - Condition: IsDeployPaidResources
@@ -170,6 +178,8 @@ Resources:
 # Database
 
   DBStack:
+    # Set IsDeployPaidResources=false (i.e. DR env) to suppress. See conditions for failover instructions.
+    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -196,7 +206,7 @@ Resources:
   DBSchedulerStack:
     DependsOn:
       - DBStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -213,6 +223,7 @@ Resources:
             - Outputs.DBInstanceName
 
   AllowJumpHostIntoDB:
+    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from jump host
@@ -234,6 +245,8 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   CacheStack:
+    # Set IsDeployPaidResources=false (i.e. DR env) to suppress. See conditions for failover instructions.
+    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
@@ -352,6 +365,7 @@ Resources:
     DependsOn:
       - DBStack
       - TreasuryDeployStack
+    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -410,7 +424,7 @@ Resources:
     DependsOn:
       - DBStack
       - TreasuryServerStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -466,6 +480,7 @@ Resources:
     DependsOn:
       - DBStack
       - APIServerDeployStack
+    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -530,6 +545,7 @@ Resources:
         LaunchTemplate: True
 
   AllowHTTPtoPesonetAPIAppServer:
+    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow HTTP
@@ -546,7 +562,7 @@ Resources:
     DependsOn:
       - DBStack
       - APIServerStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -602,6 +618,7 @@ Resources:
     DependsOn:
       - DBStack
       - SidekiqServerDeployStack
+    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -669,7 +686,7 @@ Resources:
     DependsOn:
       - DBStack
       - SidekiqServerStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -724,6 +741,7 @@ Resources:
     DependsOn:
       - DBStack
       - CustomerServiceDeployStack
+    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -782,7 +800,7 @@ Resources:
     DependsOn:
       - DBStack
       - CustomerServiceServerStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
