@@ -301,6 +301,33 @@ Resources:
             - DBStack
             - Outputs.DBInstanceName
 
+  # Pre-deployed DB subnet group for PITR restore in DR standby.
+  # Uses -dr suffix to avoid naming conflict with DBStack's own subnet group at failover.
+  # Always deployed — free resource, required for manual snapshot restore during DR testing/failover.
+  DBStandbySubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      DBSubnetGroupName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+
+  # Pre-deployed DB security group for PITR restore in DR standby.
+  # App server stacks can add ingress rules to this SG at restore time.
+  DBStandbySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+
   # Cross-region backup replication — independent from DBStack.
   # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
   # Deploy in the DR region stack pointing to the live region DB ARN.
@@ -1068,11 +1095,23 @@ Resources:
             APP_SERVER_TYPE: t3.medium
             EFS_ID: !GetAtt [APIServerStack, Outputs.AppServerEFS]
 
-# Outputs:
+Outputs:
 
-#   DeploymentUserGroup:
-#     Description: Add the BitBucket user into this group
-#     Value:
+  DBStandbySubnetGroup:
+    Description: Pre-deployed DB subnet group for PITR restore — use in restore-db-instance-from-db-snapshot command
+    Value: !Ref DBStandbySubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySubnetGroup'
+
+  DBStandbySecurityGroup:
+    Description: Pre-deployed DB security group for PITR restore — use in restore-db-instance-from-db-snapshot command
+    Value: !GetAtt DBStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySecurityGroupId'
+
+# DeploymentUserGroup:
+#   Description: Add the BitBucket user into this group
+#   Value:
 #       Fn::GetAtt:
 #         - AppServerDeployStack
 #         - Outputs.DeploymentUserGroup
