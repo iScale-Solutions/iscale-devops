@@ -102,8 +102,14 @@ Parameters:
     Type: String
     Default: iscale-dev-dev-uw2-sns
     MinLength: 1
+  DRRegion:
+    Description: |
+      DR region to copy the AMI to after every build (e.g. us-west-2, us-east-1, ap-southeast-1).
+      Leave blank to disable cross-region distribution.
+    Type: String
+    Default: ''
 
-Mappings: 
+Mappings:
   Fn::Transform:
     Name: AWS::Include
     Parameters:
@@ -117,6 +123,7 @@ Conditions:
   IsShareImage: !Equals [!Ref ShareImage, true]
   IsArmBased: !Equals [!Ref ArmBased, true]
   UseCustomInstanceType: !Not [!Equals [!Ref InstanceTypeName, '']]
+  HasDRRegion: !Not [!Equals [!Ref DRRegion, '']]
 
 Resources:
 
@@ -255,9 +262,7 @@ Resources:
       Distributions:
         - Region: !Ref 'AWS::Region'
           AmiDistributionConfiguration:
-            # Name: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
             Name: !Join ['_', [!Ref OrgName, !Ref Name, base-image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
-            # Description: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
             Description: !Join [' ', [!Ref OrgName, !Ref Name, base image, '{{ imagebuilder:buildDate }}']]
             AmiTags:
               Name: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
@@ -269,6 +274,34 @@ Resources:
       Tags:
         Name: !Ref Name
 
+  ImageDistributionConfigurationWithDR:
+    Condition: HasDRRegion
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !Ref Name, dr]]
+      Description: !Join [' ', ['Distribution for', !Ref OrgName, !Ref Name, 'with DR copy to', !Ref DRRegion]]
+      Distributions:
+        - Region: !Ref 'AWS::Region'
+          AmiDistributionConfiguration:
+            Name: !Join ['_', [!Ref OrgName, !Ref Name, base-image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
+            Description: !Join [' ', [!Ref OrgName, !Ref Name, base image, '{{ imagebuilder:buildDate }}']]
+            AmiTags:
+              Name: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
+              Environment: !Ref EnvName
+            LaunchPermissionConfiguration: !If
+              - IsShareImage
+              - UserIds: !Ref ShareAccountList
+              - !Ref 'AWS::NoValue'
+        - Region: !Ref DRRegion
+          AmiDistributionConfiguration:
+            Name: !Join ['_', [!Ref OrgName, !Ref Name, dr-image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
+            Description: !Join [' ', [!Ref OrgName, !Ref Name, DR image, '{{ imagebuilder:buildDate }}']]
+            AmiTags:
+              Name: !Join [' ', [!Ref OrgName, !Ref Name, dr image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
+              Environment: !Ref EnvName
+      Tags:
+        Name: !Ref Name
+
   ImagePipeline:
     Type: AWS::ImageBuilder::ImagePipeline
     Properties:
@@ -276,7 +309,10 @@ Resources:
       Description: !Join [' ', [!Ref OrgName, !Ref Name, 'Pipeline']]
       ImageRecipeArn: !Ref ImageRecipeARN
       InfrastructureConfigurationArn: !Ref ImageInfrastructureConfig
-      DistributionConfigurationArn: !Ref ImageDistributionConfiguration
+      DistributionConfigurationArn: !If
+        - HasDRRegion
+        - !Ref ImageDistributionConfigurationWithDR
+        - !Ref ImageDistributionConfiguration
       ImageTestsConfiguration:
         ImageTestsEnabled: true
         TimeoutMinutes: 60
