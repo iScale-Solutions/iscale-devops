@@ -22,6 +22,14 @@ Metadata:
         Parameters:
           - NetworkStackName
           - SNSStackName
+      - Label:
+          default: DR Configuration
+        Parameters:
+          - DRRegion
+      - Label:
+          default: AMI Retention
+        Parameters:
+          - RetainAmiCount
 
     ParameterLabels:
       Name:
@@ -44,6 +52,10 @@ Metadata:
         default: Comma Delimited List of account Ids to share image to
       SNSStackName:
         default: SNS Topic Stack Name
+      DRRegion:
+        default: DR Region (leave blank to disable cross-region AMI distribution)
+      RetainAmiCount:
+        default: Number of AMI versions to retain (older versions are deleted)
 
 Parameters:
   Name:
@@ -108,6 +120,14 @@ Parameters:
       Leave blank to disable cross-region distribution.
     Type: String
     Default: ''
+  RetainAmiCount:
+    Description: |
+      Number of most recent AMI versions to keep. Older versions are automatically deleted
+      from all distribution regions. Must be between 1 and 100.
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 100
 
 Mappings:
   Fn::Transform:
@@ -317,3 +337,50 @@ Resources:
         ImageTestsEnabled: true
         TimeoutMinutes: 60
       Status: ENABLED
+
+  ImageLifecyclePolicyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: imagebuilder.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ImageLifecyclePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeImages
+                  - ec2:DeregisterImage
+                  - ec2:DeleteSnapshot
+                  - ec2:CreateTags
+                  - imagebuilder:GetImage
+                  - imagebuilder:DeleteImage
+                  - imagebuilder:ListImageBuildVersions
+                Resource: '*'
+
+  ImageLifecyclePolicy:
+    Type: AWS::ImageBuilder::LifecyclePolicy
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !Ref Name, retain, !Ref RetainAmiCount]]
+      Description: !Sub 'Keep the ${RetainAmiCount} most recent AMIs — delete older versions across all regions'
+      Status: ENABLED
+      ExecutionRole: !GetAtt ImageLifecyclePolicyRole.Arn
+      ResourceType: AMI_IMAGE
+      ResourceSelection:
+        TagMap:
+          Name: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
+      PolicyDetails:
+        - Action:
+            Type: DELETE
+            IncludeResources:
+              Amis: true
+              Snapshots: true
+          Filter:
+            Type: COUNT
+            Value: !Ref RetainAmiCount
