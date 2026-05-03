@@ -5,6 +5,8 @@ Description: |
     - FailoverRequest  → sets DeployPaidResources=true  (network first, then app)
     - FailbackRequest  → sets DeployPaidResources=false (app first, then network)
   Failback requires confirm_failback=true in the event detail as a safety pin.
+  At failover, auto-discovers the latest DR AMI replicated by EC2 Image Builder
+  (pattern: {OrgName}_{AppName}_dr-image_*) and the latest RDS snapshot.
   Lambda is non-blocking — fires CloudFormation update_stack calls and returns immediately.
   CloudFormation handles the actual provisioning asynchronously (DB restore: 20-60 min).
 
@@ -14,6 +16,7 @@ Metadata:
       - Label:
           default: "1. App Identity"
         Parameters:
+          - OrgName
           - AppName
           - SourceRegion
       - Label:
@@ -28,6 +31,8 @@ Metadata:
           - DBInstanceIdentifier
 
     ParameterLabels:
+      OrgName:
+        default: Organization Name
       AppName:
         default: Application Name
       SourceRegion:
@@ -42,6 +47,17 @@ Metadata:
         default: DB Instance Identifier (DR region — for snapshot auto-discovery)
 
 Parameters:
+
+  OrgName:
+    Description: |
+      Organization name prefix used to build the DR AMI search pattern.
+      Must match the OrgName used in the EC2 Image Builder stack.
+      DR AMIs are discovered by the pattern: {OrgName}_{AppName}_dr-image_*
+      Example: pchc_pesonet20_dr-image_2025.11.2414480_2026-05-02T16-52-46.639Z
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+    ConstraintDescription: Lowercase letters, numbers, and hyphens only.
 
   AppName:
     Description: |
@@ -140,6 +156,11 @@ Resources:
                   - rds:DescribeDBSnapshots
                   - rds:DescribeDBInstances
                 Resource: '*'
+              - Sid: EC2AMIDiscovery
+                Effect: Allow
+                Action:
+                  - ec2:DescribeImages
+                Resource: '*'
               - Sid: SNSPublish
                 Effect: Allow
                 Action: sns:Publish
@@ -165,6 +186,7 @@ Resources:
       Timeout: 60
       Environment:
         Variables:
+          ORG_NAME: !Ref OrgName
           APP_NAME: !Ref AppName
           NETWORK_STACK_NAME: !Ref NetworkStackName
           APP_STACK_NAME: !Ref AppStackName
@@ -260,12 +282,20 @@ Resources:
             db_instance_id = payload.get('db_instance_identifier', os.environ.get('DB_INSTANCE_IDENTIFIER', ''))
             snapshot_identifier = payload.get('snapshot_identifier', '')
             db_master_password = payload.get('db_master_password', '')
+            org_name = os.environ.get('ORG_NAME', '')
 
             # Auto-discover latest snapshot if not provided
             if not snapshot_identifier and db_instance_id:
               logger.info(f'Auto-discovering latest snapshot for: {db_instance_id}')
               snapshot_identifier = find_latest_snapshot(region, db_instance_id)
               logger.info(f'Using snapshot: {snapshot_identifier}')
+
+            # Auto-discover latest DR AMI replicated by EC2 Image Builder
+            instance_ami = ''
+            if org_name:
+              logger.info(f'Auto-discovering latest DR AMI: {org_name}_{app_name}_dr-image_*')
+              instance_ami = find_latest_ami(region, org_name, app_name)
+              logger.info(f'Using AMI: {instance_ami}')
 
             # Step 1: Network stack — activate NAT Gateways, Jump Host, VPC Endpoints
             logger.info(f'[FAILOVER 1/2] Updating network stack: {network_stack}')
@@ -276,7 +306,8 @@ Resources:
             logger.info(f'[FAILOVER 2/2] Updating app stack: {app_stack}')
             update_stack(cf, app_stack, deploy_paid='true', extra_params={
               'SnapshotIdentifier': snapshot_identifier,
-              'DBMasterUserPassword': db_master_password
+              'DBMasterUserPassword': db_master_password,
+              'InstanceAMI': instance_ami
             })
             logger.info(f'[FAILOVER 2/2] App stack update initiated.')
 
@@ -284,7 +315,8 @@ Resources:
               f'DR failover initiated for [{app_name}].\n'
               f'Network stack : {network_stack}\n'
               f'App stack     : {app_stack}\n'
-              f'Snapshot      : {snapshot_identifier or "(none — fresh DB)"}\n\n'
+              f'Snapshot      : {snapshot_identifier or "(none — fresh DB)"}\n'
+              f'AMI           : {instance_ami or "(UsePreviousValue)"}\n\n'
               f'CloudFormation is now provisioning resources. '
               f'DB restore from snapshot takes 20-60 minutes. '
               f'You will receive a separate notification when stacks complete.'
@@ -360,6 +392,36 @@ Resources:
               f'Ensure cross-region snapshot replication is enabled on the primary RDS instance, '
               f'or provide snapshot_identifier explicitly in the event payload.'
             )
+
+
+          def find_latest_ami(region, org_name, app_name):
+            """
+            Auto-discovers the latest available DR AMI in this region.
+            AMIs are matched by the EC2 Image Builder DR naming pattern:
+              {OrgName}_{AppName}_dr-image_{RecipeVersion}_{buildDate}
+            The most recently created available AMI is returned.
+            """
+            ec2 = boto3.client('ec2', region_name=region)
+            response = ec2.describe_images(
+              Owners=['self'],
+              Filters=[
+                {'Name': 'name', 'Values': [f'{org_name}_{app_name}_dr-image_*']},
+                {'Name': 'state', 'Values': ['available']}
+              ]
+            )
+            images = response.get('Images', [])
+            if not images:
+              raise Exception(
+                f'No available DR AMIs found matching: {org_name}_{app_name}_dr-image_*. '
+                f'Ensure EC2 Image Builder has replicated at least one AMI to this region.'
+              )
+            images.sort(key=lambda x: x['CreationDate'], reverse=True)
+            latest = images[0]
+            logger.info(
+              f'Found DR AMI: {latest["ImageId"]} ({latest["Name"]}) '
+              f'created at {latest["CreationDate"]}'
+            )
+            return latest['ImageId']
 
 
           def get_current_parameters(cf, stack_name):
