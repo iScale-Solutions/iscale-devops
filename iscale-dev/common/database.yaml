@@ -338,8 +338,16 @@ Parameters:
       - io1
       - io2
       - standard
+  ExistingSecretArn:
+    Description: |
+      ARN of a pre-existing Secrets Manager secret to use instead of creating a new one.
+      Use this in DR deployments where the secret is already present (synced from the primary region).
+      When provided, the RDSSecretManager resource is not created — the existing secret is
+      referenced in all outputs. Leave blank (default) to create a new secret as usual.
+    Type: String
+    Default: ''
 
-Mappings: 
+Mappings:
   Fn::Transform:
     Name: AWS::Include
     Parameters:
@@ -387,6 +395,7 @@ Conditions:
   IsEncrypted: !Equals [!Ref StorageEncrypted, true]
   IsEnableEnhancedMonitoring: !Equals [!Ref EnableEnhancedMonitoring, true]
   IsPublicNetwork: !Equals [!Ref NetworkType, Public]
+  CreateNewSecret: !Equals [!Ref ExistingSecretArn, '']
 
 Resources:
 
@@ -472,6 +481,7 @@ Resources:
 ####
 
   RDSSecretManager:
+    Condition: CreateNewSecret
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -1007,14 +1017,14 @@ Outputs:
   DBSecretManagerExport:
     Condition: HasExports
     Description: Secrets Manager containing the DB credentials
-    Value: !Ref RDSSecretManager
+    Value: !If [CreateNewSecret, !Ref RDSSecretManager, !Ref ExistingSecretArn]
     Export:
       Name: !Sub ${AWS::StackName}-DBSecretManagerARN
 
   DBSecretManager:
     Condition: HasNoExports
     Description: Secrets Manager containing the DB credentials
-    Value: !Ref RDSSecretManager
+    Value: !If [CreateNewSecret, !Ref RDSSecretManager, !Ref ExistingSecretArn]
 
   DBSecretManagerKeyIdExport:
     Condition: HasExports
