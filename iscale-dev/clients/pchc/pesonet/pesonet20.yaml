@@ -33,15 +33,11 @@ Metadata:
           - StartScheduleExpression
           - StopScheduleExpression
       - Label:
-          default: DR / Failover Configuration
+          default: Disaster Recovery
         Parameters:
           - DeployPaidResources
           - SnapshotIdentifier
           - DBMasterUserPassword
-          - DBSecretArn
-      - Label:
-          default: DR / Cross-Region Backup Replication
-        Parameters:
           - EnableCrossRegionBackupReplication
           - SourceDbInstanceArn
           - BackupReplicationRetentionPeriod
@@ -79,8 +75,6 @@ Metadata:
         default: DB Snapshot Identifier (DR failover restore — leave blank for normal)
       DBMasterUserPassword:
         default: DB Master Password (DR failover only — leave blank for normal)
-      DBSecretArn:
-        default: Existing DB Secret ARN (DR only — leave blank for non-DR deployments)
       EnableCrossRegionBackupReplication:
         default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
       SourceDbInstanceArn:
@@ -180,14 +174,6 @@ Parameters:
       Leave blank for normal fresh DB creation — existing deployments are unaffected.
     Type: String
     Default: ''
-  DBSecretArn:
-    Description: |
-      (DR only) ARN of a pre-existing Secrets Manager secret to use for DB credentials.
-      In DR, the secret is synced from the primary region by the secrets-sync Lambda — set this
-      to that secret's ARN so the DB stack does not attempt to create a duplicate secret at failover.
-      Leave blank for all non-DR deployments — a new secret is created automatically.
-    Type: String
-    Default: ''
   DBMasterUserPassword:
     Description: |
       (DR Failover only) Master user password of the source database.
@@ -247,6 +233,9 @@ Conditions:
   # SnapshotIdentifier (cross-region snapshot ARN) and DBMasterUserPassword to restore the DB.
   IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
   IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
+  IsDRAndEnableCrossRegionBackupReplication: !And
+    - Condition: IsDR
+    - Condition: IsEnableCrossRegionBackupReplication
   IsNotProdAndDeployPaidResources: !And
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
@@ -292,7 +281,7 @@ Resources:
         StorageType: gp3 # more IOPS
         SnapshotIdentifier: !Ref SnapshotIdentifier
         MasterUserPassword: !Ref DBMasterUserPassword
-        ExistingSecretArn: !Ref DBSecretArn
+        ExistingSecretArn: !If [IsDR, !Ref DRDBSecret, '']
 
   DBSchedulerStack:
     DependsOn:
@@ -313,9 +302,44 @@ Resources:
             - DBStack
             - Outputs.DBInstanceName
 
+####
+# Disaster Recovery
+# All resources below are deployed ONLY when EnvName is a DR variant (ProductionDR, StagingDR, etc.).
+# These resources are always-on in the DR region at zero/minimal cost.
+# They pre-provision the infrastructure needed to activate the environment at failover time.
+####
+
+  # Placeholder Secrets Manager secret for DB credentials in the DR region.
+  # Created at DR stack deploy time with placeholder values.
+  # The secrets-sync Lambda overwrites the values whenever the live region secret rotates,
+  # ensuring correct credentials are available before failover is triggered.
+  # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
+  # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
+  DRDBSecret:
+    Condition: IsDR
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: !Sub 'DR placeholder secret for ${OrgName} ${Name} — values synced from the live region secret by the secrets-sync Lambda before failover.'
+      SecretString: !Sub |
+        {
+          "DB_ROOT_USER": "root",
+          "DB_ROOT_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "DB_NAME": "${Name}db",
+          "DB_USER": "${Name}",
+          "DB_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "MAGENTO_ADMIN_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE"
+        }
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
   # Pre-deployed DB subnet group for PITR restore in DR standby.
   # Uses -dr suffix to avoid naming conflict with DBStack's own subnet group at failover.
-  # Gated to DR environments only — no purpose in the live region.
   DBStandbySubnetGroup:
     Condition: IsDR
     Type: AWS::RDS::DBSubnetGroup
@@ -342,12 +366,11 @@ Resources:
         - Key: Name
           Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
 
-  # Cross-region backup replication — independent from DBStack.
+  # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
   # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
-  # Deploy in the DR region stack pointing to the live region DB ARN.
-  # Provides ~5 minute RPO via PITR without running a permanent read replica.
+  # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
   DBReplicationStack:
-    Condition: IsEnableCrossRegionBackupReplication
+    Condition: IsDRAndEnableCrossRegionBackupReplication
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-replication.yaml
@@ -1110,6 +1133,13 @@ Resources:
             EFS_ID: !GetAtt [APIServerStack, Outputs.AppServerEFS]
 
 Outputs:
+
+  DRDBSecretArn:
+    Condition: IsDR
+    Description: ARN of the DR Secrets Manager secret — set this in the secrets-sync Lambda so it keeps values current from the live region
+    Value: !Ref DRDBSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-DRDBSecretArn'
 
   DBStandbySubnetGroup:
     Condition: IsDR
