@@ -29,6 +29,7 @@ Metadata:
           default: "3. DR Database Configuration"
         Parameters:
           - DBInstanceIdentifier
+          - DRDBSecretArn
 
     ParameterLabels:
       OrgName:
@@ -45,6 +46,8 @@ Metadata:
         default: SNS Stack Name
       DBInstanceIdentifier:
         default: DB Instance Identifier (DR region — for snapshot auto-discovery)
+      DRDBSecretArn:
+        default: DR DB Secret ARN (Secrets Manager — for auto-fetching DB master password)
 
 Parameters:
 
@@ -113,6 +116,16 @@ Parameters:
     Type: String
     Default: ''
 
+  DRDBSecretArn:
+    Description: |
+      ARN of the Secrets Manager secret in the DR region containing DB credentials.
+      Use the DRDBSecretArn output of the app CloudFormation stack (e.g. pchc-productiondr-uw2-pesonet20).
+      At failover, the Lambda reads DB_ROOT_PASSWORD from this secret automatically —
+      no need to provide db_master_password in the EventBridge event payload.
+      Leave blank to require db_master_password explicitly in the event payload.
+    Type: String
+    Default: ''
+
 Resources:
 
 ####
@@ -161,6 +174,11 @@ Resources:
                 Action:
                   - ec2:DescribeImages
                 Resource: '*'
+              - Sid: SecretsManagerRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: '*'
               - Sid: SNSPublish
                 Effect: Allow
                 Action: sns:Publish
@@ -191,6 +209,7 @@ Resources:
           NETWORK_STACK_NAME: !Ref NetworkStackName
           APP_STACK_NAME: !Ref AppStackName
           DB_INSTANCE_IDENTIFIER: !Ref DBInstanceIdentifier
+          DR_DB_SECRET_ARN: !Ref DRDBSecretArn
           SOURCE_REGION: !Ref SourceRegion
           SNS_TOPIC_ARN:
             Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
@@ -283,6 +302,13 @@ Resources:
             snapshot_identifier = payload.get('snapshot_identifier', '')
             db_master_password = payload.get('db_master_password', '')
             org_name = os.environ.get('ORG_NAME', '')
+            dr_db_secret_arn = os.environ.get('DR_DB_SECRET_ARN', '')
+
+            # Auto-fetch DB master password from DR Secrets Manager secret if not provided
+            if not db_master_password and dr_db_secret_arn:
+              logger.info(f'Auto-fetching DB master password from secret: {dr_db_secret_arn}')
+              db_master_password = fetch_db_master_password(region, dr_db_secret_arn)
+              logger.info('DB master password fetched from Secrets Manager.')
 
             # Auto-discover latest snapshot if not provided
             if not snapshot_identifier and db_instance_id:
@@ -392,6 +418,25 @@ Resources:
               f'Ensure cross-region snapshot replication is enabled on the primary RDS instance, '
               f'or provide snapshot_identifier explicitly in the event payload.'
             )
+
+
+          def fetch_db_master_password(region, secret_arn):
+            """
+            Reads DB_ROOT_PASSWORD from the DR Secrets Manager secret.
+            The secret is synced from the live region by the secrets-sync Lambda,
+            so the value reflects the current live DB master password.
+            """
+            import json
+            sm = boto3.client('secretsmanager', region_name=region)
+            response = sm.get_secret_value(SecretId=secret_arn)
+            secret = json.loads(response['SecretString'])
+            password = secret.get('DB_ROOT_PASSWORD', '')
+            if not password:
+              raise Exception(
+                f'DB_ROOT_PASSWORD not found in secret: {secret_arn}. '
+                f'Ensure the secrets-sync Lambda has populated this secret from the live region.'
+              )
+            return password
 
 
           def find_latest_ami(region, org_name, app_name):
