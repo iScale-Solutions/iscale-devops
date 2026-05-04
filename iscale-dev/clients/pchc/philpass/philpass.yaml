@@ -22,7 +22,7 @@ Metadata:
           - ClientDomainName
           - LoadBalancerCertificateArn
       - Label:
-          default: Instance Configuration
+          default: BSP Interface Configuration
         Parameters:
           - InstanceKeyName
           - BSPInterfaceAMI
@@ -33,8 +33,9 @@ Metadata:
           - StartScheduleExpression
           - StopScheduleExpression
       - Label:
-          default: BSP Interface Configuration
+          default: VPN Configuration
         Parameters:
+          - InstanceAmi
           - StrongswanActive
           - BSPMode
           - StrongswanPPPPSK
@@ -58,7 +59,9 @@ Metadata:
       InstanceKeyName:
         default: Instance Key Name
       InstanceType:
-        default: Instance Type
+        default: App Server Instance Type
+      InstanceAmi:
+        default: LibreSwan Instance AMI ID
       LoadBalancerCertificateArn:
         default: Load Balancer SSL Certificate ARN
       NetworkStackName:
@@ -144,6 +147,10 @@ Parameters:
       - t3.medium
       - t3.large
       - t3.xlarge
+  InstanceAmi:
+    Description: AMI ID for the VPN Server
+    Type: AWS::EC2::Image::Id
+    Default: ami-0499b5b9a26be1426 # Base AL2023
   LoadBalancerCertificateArn:
     Description: SSL Certificate for the ELB
     Type: String
@@ -276,7 +283,7 @@ Resources:
     Type: AWS::Route53Resolver::ResolverEndpoint
     Condition: IsProd
     Properties:
-      Direction: Outbound
+      Direction: OUTBOUND
       IpAddresses:
         - SubnetId:
             Fn::ImportValue:
@@ -422,6 +429,7 @@ Resources:
 
   BSPVPNGatewayEIP1: # - Hardcoded for BSP
     DeletionPolicy: Retain #Make sure to retain always
+    UpdateReplacePolicy: Retain
     Type: AWS::EC2::EIP
     Properties:
       Tags:
@@ -430,6 +438,7 @@ Resources:
 
   BSPVPNGatewayEIP2: # - Hardcoded for BSP
     DeletionPolicy: Retain #Make sure to retain always
+    UpdateReplacePolicy: Retain
     Type: AWS::EC2::EIP
     Properties:
       Tags:
@@ -1066,8 +1075,470 @@ Resources:
       ImageId: !Ref StrongswanAMI
       InstanceType: t3.nano
 
+# LibreSwan Config
+
+  LibreSwanLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          AZ1ConfigProd:
+            - InstallPackages
+            - NetworkFiles
+            - PSK
+            - AZ1ConfigProd
+            - StartLibreSwan
+          AZ2ConfigProd:
+            - InstallPackages
+            - NetworkFiles
+            - PSK
+            - AZ2ConfigProd
+            - StartLibreSwan
+          AZ1ConfigUAT:
+            - InstallPackages
+            - NetworkFiles
+            - PSK
+            - AZ1ConfigUAT
+            - StartLibreSwan
+          AZ2ConfigUAT:
+            - InstallPackages
+            - NetworkFiles
+            - PSK
+            - AZ2ConfigUAT
+            - StartLibreSwan
+
+        InstallPackages:
+           packages:
+             yum:
+               libreswan: []
+               nftables: []
+
+        StartLibreSwan:
+          commands:
+            01_load_nftables:
+              command: 'nft -f /etc/nftables.conf && systemctl enable --now nftables'
+            02_start_ipsec:
+              command: 'systemctl enable --now ipsec'
+              ignoreErrors: true
+
+        NetworkFiles:
+          commands:
+            01_ip_forward:
+              command: 'echo 1 > /proc/sys/net/ipv4/ip_forward'
+            02_send_redirects:
+              command: 'echo 0 > /proc/sys/net/ipv4/conf/ens5/send_redirects'
+            03_apply_sysctl:
+              command: 'sysctl --system'
+          files:
+            /etc/sysctl.d/99-ipsec-vpn.conf:
+              content: |
+                # Required for VPN gateway forwarding
+                net.ipv4.ip_forward = 1
+
+                # Redirect protection (breaks IPsec if enabled)
+                net.ipv4.conf.all.accept_redirects = 0
+                net.ipv4.conf.default.accept_redirects = 0
+                net.ipv4.conf.all.send_redirects = 0
+                net.ipv4.conf.default.send_redirects = 0
+
+                # Source routing disabled
+                net.ipv4.conf.all.accept_source_route = 0
+                net.ipv4.conf.default.accept_source_route = 0
+
+                # Reverse path filtering
+                net.ipv4.conf.all.rp_filter = 1
+                net.ipv4.conf.default.rp_filter = 1
+
+                # ICMP hardening
+                net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+                # ASLR
+                kernel.randomize_va_space = 2
+
+        PSK:
+          files:
+            /etc/ipsec.d/ipsec.secrets:
+              content: !Sub
+                - |
+                  @pchc ${PPP_GATEWAY} : PSK "${PSK_PPP}"
+                  @pchc ${PPP_DR_GATEWAY} : PSK "${PSK_PPP}"
+                  @pchc ${3RD_GATEWAY} : PSK "${PSK_3RD}"
+                - PSK_PPP: !Ref StrongswanPPPPSK
+                  PSK_3RD: !Ref Strongswan3RDPSK
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPGateway]
+                  PPP_DR_GATEWAY: !If
+                    - IsBSPUAT
+                    - !FindInMap [BSPConfig, UAT, PPPGateway]
+                    - !FindInMap [BSPConfig, Production, PPPDRGateway]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
+
+# AZ 1 Prod
+        AZ1ConfigProd:
+          files:
+            /etc/nftables.conf:
+              content: !Sub
+                - |
+                  table ip nat {
+                      set source_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${PRIVATE_SUBNET}
+                          }
+                      }
+                      set destination_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${3RD_SUBNET},
+                              ${PPP_SUBNET},
+                              ${PPP_DR_SUBNET}
+                          }
+                      }
+                      chain POSTROUTING {
+                          type nat hook postrouting priority 100;
+                          ip saddr @source_subnet ip daddr @destination_subnet oif "ens5" masquerade
+                      }
+                  }
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPrivateSubnetAZ1]
+                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+            /etc/ipsec.d/ipsec.conf:
+              content: !Sub
+                - |
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+
+                  conn bspPPPlusDR
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_DR_GATEWAY}
+                      rightsubnet=${PPP_DR_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                - LEFT_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPublicSubnetAZ1]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+              permissions: '0700'
+              owner: root
+              group: root
+# AZ 2 Prod
+        AZ2ConfigProd:
+          files:
+            /etc/nftables.conf:
+              content: !Sub
+                - |
+                  table ip nat {
+                      set source_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${PRIVATE_SUBNET}
+                          }
+                      }
+                      set destination_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${3RD_SUBNET},
+                              ${PPP_SUBNET},
+                              ${PPP_DR_SUBNET}
+                          }
+                      }
+                      chain POSTROUTING {
+                          type nat hook postrouting priority 100;
+                          ip saddr @source_subnet ip daddr @destination_subnet oif "ens5" masquerade
+                      }
+                  }
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPrivateSubnetAZ2]
+                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+            /etc/ipsec.d/ipsec.conf:
+              content: !Sub
+                - |
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+
+                  conn bspPPPlusDR
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_DR_GATEWAY}
+                      rightsubnet=${PPP_DR_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                - LEFT_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPublicSubnetAZ2]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+              permissions: '0700'
+              owner: root
+              group: root
+# AZ 1 UAT
+        AZ1ConfigUAT:
+          files:
+            /etc/nftables.conf:
+              content: !Sub
+                - |
+                  table ip nat {
+                      set source_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${PRIVATE_SUBNET}
+                          }
+                      }
+                      set destination_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${3RD_SUBNET},
+                              ${PPP_SUBNET}
+                          }
+                      }
+                      chain POSTROUTING {
+                          type nat hook postrouting priority 100;
+                          ip saddr @source_subnet ip daddr @destination_subnet oif "ens5" masquerade
+                      }
+                  }
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPrivateSubnetAZ1]
+                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+            /etc/ipsec.d/ipsec.conf:
+              content: !Sub
+                - |
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                - LEFT_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPublicSubnetAZ1]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+              permissions: '0700'
+              owner: root
+              group: root
+# AZ 2 UAT
+        AZ2ConfigUAT:
+          files:
+            /etc/nftables.conf:
+              content: !Sub
+                - |
+                  table ip nat {
+                      set source_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${PRIVATE_SUBNET}
+                          }
+                      }
+                      set destination_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${3RD_SUBNET},
+                              ${PPP_SUBNET}
+                          }
+                      }
+                      chain POSTROUTING {
+                          type nat hook postrouting priority 100;
+                          ip saddr @source_subnet ip daddr @destination_subnet oif "ens5" masquerade
+                      }
+                  }
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPrivateSubnetAZ2]
+                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+            /etc/ipsec.d/ipsec.conf:
+              content: !Sub
+                - |
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                - LEFT_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPublicSubnetAZ2]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+              permissions: '0700'
+              owner: root
+              group: root
+    Properties:
+      LaunchTemplateName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, libreswan]]
+      LaunchTemplateData:
+        ImageId: !Ref InstanceAmi
+        InstanceType: t3.nano
+        KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+        DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
+        IamInstanceProfile:
+          Name: !Ref StrongSwanInstanceProfile
+
   StrongSwanEC2Role:
-    Condition: IsStrongswanActive
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -1102,7 +1573,6 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
 
   StrongSwanInstanceProfile:
-    Condition: IsStrongswanActive
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
