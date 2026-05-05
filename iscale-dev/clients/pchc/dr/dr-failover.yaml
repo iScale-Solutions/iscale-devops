@@ -29,6 +29,7 @@ Metadata:
           default: "3. DR Database Configuration"
         Parameters:
           - DBInstanceIdentifier
+          - DRDBSecretArn
 
     ParameterLabels:
       OrgName:
@@ -45,6 +46,8 @@ Metadata:
         default: SNS Stack Name
       DBInstanceIdentifier:
         default: DB Instance Identifier (DR region — for snapshot auto-discovery)
+      DRDBSecretArn:
+        default: DR DB Secret ARN (Secrets Manager — for auto-fetching DB master password)
 
 Parameters:
 
@@ -113,6 +116,16 @@ Parameters:
     Type: String
     Default: ''
 
+  DRDBSecretArn:
+    Description: |
+      ARN of the Secrets Manager secret in the DR region containing DB credentials.
+      Use the DRDBSecretArn output of the app CloudFormation stack (e.g. pchc-productiondr-uw2-pesonet20).
+      At failover, the Lambda reads DB_ROOT_PASSWORD from this secret automatically —
+      no need to provide db_master_password in the EventBridge event payload.
+      Leave blank to require db_master_password explicitly in the event payload.
+    Type: String
+    Default: ''
+
 Resources:
 
 ####
@@ -150,6 +163,102 @@ Resources:
                 Effect: Allow
                 Action: iam:PassRole
                 Resource: '*'
+              - Sid: CloudFormationFullAccess
+                Effect: Allow
+                Action:
+                  - cloudformation:*
+                Resource: '*'
+              - Sid: EC2Provisioning
+                Effect: Allow
+                Action:
+                  - ec2:*
+                Resource: '*'
+              - Sid: RDSProvisioning
+                Effect: Allow
+                Action:
+                  - rds:*
+                Resource: '*'
+              - Sid: ELBProvisioning
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:*
+                Resource: '*'
+              - Sid: AutoScalingProvisioning
+                Effect: Allow
+                Action:
+                  - autoscaling:*
+                Resource: '*'
+              - Sid: EFSProvisioning
+                Effect: Allow
+                Action:
+                  - elasticfilesystem:*
+                Resource: '*'
+              - Sid: ElastiCacheProvisioning
+                Effect: Allow
+                Action:
+                  - elasticache:*
+                Resource: '*'
+              - Sid: IAMProvisioning
+                Effect: Allow
+                Action:
+                  - iam:*
+                Resource: '*'
+              - Sid: S3Provisioning
+                Effect: Allow
+                Action:
+                  - s3:*
+                Resource: '*'
+              - Sid: CodeDeployProvisioning
+                Effect: Allow
+                Action:
+                  - codedeploy:*
+                Resource: '*'
+              - Sid: CloudWatchProvisioning
+                Effect: Allow
+                Action:
+                  - cloudwatch:*
+                  - logs:*
+                Resource: '*'
+              - Sid: BackupProvisioning
+                Effect: Allow
+                Action:
+                  - backup:*
+                Resource: '*'
+              - Sid: KMSProvisioning
+                Effect: Allow
+                Action:
+                  - kms:*
+                Resource: '*'
+              - Sid: SecretsManagerProvisioning
+                Effect: Allow
+                Action:
+                  - secretsmanager:*
+                Resource: '*'
+              - Sid: SSMProvisioning
+                Effect: Allow
+                Action:
+                  - ssm:*
+                Resource: '*'
+              - Sid: LambdaProvisioning
+                Effect: Allow
+                Action:
+                  - lambda:*
+                Resource: '*'
+              - Sid: EventsProvisioning
+                Effect: Allow
+                Action:
+                  - events:*
+                Resource: '*'
+              - Sid: SNSProvisioning
+                Effect: Allow
+                Action:
+                  - sns:*
+                Resource: '*'
+              - Sid: Route53Provisioning
+                Effect: Allow
+                Action:
+                  - route53:*
+                Resource: '*'
               - Sid: RDSSnapshotDiscovery
                 Effect: Allow
                 Action:
@@ -160,6 +269,11 @@ Resources:
                 Effect: Allow
                 Action:
                   - ec2:DescribeImages
+                Resource: '*'
+              - Sid: SecretsManagerRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
                 Resource: '*'
               - Sid: SNSPublish
                 Effect: Allow
@@ -191,6 +305,7 @@ Resources:
           NETWORK_STACK_NAME: !Ref NetworkStackName
           APP_STACK_NAME: !Ref AppStackName
           DB_INSTANCE_IDENTIFIER: !Ref DBInstanceIdentifier
+          DR_DB_SECRET_ARN: !Ref DRDBSecretArn
           SOURCE_REGION: !Ref SourceRegion
           SNS_TOPIC_ARN:
             Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
@@ -283,6 +398,13 @@ Resources:
             snapshot_identifier = payload.get('snapshot_identifier', '')
             db_master_password = payload.get('db_master_password', '')
             org_name = os.environ.get('ORG_NAME', '')
+            dr_db_secret_arn = os.environ.get('DR_DB_SECRET_ARN', '')
+
+            # Auto-fetch DB master password from DR Secrets Manager secret if not provided
+            if not db_master_password and dr_db_secret_arn:
+              logger.info(f'Auto-fetching DB master password from secret: {dr_db_secret_arn}')
+              db_master_password = fetch_db_master_password(region, dr_db_secret_arn)
+              logger.info('DB master password fetched from Secrets Manager.')
 
             # Auto-discover latest snapshot if not provided
             if not snapshot_identifier and db_instance_id:
@@ -373,10 +495,9 @@ Resources:
             for snapshot_type in ['manual', 'automated']:
               response = rds.describe_db_snapshots(
                 DBInstanceIdentifier=db_instance_identifier,
-                SnapshotType=snapshot_type,
-                Filters=[{'Name': 'status', 'Values': ['available']}]
+                SnapshotType=snapshot_type
               )
-              snapshots = response.get('DBSnapshots', [])
+              snapshots = [s for s in response.get('DBSnapshots', []) if s.get('Status') == 'available']
 
               if snapshots:
                 snapshots.sort(key=lambda x: x['SnapshotCreateTime'], reverse=True)
@@ -392,6 +513,25 @@ Resources:
               f'Ensure cross-region snapshot replication is enabled on the primary RDS instance, '
               f'or provide snapshot_identifier explicitly in the event payload.'
             )
+
+
+          def fetch_db_master_password(region, secret_arn):
+            """
+            Reads DB_ROOT_PASSWORD from the DR Secrets Manager secret.
+            The secret is synced from the live region by the secrets-sync Lambda,
+            so the value reflects the current live DB master password.
+            """
+            import json
+            sm = boto3.client('secretsmanager', region_name=region)
+            response = sm.get_secret_value(SecretId=secret_arn)
+            secret = json.loads(response['SecretString'])
+            password = secret.get('DB_ROOT_PASSWORD', '')
+            if not password:
+              raise Exception(
+                f'DB_ROOT_PASSWORD not found in secret: {secret_arn}. '
+                f'Ensure the secrets-sync Lambda has populated this secret from the live region.'
+              )
+            return password
 
 
           def find_latest_ami(region, org_name, app_name):
