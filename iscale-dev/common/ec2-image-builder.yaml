@@ -12,11 +12,14 @@ Metadata:
           - EnvName
           - ArmBased
           - InstanceTypeName
+          - ImageRecipeARN
       - Label:
           default: Sharing Configuration
         Parameters:
           - ShareImage
           - ShareAccountList
+          - SecondRegion
+          - ThirdRegion
       - Label:
           default: Stack Configuration
         Parameters:
@@ -52,6 +55,10 @@ Metadata:
         default: Comma Delimited List of account Ids to share image to
       SNSStackName:
         default: SNS Topic Stack Name
+      SecondRegion:
+        default: Second Distribution Region (leave blank to disable)
+      ThirdRegion:
+        default: Third Distribution Region (leave blank to disable)
       DRRegion:
         default: DR Region (leave blank to disable cross-region AMI distribution)
       RetainAmiCount:
@@ -67,7 +74,7 @@ Parameters:
     Description: The name of the organization.
     Type: String
     Default: iscale
-    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
     ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
   EnvName:
     Description: The name of the environment
@@ -114,6 +121,18 @@ Parameters:
     Type: String
     Default: iscale-dev-dev-uw2-sns
     MinLength: 1
+  SecondRegion:
+    Description: |
+      Second region to distribute the AMI to when sharing is enabled (e.g. us-east-1, eu-west-1).
+      Leave blank to disable.
+    Type: String
+    Default: ''
+  ThirdRegion:
+    Description: |
+      Third region to distribute the AMI to when sharing is enabled (e.g. ap-southeast-1, eu-central-1).
+      Leave blank to disable.
+    Type: String
+    Default: ''
   DRRegion:
     Description: |
       DR region to copy the AMI to after every build (e.g. us-west-2, us-east-1, ap-southeast-1).
@@ -141,6 +160,9 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml      
   IsShareImage: !Equals [!Ref ShareImage, true]
+  IsNotShareImage: !Equals [!Ref ShareImage, false]
+  HasSecondRegion: !Not [!Equals [!Ref SecondRegion, '']]
+  HasThirdRegion: !Not [!Equals [!Ref ThirdRegion, '']]
   IsArmBased: !Equals [!Ref ArmBased, true]
   UseCustomInstanceType: !Not [!Equals [!Ref InstanceTypeName, '']]
   HasDRRegion: !Not [!Equals [!Ref DRRegion, '']]
@@ -172,7 +194,6 @@ Resources:
                 Action:
                   - ec2:DescribeTags
                   - ec2:DescribeInstances
-                  - cloudwatch:ListMetrics
                 Resource: '*'
         - PolicyName: CloudWatchMetrics
           PolicyDocument:
@@ -247,7 +268,7 @@ Resources:
           !Sub "${SNSStackName}-TopicArn"
       SubnetId:
         Fn::ImportValue:
-          Fn::Sub: "${NetworkStackName}-PublicSubnetId1"
+          Fn::Sub: "${NetworkStackName}-PrivateSubnetId"
       TerminateInstanceOnFailure: true
 
   ImageSecurityGroup:
@@ -264,17 +285,18 @@ Resources:
           Value: !Ref EnvName
         - Key: Organization
           Value: !Ref OrgName
+  # No need to open SSH port since Image Builder uses SSM to connect to the instance for image building and testing
+  # ImageSecurityGroupAllowSSH:
+  #   Type: AWS::EC2::SecurityGroupIngress
+  #   Properties: 
+  #     GroupId: !Ref ImageSecurityGroup
+  #     IpProtocol: TCP
+  #     FromPort: 22
+  #     ToPort: 22
+  #     CidrIp: 0.0.0.0/0
 
-  ImageSecurityGroupAllowSSH:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties: 
-      GroupId: !Ref ImageSecurityGroup
-      IpProtocol: TCP
-      FromPort: 22
-      ToPort: 22
-      CidrIp: 0.0.0.0/0
-
-  ImageDistributionConfiguration:
+  ImageDistributionConfigurationShare:
+    Condition: IsShareImage
     Type: AWS::ImageBuilder::DistributionConfiguration
     Properties:
       Name: !Join ['-',[!Ref OrgName, !Ref Name]]
@@ -282,61 +304,106 @@ Resources:
       Distributions:
         - Region: !Ref 'AWS::Region'
           AmiDistributionConfiguration:
-            Name: !Join ['_', [!Ref OrgName, !Ref Name, base-image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
+            # AMI Name
+            Name: !Join ['_', [!Ref OrgName, !Ref Name, base-image, '{{ imagebuilder:buildDate }}']]
             Description: !Join [' ', [!Ref OrgName, !Ref Name, base image, '{{ imagebuilder:buildDate }}']]
             AmiTags:
+              # output AMI tags
               Name: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
               Environment: !Ref EnvName
-            LaunchPermissionConfiguration: !If
-              - IsShareImage
-              - UserIds: !Ref ShareAccountList
-              - !Ref 'AWS::NoValue'
-      Tags:
-        Name: !Ref Name
+            LaunchPermissionConfiguration:
+              UserIds: !Ref ShareAccountList
+        - !If
+            - HasSecondRegion
+            - Region: !Ref SecondRegion
+              AmiDistributionConfiguration:
+                # AMI Name
+                Name: !Join ['_', [!Ref OrgName, !Ref Name, base-image, '{{ imagebuilder:buildDate }}']]
+                Description: !Join [' ', [!Ref OrgName, !Ref Name, base image, '{{ imagebuilder:buildDate }}']]
+                AmiTags:
+                  # output AMI tags
+                  Name: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
+                  Environment: !Ref EnvName
+                LaunchPermissionConfiguration:
+                  UserIds: !Ref ShareAccountList
+            - !Ref 'AWS::NoValue'
+        - !If
+            - HasThirdRegion
+            - Region: !Ref ThirdRegion
+              AmiDistributionConfiguration:
+                # AMI Name
+                Name: !Join ['_', [!Ref OrgName, !Ref Name, base-image, '{{ imagebuilder:buildDate }}']]
+                Description: !Join [' ', [!Ref OrgName, !Ref Name, base image, '{{ imagebuilder:buildDate }}']]
+                AmiTags:
+                  # output AMI tags
+                  Name: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
+                  Environment: !Ref EnvName
+                LaunchPermissionConfiguration:
+                  UserIds: !Ref ShareAccountList
+            - !Ref 'AWS::NoValue'
 
-  ImageDistributionConfigurationWithDR:
-    Condition: HasDRRegion
+  ImageDistributionConfigurationNotShare:
+    Condition: IsNotShareImage
     Type: AWS::ImageBuilder::DistributionConfiguration
     Properties:
-      Name: !Join ['-', [!Ref OrgName, !Ref Name, dr]]
-      Description: !Join [' ', ['Distribution for', !Ref OrgName, !Ref Name, 'with DR copy to', !Ref DRRegion]]
+      Name: !Join ['-',[!Ref OrgName, !Ref Name]]
+      Description: !Join [' ',['Distribution for', !Ref OrgName, !Ref Name]]
       Distributions:
         - Region: !Ref 'AWS::Region'
           AmiDistributionConfiguration:
-            Name: !Join ['_', [!Ref OrgName, !Ref Name, base-image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
+            # AMI Name
+            Name: !Join ['_', [!Ref OrgName, !Ref Name, base-image, '{{ imagebuilder:buildDate }}']]
             Description: !Join [' ', [!Ref OrgName, !Ref Name, base image, '{{ imagebuilder:buildDate }}']]
             AmiTags:
+              # output AMI tags
               Name: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
               Environment: !Ref EnvName
-            LaunchPermissionConfiguration: !If
-              - IsShareImage
-              - UserIds: !Ref ShareAccountList
-              - !Ref 'AWS::NoValue'
-        - Region: !Ref DRRegion
-          AmiDistributionConfiguration:
-            Name: !Join ['_', [!Ref OrgName, !Ref Name, dr-image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
-            Description: !Join [' ', [!Ref OrgName, !Ref Name, DR image, '{{ imagebuilder:buildDate }}']]
-            AmiTags:
-              Name: !Join [' ', [!Ref OrgName, !Ref Name, dr image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
-              Environment: !Ref EnvName
-      Tags:
-        Name: !Ref Name
+
+  # ImageDistributionConfigurationWithDR:
+  #   Condition: HasDRRegion
+  #   Type: AWS::ImageBuilder::DistributionConfiguration
+  #   Properties:
+  #     Name: !Join ['-', [!Ref OrgName, !Ref Name, dr]]
+  #     Description: !Join [' ', ['Distribution for', !Ref OrgName, !Ref Name, 'with DR copy to', !Ref DRRegion]]
+  #     Distributions:
+  #       - Region: !Ref 'AWS::Region'
+  #         AmiDistributionConfiguration:
+  #           Name: !Join ['_', [!Ref OrgName, !Ref Name, base-image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
+  #           Description: !Join [' ', [!Ref OrgName, !Ref Name, base image, '{{ imagebuilder:buildDate }}']]
+  #           AmiTags:
+  #             Name: !Join [' ', [!Ref OrgName, !Ref Name, base image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
+  #             Environment: !Ref EnvName
+  #           LaunchPermissionConfiguration: !If
+  #             - IsShareImage
+  #             - UserIds: !Ref ShareAccountList
+  #             - !Ref 'AWS::NoValue'
+  #       - Region: !Ref DRRegion
+  #         AmiDistributionConfiguration:
+  #           Name: !Join ['_', [!Ref OrgName, !Ref Name, dr-image, !Select [2, !Split ['/', !Ref ImageRecipeARN]], '{{ imagebuilder:buildDate }}']]
+  #           Description: !Join [' ', [!Ref OrgName, !Ref Name, DR image, '{{ imagebuilder:buildDate }}']]
+  #           AmiTags:
+  #             Name: !Join [' ', [!Ref OrgName, !Ref Name, dr image, !Select [2, !Split ['/', !Ref ImageRecipeARN]]]]
+  #             Environment: !Ref EnvName
+  #     Tags:
+  #       Name: !Ref Name
 
   ImagePipeline:
     Type: AWS::ImageBuilder::ImagePipeline
     Properties:
-      Name: !Join [' ', [!Ref OrgName, !Ref Name]]
+      Name: !Join ['-', [!Ref OrgName, base, !Ref Name]]
       Description: !Join [' ', [!Ref OrgName, !Ref Name, 'Pipeline']]
       ImageRecipeArn: !Ref ImageRecipeARN
       InfrastructureConfigurationArn: !Ref ImageInfrastructureConfig
       DistributionConfigurationArn: !If
-        - HasDRRegion
-        - !Ref ImageDistributionConfigurationWithDR
-        - !Ref ImageDistributionConfiguration
+        - IsShareImage
+        - !Ref ImageDistributionConfigurationShare
+        - !Ref ImageDistributionConfigurationNotShare
       ImageTestsConfiguration:
         ImageTestsEnabled: true
         TimeoutMinutes: 60
       Status: ENABLED
+
+# Lifecycle policy to retain only the most recent N AMI versions and delete older ones
 
   ImageLifecyclePolicyRole:
     Type: AWS::IAM::Role
