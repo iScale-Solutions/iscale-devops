@@ -1,0 +1,1632 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: PCHC Image builder
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: EC2 Image Builder Configuration
+        Parameters:
+          - InstanceTypeName
+          - AmazonLinux2023Version
+      - Label:
+          default: Sharing Configuration
+        Parameters:
+          - ShareImage
+          - ShareAccountList
+          - SecondRegion
+          - ThirdRegion
+          - RetainAmiCount
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      InstanceTypeName:
+        default: EC2 Instance Type
+      AmazonLinux2023Version:
+        default: Amazon Linux 2023 Image Version
+      NetworkStackName:
+        default: Network Stack Name
+      ShareImage:
+        default: Share image with other account? If sharing, encryption will be disabled.
+      ShareAccountList:
+        default: List of AWS Account IDs to share the image with, separated by comma. (Required if ShareImage is true)
+      SecondRegion:
+        default: Secondary region to copy the image to (Optional)
+      ThirdRegion:
+        default: Tertiary region to copy the image to (Optional)
+      SNSStackName:
+        default: SNS Topic Stack Name
+      RetainAmiCount:
+        default: Number of AMI versions to retain (older versions are deleted)
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: image-builder
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Development
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  InstanceTypeName:
+    Description: EC2 Instance Type for Image Builder
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+  AmazonLinux2023Version:
+    Description: The version of Amazon Linux 2023 to use as the base image.
+    Type: String
+    Default: 1.1.1
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: pchc-dev-ase1-network
+    MinLength: 1
+  ShareImage:
+    Description: Select true to not encrypt the image and share it with other accounts
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  ShareAccountList:
+    Description: List of AWS Account IDs to share the image with, separated by comma. (Required if ShareImage is true)
+    Type: CommaDelimitedList
+    Default: 470455329885,050821737631
+  SecondRegion:
+    Description: Secondary region to copy the image to (Optional)
+    Type: String
+    Default: "us-east-1"
+  ThirdRegion:
+    Description: Tertiary region to copy the image to (Optional)
+    Type: String
+    Default: "us-east-2"
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: pchc-dev-ase1-sns
+    MinLength: 1
+  RetainAmiCount:
+    Description: Number of most recent AMI versions to keep. Older versions are automatically deleted.
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 100
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml      
+  IsImageShared: !Equals [!Ref ShareImage, true]
+
+Resources:
+
+  Java11Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Java11
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.4
+      Description: Installs Java11
+      ChangeDescription: Initial version
+      Data: |
+        name: Java11 - InlineData
+        description: Installation of Java11
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallJava11
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - amazon-linux-extras install java-openjdk11
+
+  MySQLClientComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: MySQL Client
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+        - Amazon Linux 2023
+      Version: 1.1.0
+      Description: Installs MySQL Client + dev libs
+      ChangeDescription: Initial version
+      Data: |
+        name: MySQL Client - InlineData
+        description: Installation of MySQL Client
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: YumInstallMySQLCLient
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y mysql
+              - name: YumInstallMySQLDevel
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y mysql-devel
+
+  MariaDBClientComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: MariaDB Client
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Installs MariaDB Client + dev libs
+      ChangeDescription: Initial version
+      Data: |
+        name: MariaDB Client - InlineData
+        description: Installation of MariaDB Client
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: YumInstallMariaDBCLient
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y mariadb105
+              - name: YumInstallMariaDBDevel
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y mariadb105-devel
+
+  NginxComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: NginX
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+        - Amazon Linux 2023
+      Version: 1.0.9
+      Description: Installs NginX
+      ChangeDescription: Initial version
+      Data: |
+        name: NginX - InlineData
+        description: Installation of NginX
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallNginx
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y nginx
+                    - sudo mkdir /var/www
+                    - sudo systemctl start nginx
+                    - sudo systemctl enable nginx
+              - name: CreateNginxCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/nginx-log.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/log/nginx/access.log",
+                                  "log_group_name": "/var/log/nginx/access.log"
+                                },
+                                {
+                                  "file_path": "/var/log/nginx/error.log",
+                                  "log_group_name": "/var/log/nginx/error.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/nginx-log.json
+
+  NodeJSComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: NodeJS
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+        - Amazon Linux 2023
+      Version: 2.0.2
+      Description: Installs NodeJS
+      ChangeDescription: Initial version
+      Data: |
+        name: NodeJS - InlineData
+        description: Installation of NodeJS
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallNodeJS
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y gcc-c++ make
+                    - curl -sL https://rpm.nodesource.com/setup_16.x | sudo -E bash - 
+                    - sudo yum install nodejs -y
+
+  NodeJS20Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: NodeJS-20
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Installs NodeJS v20
+      ChangeDescription: Initial version
+      Data: |
+        name: NodeJS - InlineData
+        description: Installation of NodeJS v20
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallNodeJS20
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y gcc-c++ make
+                    - curl -fsSL https://rpm.nodesource.com/setup_20.x -o nodesource_setup.sh
+                    - bash nodesource_setup.sh
+                    - sudo yum install -y nodejs
+  
+  NodeJS22Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: NodeJS-22
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Installs NodeJS v22
+      ChangeDescription: Initial version
+      Data: |
+        name: NodeJS - InlineData
+        description: Installation of NodeJS v22
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallNodeJS22
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo yum install -y gcc-c++ make
+                    - curl -fsSL https://rpm.nodesource.com/setup_22.x -o nodesource_setup.sh
+                    - bash nodesource_setup.sh
+                    - sudo yum install -y nodejs
+
+  Pm2V6Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PM2-v6
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Installs PM2 Version 6
+      ChangeDescription: Initial version
+      Data: |
+        name: NVM - InlineData
+        description: Installation of PM2 Version 6
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallPM2
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo npm install -g pm2@6
+  
+  GitComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Git
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Installs Git
+      ChangeDescription: Initial version
+      Data: |
+        name: Git - InlineData
+        description: Installation of Git
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallGit
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo dnf install -y git
+
+  MAWSLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: MAWS_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Setup MAWS logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: PDDTSLogs - InlineData
+        description: Setup MAWS logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/maws-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/maws/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/maws/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/maws/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/maws/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/maws-cloudwatch.json
+
+  PesonetLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Pesonet_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Setup Pesonet logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: PesonetLogs - InlineData
+        description: Setup Pesonet logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/pesonet-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/pesonet/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/pesonet/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/pesonet/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/pesonet/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/pesonet-cloudwatch.json
+  
+  Pesonet20LogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Pesonet20_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Setup Pesonet 20 logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: Pesonet20Logs - InlineData
+        description: Setup Pesonet20 logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/pesonet20-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/pesonet20/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/pesonet20/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/pesonet20/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/pesonet20/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/pesonet20-cloudwatch.json
+
+  PAS6LogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PAS6_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Setup PAS6 logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: PDDTSLogs - InlineData
+        description: Setup PAS6 logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/pas6-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/pas6/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/pas6/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/pas6/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/pas6/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/pas6-cloudwatch.json
+
+  PDDTSLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PDDTS_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Setup PDDTS logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: PDDTSLogs - InlineData
+        description: Setup PDDTS logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/pddts-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/pddts-main/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/pddts-main/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/pddts-main/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/pddts-main/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/pddts-cloudwatch.json
+  PDDTSEODLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PDDTSEOD_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Setup PDDTSEOD logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: PDDTSEODLogs - InlineData
+        description: Setup PDDTSEOD logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/pddtseod-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/pddts-eod/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/pddts-eod/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/pddts-eod/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/pddts-eod/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/pddtseod-cloudwatch.json
+
+  PhilpassLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Philpass_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Setup Philpass logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: PhilpassLogs - InlineData
+        description: Setup Philpass logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/philpass-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/philpass/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/philpass/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/philpass/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/philpass/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/philpass-cloudwatch.json
+
+  DSAppLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: DSApp_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Setup DS App logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: DSAppLogs - InlineData
+        description: Setup DS App logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/dsapp-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/dsapp/log/unicorn.stderr.log",
+                                  "log_group_name": "/var/www/dsapp/log/unicorn.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/dsapp/log/unicorn.stdout.log",
+                                  "log_group_name": "/var/www/dsapp/log/unicorn.stdout.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/dsapp-cloudwatch.json
+  Cics2ProcessQueueLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Cics2ProcessQueue_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Setup CICS 2 Process Queue logging
+      ChangeDescription: Initial version
+      Data: |
+        name: Cics2ProcessQueueLogs - InlineData
+        description: Setup CICS2 Process Queue logging
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/cics2-process-queue-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/home/ec2-user/.pm2/logs/op-file-version-error.log",
+                                  "log_group_name": "cics2-process-queue/pm2-logs/op-file-version-error.log"
+                                },
+                                {
+                                  "file_path": "/home/ec2-user/.pm2/logs/op-file-version-out.log",
+                                  "log_group_name": "cics2-process-queue/pm2-logs/op-file-version-out.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/cics2-process-queue-cloudwatch.json
+
+
+  PHP82Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PHP82-Component
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installing php using amazon-linux-extras (php 8.2)
+      ChangeDescription: Initial version
+      Data: |
+        name: AmazonLinux2LEMPStackREMI - InlineData
+        description: Installing php using amazon-linux-extras (php 8.2)
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallPHP
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      sudo amazon-linux-extras enable php8.2
+                      sudo yum clean metadata
+                      sudo yum install php -y
+                      sudo yum install php php-{common,cgi,cli,fpm,mysqlnd,devel,gd,mbstring,curl,xml,pear,bcmath,json,opcache,gettext,intl,zip} -y
+
+  PHP82ComponentAL2023:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: PHP82-Component-AL2023
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Installing php 8.2
+      ChangeDescription: Initial version
+      Data: |
+        name: Php82 - InlineData
+        description: Installing php 8.2
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallPHP
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      sudo yum install php8.2 -y
+                      sudo yum install php php-{common,cgi,cli,fpm,mysqlnd,devel,gd,mbstring,curl,xml,pear,bcmath,json,opcache,gettext,intl,zip,pgsql,pdo_pgsql} -y
+
+  ComposerComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Composer-Component
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+        - Amazon Linux 2023
+      Version: 2.0.1
+      Description: Installing composer
+      ChangeDescription: Initial version
+      Data: |
+        name: Composer-Component - InlineData
+        description: Installing composer
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallComposer
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      sudo curl -sS https://getcomposer.org/installer | sudo php
+                      sudo mv composer.phar /usr/local/bin/composer
+                      sudo ln -sf /usr/local/bin/composer /usr/bin/composer
+
+  SupervisorComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: Supervisor-Component
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.3.0
+      Description: Installing supervisord and creating necessary directories
+      ChangeDescription: Add supervisord service and directories
+      Data: |
+        name: Supervisor-Component - InlineData
+        description: Installing supervisor
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallSupervisor
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      sudo su ec2-user
+                      sudo dnf install python3-pip -y
+                      sudo pip3 install supervisor
+
+                      echo_supervisord_conf | sudo tee /etc/supervisord.conf > /dev/null
+
+                      sudo tee /etc/systemd/system/supervisord.service > /dev/null <<'EOF'
+                      [Unit]
+                      Description=Supervisor daemon
+                      After=network.target
+
+                      [Service]
+                      ExecStart=/usr/local/bin/supervisord -n -c /etc/supervisord.conf
+                      ExecStop=/usr/local/bin/supervisorctl shutdown
+                      ExecReload=/usr/local/bin/supervisorctl reload
+                      KillMode=process
+                      Restart=on-failure
+
+                      [Install]
+                      WantedBy=multi-user.target
+                      EOF
+
+                      sudo mkdir -p /var/log/supervisor /var/run/supervisor
+                      sudo touch /var/log/supervisord.log
+
+                      sudo systemctl daemon-reload
+                      sudo systemctl enable supervisord
+
+
+  RoRComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: RubyOnRails
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.3
+      Description: Installs RoR
+      ChangeDescription: Initial version
+      Data: |
+        name: RoR - InlineData
+        description: Installation of RoR
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallRoR
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo su ec2-user
+                    - cd /home/ec2-user
+                    - command curl -sSL https://rvm.io/mpapis.asc | sudo gpg2 --import -
+                    - command curl -sSL https://rvm.io/pkuczynski.asc | sudo gpg2 --import -
+                    - \curl -sSL https://get.rvm.io | sudo bash -s stable
+                    - source /etc/profile.d/rvm.sh
+                    - rvm requirements
+                    - rvm install ruby-2.4.1
+                    - gem install bundler
+                    - gem install sprockets -v 3.7.2
+                    - gem install nokogiri -v 1.10.10
+                    - gem install rails -v 4.2.8
+                    - rvm docs generate all
+
+  RoRComponent2:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: RubyOnRails2
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2
+      Version: 1.0.0
+      Description: Installs RoR v2.5.9
+      ChangeDescription: Initial version
+      Data: |
+        name: RoR2 - InlineData
+        description: Installation of RoR v2.5.9
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallRoR
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo su ec2-user
+                    - cd /home/ec2-user
+                    - command curl -sSL https://rvm.io/mpapis.asc | sudo gpg2 --import -
+                    - command curl -sSL https://rvm.io/pkuczynski.asc | sudo gpg2 --import -
+                    - \curl -sSL https://get.rvm.io | sudo bash -s stable
+                    - source /etc/profile.d/rvm.sh
+                    - rvm requirements
+                    - rvm install ruby-2.5.9
+                    - gem install bundler
+                    - gem install sprockets -v 3.7.2
+                    - gem install nokogiri -v 1.10.10
+                    - gem install rails -v 4.2.8
+                    - rvm docs generate all
+  RoRComponent3:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: RubyOnRails3
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 2.0.20
+      Description: Installs RoR v2.4.1
+      ChangeDescription: Fix nokogiri version, pre-compile mysql2 native ext, add ImageMagick for paperclip
+      Data: |
+        name: RoR2 - InlineData
+        description: Installation of RoR v2.4.1
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallAndUpdateDependencies
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo dnf update -y
+                    - sudo dnf groupinstall "Development Tools" -y
+                    - sudo dnf install -y gcc make bzip2 bzip2-devel libffi-devel zlib-devel gdbm-devel ncurses-devel openssl-devel readline-devel libxml2 libxml2-devel libxslt libxslt-devel git tar curl readline ImageMagick ImageMagick-devel
+                    - mkdir -p /usr/local/src && cd /usr/local/src
+                    - curl -L -O https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+                    - tar xzf openssl-1.1.1w.tar.gz
+                    - cd openssl-1.1.1w
+                    - ./config --prefix=/usr/local/openssl-1.1.1 --openssldir=/usr/local/openssl-1.1.1 shared zlib
+                    - make -j$(nproc)
+                    - make install
+              - name: InstallRbenvRubyBuildRubyAndRoR
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - git clone https://github.com/rbenv/rbenv.git /usr/local/rbenv
+                    - mkdir -p /usr/local/rbenv/plugins
+                    - git clone https://github.com/rbenv/ruby-build.git /usr/local/rbenv/plugins/ruby-build
+                    - echo 'export RBENV_ROOT="/usr/local/rbenv"' | sudo tee /etc/profile.d/rbenv.sh
+                    - echo 'export PATH="$RBENV_ROOT/bin:$PATH"' | sudo tee -a /etc/profile.d/rbenv.sh
+                    - echo 'eval "$(rbenv init - bash)"' | sudo tee -a /etc/profile.d/rbenv.sh
+                    - chmod +x /etc/profile.d/rbenv.sh
+                    - source /etc/profile.d/rbenv.sh
+                    - rbenv -v
+                    - sudo yum install -y readline-devel
+                    - rpm -q readline-devel >/dev/null 2>&1 || exit 1
+                    - set -x
+                    - RUBY_CONFIGURE_OPTS="--with-openssl-dir=/usr/local/openssl-1.1.1 --with-readline-dir=/usr/include" rbenv install -v 2.4.1
+                    - echo $(rbenv versions --bare | grep -Fx 2.4.1)
+                    - echo "Done installing Ruby 2.4.1"
+                    - ln -s /etc/pki/tls/certs/ca-bundle.crt /usr/local/openssl-1.1.1/cert.pem
+                    - rbenv global 2.4.1
+                    - ruby -v
+                    - ruby -ropenssl -e 'puts OpenSSL::OPENSSL_LIBRARY_VERSION'
+                    - gem update --system 3.0.8
+                    - gem install bundler -v 1.17.3
+                    - |
+                      cat << EOF >> /tmp/Gemfile
+                      source 'https://rubygems.org'
+                      ruby '2.4.1'
+                      gem 'rails', '4.2.8'
+                      gem 'nokogiri', '1.10.2'
+                      gem 'mysql2', '0.4.10'
+                      gem 'sprockets', '3.7.2'
+                      gem 'racc', '1.4.14'
+                      EOF
+                    - BUNDLE_GEMFILE=/tmp/Gemfile bundle _1.17.3_ install
+                    - gem rdoc --all
+              - name: InstallRbenvGemset
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - mkdir -p "$(rbenv root)"/plugins
+                    - git clone https://github.com/jf/rbenv-gemset.git "$(rbenv root)"/plugins/rbenv-gemset
+                    - exec $SHELL
+  RoRComponent4:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: RubyOnRails3
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Installs RoR v2.4.1
+      ChangeDescription: Initial version
+      Data: |
+        name: RoR2 - ec2-user-optimized
+        description: Installation of RoR v2.4.1 for ec2-user
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallAndUpdateDependencies
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo dnf update -y
+                    - sudo dnf groupinstall "Development Tools" -y
+                    - sudo dnf install -y gcc make bzip2 bzip2-devel libffi-devel zlib-devel gdbm-devel ncurses-devel openssl-devel readline-devel libxml2 libxml2-devel libxslt libxslt-devel git tar curl
+                    # Install OpenSSL 1.1.1 (Required for Ruby 2.4.x)
+                    - mkdir -p /usr/local/src && cd /usr/local/src
+                    - curl -L -O https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+                    - tar xzf openssl-1.1.1w.tar.gz
+                    - cd openssl-1.1.1w
+                    - ./config --prefix=/usr/local/openssl-1.1.1 --openssldir=/usr/local/openssl-1.1.1 shared zlib
+                    - make -j$(nproc)
+                    - make install
+
+              - name: SetupRbenvForEc2User
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    # 1. Clone rbenv into ec2-user's home
+                    - sudo -u ec2-user git clone https://github.com/rbenv/rbenv.git /home/ec2-user/.rbenv
+                    - sudo -u ec2-user mkdir -p /home/ec2-user/.rbenv/plugins
+                    - sudo -u ec2-user git clone https://github.com/rbenv/ruby-build.git /home/ec2-user/.rbenv/plugins/ruby-build
+                    - sudo -u ec2-user git clone https://github.com/jf/rbenv-gemset.git /home/ec2-user/.rbenv/plugins/rbenv-gemset
+                    
+                    # 2. Add rbenv to ec2-user's bashrc
+                    - |
+                      sudo -u ec2-user tee -a /home/ec2-user/.bashrc <<EOF
+                      export PATH="\$HOME/.rbenv/bin:\$PATH"
+                      eval "\$(rbenv init - bash)"
+                      EOF
+
+              - name: InstallRubyAsEc2User
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    # 3. Use a login shell (-i) to run the install. This ensures PATH is correct.
+                    - |
+                      sudo -u ec2-user -i bash -c '
+                        export RUBY_CONFIGURE_OPTS="--with-openssl-dir=/usr/local/openssl-1.1.1 --with-readline-dir=/usr/include"
+                        rbenv install -v 2.4.1
+                        rbenv global 2.4.1
+                        
+                        # Install Bundler and update gems as ec2-user
+                        gem update --system 3.0.8
+                        gem install bundler -v 1.17.3
+                        rbenv rehash
+                        
+                        # Verify
+                        ruby -v
+                        ruby -ropenssl -e "puts OpenSSL::OPENSSL_LIBRARY_VERSION"
+                      '
+                    # 4. Final Permission Fix (Just in case)
+                    - sudo chown -R ec2-user:ec2-user /home/ec2-user/.rbenv
+
+# Recipe
+
+  MAWSImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'maws']]
+      Version: 2025.09.08
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'maws']]
+      Components: #Max 20
+        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+        - ComponentArn: !Ref MAWSLogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  PAS6ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'pas6']]
+      Version: 2025.09.08
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'pas6']]
+      Components: #Max 20
+        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+        - ComponentArn: !Ref PAS6LogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  PayGateImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'paygate']]
+      Version: 2025.09.08
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'paygate']]
+      Components: #Max 20
+        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent2
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  PDDTSImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'pddts']]
+      Version: 2025.09.08
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'pddts']]
+      Components: #Max 20
+        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudwatchagent-for-autoscaling-group/1.0.0/1']]
+        - ComponentArn: !Ref PDDTSLogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  PDDTSEODImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'pddts', 'eod']]
+      Version: 2026.01.2214470
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/', !Ref AmazonLinux2023Version]]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'pddts eod']]
+      Components: #Max 20
+        - ComponentArn: !Ref MariaDBClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent4
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformationlogs/1.0.4']]
+        # - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudwatchagent-for-autoscaling-group/1.0.0/1']]
+        - ComponentArn: !Ref PDDTSEODLogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp3
+            VolumeSize: 8
+
+  PesonetImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'pesonet']]
+      Version: 2025.09.08
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'pesonet']]
+      Components: #Max 20
+        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+        - ComponentArn: !Ref PesonetLogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  Pesonet20ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'pesonet20']]
+      Version: 2026.05.030001
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/', !Ref AmazonLinux2023Version]]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'pesonet20']]
+      Components: #Max 20
+        - ComponentArn: !Ref MariaDBClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent3
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformationlogs/1.0.4']]
+        - ComponentArn: !Ref Pesonet20LogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp3
+            VolumeSize: 8
+
+  PhilpassImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'philpass']]
+      Version: 2026.05.09
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/2026.05.09/2']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'philpass']]
+      Components: #Max 20
+        - ComponentArn: !Ref MariaDBClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent3
+        # - ComponentArn: !Ref Java11Component
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/amazon-corretto-11/1.0.1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+        - ComponentArn: !Ref PhilpassLogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+    
+  DSAppImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'dsapp']]
+      Version: 2025.09.08
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux/1.1.31']]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'dsapp']]
+      Components: #Max 20
+        - ComponentArn: !Ref MySQLClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJSComponent
+        - ComponentArn: !Ref RoRComponent2
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformation-logs/1.0.4']]
+        - ComponentArn: !Ref DSAppLogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp2
+            VolumeSize: 8
+
+  MisImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'mis']]
+      Version: 2026.03.061752
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/', !Ref AmazonLinux2023Version]]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'mis']]
+      Components: #Max 20
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref PHP82ComponentAL2023
+        - ComponentArn: !Ref NodeJS20Component
+        - ComponentArn: !Ref ComposerComponent
+        - ComponentArn: !Ref MariaDBClientComponent
+        - ComponentArn: !Ref SupervisorComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp3
+            VolumeSize: 8
+  
+  Cics2ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'cics2']]
+      Version: 2025.11.190
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-amazon-linux2023/', !Ref AmazonLinux2023Version]]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'cics2']]
+      Components: #Max 20
+        - ComponentArn: !Ref GitComponent
+        - ComponentArn: !Ref NodeJS22Component 
+        - ComponentArn: !Ref Pm2V6Component
+        - ComponentArn: !Ref Cics2ProcessQueueLogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp3
+            VolumeSize: 8
+# Builder
+
+  MAWSBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: maws
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref MAWSImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+
+  PayGateBuilder: 
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters: 
+        Name: paygate
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref PayGateImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+        # ArmBased: true
+  
+  PAS6Builder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: pas6
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref PAS6ImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+
+  PDDTSBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: pddts
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref PDDTSImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+
+  PDDTSEODBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: pddtseod
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref PDDTSEODImageRecipe
+        InstanceTypeName: !Ref InstanceTypeName
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+
+  PesonetBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: pesonet
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref PesonetImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+  
+  Pesonet20Builder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: pesonet20
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref Pesonet20ImageRecipe
+        InstanceTypeName: !Ref InstanceTypeName
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+
+  PhilpassBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: philpass
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref PhilpassImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+
+  DSAppBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: dsapp
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref DSAppImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+
+  MisBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: mis
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref MisImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+
+  Cics2Builder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: cics2
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref Cics2ImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
