@@ -1,0 +1,745 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  DR Engine — Centralized, app-agnostic failover and failback orchestration for all PCHC apps.
+  Deployed once. Each app's dr-failover stack targets this engine's Lambda and State Machine.
+
+  FailoverLambda  : Discovers latest snapshot + AMI, updates network + app stacks (non-blocking).
+  FailbackLambda  : Handles delete/check/teardown actions called by the Step Functions state machine.
+  FailbackStateMachine (Standard): Deletes server stacks, polls until gone, then tears down ELB + network.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Notifications
+        Parameters:
+          - SNSStackName
+
+Parameters:
+
+  SNSStackName:
+    Description: Name of the SNS CloudFormation stack. Must export ${SNSStackName}-TopicArn.
+    Type: String
+    Default: pchc-productiondr-uw2-sns
+    MinLength: 1
+
+  SNSTopicArn:
+    Description: |
+      ARN of the SNS topic for DR notifications. Overrides SNSStackName import if provided.
+      If left blank, the topic ARN is resolved from ${SNSStackName}-TopicArn.
+    Type: String
+    Default: ''
+
+Resources:
+
+####
+# IAM — Failover Lambda
+####
+
+  FailoverLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-failover-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DRFailoverPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudFormation
+                Effect: Allow
+                Action:
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:GetTemplate
+                Resource: '*'
+              - Sid: Provisioning
+                Effect: Allow
+                Action:
+                  - ec2:*
+                  - rds:*
+                  - elasticloadbalancing:*
+                  - autoscaling:*
+                  - elasticfilesystem:*
+                  - elasticache:*
+                  - iam:*
+                  - s3:*
+                  - codedeploy:*
+                  - cloudwatch:*
+                  - logs:*
+                  - backup:*
+                  - kms:*
+                  - secretsmanager:*
+                  - ssm:*
+                  - lambda:*
+                  - events:*
+                  - route53:*
+                Resource: '*'
+              - Sid: SNSPublish
+                Effect: Allow
+                Action: sns:Publish
+                Resource: '*'
+
+####
+# IAM — Failback Lambda
+####
+
+  FailbackLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-failback-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DRFailbackPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudFormation
+                Effect: Allow
+                Action:
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:UpdateStack
+                  - cloudformation:GetTemplate
+                Resource: '*'
+              - Sid: SNSPublish
+                Effect: Allow
+                Action: sns:Publish
+                Resource: '*'
+
+####
+# IAM — Step Functions
+####
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-stepfunctions-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeFailbackLambda
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt FailbackLambdaFunction.Arn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+####
+# Lambda — Failover
+####
+
+  FailoverLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-failover'
+      Description: |
+        DR Failover — app-agnostic. All config comes from the event payload.
+        Invoked by each app's dr-failover EventBridge FailoverTriggerRule.
+        Discovers latest snapshot + AMI, updates network stack then app stack (non-blocking).
+      Handler: index.lambda_handler
+      Role: !GetAtt FailoverLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN:
+            Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            """
+            Event payload (injected by dr-failover InputTransformer):
+            {
+              "app_name": "<app_name>",
+              "org_name": "pchc",
+              "app_stack_name": "pchc-prddr-uw2-<app>",
+              "network_stack_name": "pchc-prddr-uw2-network",
+              "db_instance_identifier": "<id>",
+              "dr_db_secret_arn": "<arn>",
+              "source_region": "ap-southeast-1",
+              "sns_topic_arn": "<arn>",
+              "snapshot_identifier": "",   # optional — auto-discovered if blank
+              "db_master_password": "",    # optional — auto-fetched from Secrets Manager if blank
+              "instance_ami": ""           # optional — auto-discovered if blank
+            }
+            """
+            region = os.environ['AWS_REGION']
+            app_name        = event.get('app_name', '')
+            org_name        = event.get('org_name', '')
+            app_stack       = event.get('app_stack_name', '')
+            network_stack   = event.get('network_stack_name', '')
+            db_instance_id  = event.get('db_instance_identifier', '')
+            dr_db_secret    = event.get('dr_db_secret_arn', '')
+            sns_topic       = event.get('sns_topic_arn', '') or os.environ.get('SNS_TOPIC_ARN', '')
+            snapshot_id     = event.get('snapshot_identifier', '')
+            db_password     = event.get('db_master_password', '')
+            instance_ami    = event.get('instance_ami', '')
+
+            cf = boto3.client('cloudformation', region_name=region)
+
+            try:
+              # Auto-fetch DB master password from Secrets Manager
+              if not db_password and dr_db_secret:
+                logger.info(f'Auto-fetching DB master password from: {dr_db_secret}')
+                db_password = fetch_db_master_password(region, dr_db_secret)
+
+              # Auto-discover latest snapshot
+              if not snapshot_id and db_instance_id:
+                logger.info(f'Auto-discovering latest snapshot for: {db_instance_id}')
+                snapshot_id = find_latest_snapshot(region, db_instance_id)
+                logger.info(f'Using snapshot: {snapshot_id}')
+
+              # Auto-discover latest DR AMI
+              if org_name and app_name:
+                logger.info(f'Auto-discovering latest DR AMI: {org_name}_{app_name}_dr-image_*')
+                instance_ami = find_latest_ami(region, org_name, app_name)
+                logger.info(f'Using AMI: {instance_ami}')
+
+              # Step 1: Network stack — activate NAT Gateways, Jump Host, VPC Endpoints
+              logger.info(f'[FAILOVER 1/2] Updating network stack: {network_stack}')
+              update_stack(cf, network_stack, deploy_paid='true')
+
+              # Step 2: App stack — activate DB, Cache, LBs, App Servers
+              logger.info(f'[FAILOVER 2/2] Updating app stack: {app_stack}')
+              update_stack(cf, app_stack, deploy_paid='true', extra_params={
+                'SnapshotIdentifier': snapshot_id,
+                'DBMasterUserPassword': db_password,
+                'InstanceAMI': instance_ami
+              })
+
+              summary = (
+                f'DR Failover initiated for [{app_name}].\n'
+                f'Network stack : {network_stack}\n'
+                f'App stack     : {app_stack}\n'
+                f'Snapshot      : {snapshot_id or "(none)"}\n'
+                f'AMI           : {instance_ami or "(UsePreviousValue)"}\n\n'
+                f'CloudFormation is now provisioning resources asynchronously. '
+                f'DB restore takes 20-60 min.'
+              )
+              logger.info(summary)
+              notify(sns_topic, f'DR Failover Initiated [{app_name}]', summary)
+              return {'statusCode': 200, 'body': summary}
+
+            except Exception as e:
+              msg = f'DR Failover FAILED [{app_name}]: {str(e)}'
+              logger.exception(msg)
+              notify(sns_topic, f'DR Failover FAILED [{app_name}]', msg)
+              raise
+
+
+          def find_latest_snapshot(region, db_instance_identifier):
+            rds = boto3.client('rds', region_name=region)
+            for snapshot_type in ['manual', 'automated']:
+              resp = rds.describe_db_snapshots(
+                DBInstanceIdentifier=db_instance_identifier,
+                SnapshotType=snapshot_type
+              )
+              snapshots = [s for s in resp.get('DBSnapshots', []) if s.get('Status') == 'available']
+              if snapshots:
+                snapshots.sort(key=lambda x: x['SnapshotCreateTime'], reverse=True)
+                return snapshots[0]['DBSnapshotArn']
+            raise Exception(
+              f'No available snapshots found for: {db_instance_identifier}. '
+              f'Ensure cross-region snapshot replication is enabled or provide snapshot_identifier explicitly.'
+            )
+
+
+          def fetch_db_master_password(region, secret_arn):
+            sm = boto3.client('secretsmanager', region_name=region)
+            resp = sm.get_secret_value(SecretId=secret_arn)
+            secret = json.loads(resp['SecretString'])
+            password = secret.get('DB_ROOT_PASSWORD', '')
+            if not password:
+              raise Exception(f'DB_ROOT_PASSWORD not found in secret: {secret_arn}.')
+            return password
+
+
+          def find_latest_ami(region, org_name, app_name):
+            ec2 = boto3.client('ec2', region_name=region)
+            resp = ec2.describe_images(
+              Owners=['self'],
+              Filters=[
+                {'Name': 'name', 'Values': [f'{org_name}_{app_name}_dr-image_*']},
+                {'Name': 'state', 'Values': ['available']}
+              ]
+            )
+            images = resp.get('Images', [])
+            if not images:
+              raise Exception(
+                f'No available DR AMIs found matching: {org_name}_{app_name}_dr-image_*. '
+                f'Ensure EC2 Image Builder has replicated at least one AMI to this region.'
+              )
+            images.sort(key=lambda x: x['CreationDate'], reverse=True)
+            return images[0]['ImageId']
+
+
+          def get_current_parameters(cf, stack_name):
+            resp = cf.describe_stacks(StackName=stack_name)
+            stack = resp['Stacks'][0]
+            return {p['ParameterKey']: p['ParameterValue'] for p in stack.get('Parameters', [])}
+
+
+          def update_stack(cf, stack_name, deploy_paid, extra_params=None):
+            if extra_params is None:
+              extra_params = {}
+            current_params = get_current_parameters(cf, stack_name)
+            parameters = []
+            for key in current_params:
+              if key == 'DeployPaidResources':
+                parameters.append({'ParameterKey': key, 'ParameterValue': deploy_paid})
+              elif key in extra_params and extra_params[key]:
+                parameters.append({'ParameterKey': key, 'ParameterValue': extra_params[key]})
+              else:
+                parameters.append({'ParameterKey': key, 'UsePreviousValue': True})
+            cf.update_stack(
+              StackName=stack_name,
+              UsePreviousTemplate=True,
+              Parameters=parameters,
+              Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
+            )
+
+
+          def notify(sns_topic_arn, subject, message):
+            if not sns_topic_arn:
+              return
+            try:
+              boto3.client('sns').publish(TopicArn=sns_topic_arn, Subject=subject, Message=message)
+            except Exception:
+              logger.warning('Failed to publish SNS notification', exc_info=True)
+
+####
+# Lambda — Failback
+####
+
+  FailbackLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-failback'
+      Description: |
+        DR Failback — app-agnostic. Called by FailbackStateMachine at each step.
+        Actions: delete_server_stacks | check_deletion_status | teardown_infrastructure
+      Handler: index.lambda_handler
+      Role: !GetAtt FailbackLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN:
+            Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            """
+            Called by Step Functions with action-specific payloads.
+
+            delete_server_stacks:
+              { "action": "delete_server_stacks", "app_stack_name": "...",
+                "server_stack_logical_ids": "Stack1,Stack2,...",
+                "app_name": "...", "sns_topic_arn": "..." }
+
+            check_deletion_status:
+              { "action": "check_deletion_status", "app_stack_name": "...",
+                "server_stack_logical_ids": "Stack1,Stack2,..." }
+              Returns: { "all_deleted": true/false, "pending": [...] }
+
+            teardown_infrastructure:
+              { "action": "teardown_infrastructure", "app_stack_name": "...",
+                "network_stack_name": "...", "app_name": "...", "sns_topic_arn": "..." }
+            """
+            action = event.get('action')
+            import os
+            region = os.environ['AWS_REGION']
+            cf = boto3.client('cloudformation', region_name=region)
+
+            if action == 'delete_server_stacks':
+              return delete_server_stacks(cf, event)
+            elif action == 'check_deletion_status':
+              return check_deletion_status(cf, event)
+            elif action == 'teardown_infrastructure':
+              return teardown_infrastructure(cf, event)
+            else:
+              raise ValueError(f'Unknown action: {action}')
+
+
+          def parse_logical_ids(event):
+            raw = event.get('server_stack_logical_ids', '')
+            return [s.strip() for s in raw.split(',') if s.strip()]
+
+
+          def delete_server_stacks(cf, event):
+            """
+            Resolves physical stack IDs from logical IDs and calls delete_stack (non-blocking).
+            Skips stacks already in DELETE_IN_PROGRESS or DELETE_COMPLETE.
+            """
+            app_stack   = event['app_stack_name']
+            app_name    = event.get('app_name', app_stack)
+            sns_topic   = event.get('sns_topic_arn', '') or os.environ.get('SNS_TOPIC_ARN', '')
+            logical_ids = parse_logical_ids(event)
+
+            initiated = []
+            skipped   = []
+
+            for logical_id in logical_ids:
+              try:
+                resource = cf.describe_stack_resource(
+                  StackName=app_stack,
+                  LogicalResourceId=logical_id
+                )['StackResourceDetail']
+                physical_id = resource['PhysicalResourceId']
+                status      = resource['ResourceStatus']
+
+                if status in ('DELETE_COMPLETE', 'DELETE_IN_PROGRESS'):
+                  logger.info(f'Skipping {logical_id} — already {status}')
+                  skipped.append(logical_id)
+                else:
+                  logger.info(f'Deleting {logical_id} ({physical_id}) — current status: {status}')
+                  cf.delete_stack(StackName=physical_id)
+                  initiated.append(logical_id)
+
+              except cf.exceptions.ClientError as e:
+                if 'does not exist' in str(e):
+                  logger.info(f'Skipping {logical_id} — stack does not exist')
+                  skipped.append(logical_id)
+                else:
+                  raise
+
+            summary = (
+              f'DR Failback — server stack deletion initiated for [{app_name}].\n'
+              f'Deleting : {initiated}\n'
+              f'Skipped  : {skipped}'
+            )
+            logger.info(summary)
+            notify(sns_topic, f'DR Failback — Deleting Server Stacks [{app_name}]', summary)
+            return {'initiated': initiated, 'skipped': skipped}
+
+
+          def check_deletion_status(cf, event):
+            """
+            Returns all_deleted=True only when every server stack is DELETE_COMPLETE or gone.
+            """
+            app_stack   = event['app_stack_name']
+            logical_ids = parse_logical_ids(event)
+            pending     = []
+
+            for logical_id in logical_ids:
+              try:
+                resource = cf.describe_stack_resource(
+                  StackName=app_stack,
+                  LogicalResourceId=logical_id
+                )['StackResourceDetail']
+                status = resource['ResourceStatus']
+                if status != 'DELETE_COMPLETE':
+                  logger.info(f'{logical_id} status: {status}')
+                  pending.append(logical_id)
+              except cf.exceptions.ClientError as e:
+                if 'does not exist' in str(e):
+                  pass  # already gone
+                else:
+                  raise
+
+            all_deleted = len(pending) == 0
+            logger.info(f'Deletion check — all_deleted={all_deleted}, pending={pending}')
+            return {'all_deleted': all_deleted, 'pending': pending}
+
+
+          def teardown_infrastructure(cf, event):
+            """
+            Updates app stack then network stack with DeployPaidResources=false.
+            Server stacks are already gone — ELB exports are now free to be removed.
+            """
+            app_stack     = event['app_stack_name']
+            network_stack = event['network_stack_name']
+            app_name      = event.get('app_name', app_stack)
+            sns_topic     = event.get('sns_topic_arn', '') or os.environ.get('SNS_TOPIC_ARN', '')
+
+            # Step 1: App stack — remove ELBs, Cache, DB
+            logger.info(f'[TEARDOWN 1/2] Updating app stack: {app_stack}')
+            update_stack(cf, app_stack, deploy_paid='false')
+
+            # Step 2: Network stack — remove NAT GWs, Jump Host, VPC Endpoints
+            logger.info(f'[TEARDOWN 2/2] Updating network stack: {network_stack}')
+            update_stack(cf, network_stack, deploy_paid='false')
+
+            summary = (
+              f'DR Failback teardown initiated for [{app_name}].\n'
+              f'App stack     : {app_stack}\n'
+              f'Network stack : {network_stack}\n\n'
+              f'CloudFormation is now deprovisioning ELBs, Cache, DB, and NAT GWs. '
+              f'S3, snapshots, and AMIs are retained.'
+            )
+            logger.info(summary)
+            notify(sns_topic, f'DR Failback — Teardown Initiated [{app_name}]', summary)
+            return {'statusCode': 200, 'body': summary}
+
+
+          def get_current_parameters(cf, stack_name):
+            resp = cf.describe_stacks(StackName=stack_name)
+            stack = resp['Stacks'][0]
+            return {p['ParameterKey']: p['ParameterValue'] for p in stack.get('Parameters', [])}
+
+
+          def update_stack(cf, stack_name, deploy_paid):
+            current_params = get_current_parameters(cf, stack_name)
+            parameters = []
+            for key in current_params:
+              if key == 'DeployPaidResources':
+                parameters.append({'ParameterKey': key, 'ParameterValue': deploy_paid})
+              else:
+                parameters.append({'ParameterKey': key, 'UsePreviousValue': True})
+            cf.update_stack(
+              StackName=stack_name,
+              UsePreviousTemplate=True,
+              Parameters=parameters,
+              Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
+            )
+
+
+          def notify(sns_topic_arn, subject, message):
+            if not sns_topic_arn:
+              return
+            try:
+              boto3.client('sns').publish(TopicArn=sns_topic_arn, Subject=subject, Message=message)
+            except Exception:
+              logger.warning('Failed to publish SNS notification', exc_info=True)
+
+####
+# Step Functions — Failback State Machine (Standard)
+####
+
+  FailbackStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${AWS::StackName}-failback'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "DR Failback — deletes server stacks, polls until gone, then tears down ELBs and network.",
+          "StartAt": "ValidateConfirmFailback",
+          "States": {
+
+            "ValidateConfirmFailback": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.confirm_failback",
+                  "BooleanEquals": true,
+                  "Next": "DeleteServerStacks"
+                }
+              ],
+              "Default": "FailbackRejected"
+            },
+
+            "FailbackRejected": {
+              "Type": "Fail",
+              "Error": "FailbackRejected",
+              "Cause": "confirm_failback must be true. Ensure DNS has been switched back to primary before proceeding."
+            },
+
+            "DeleteServerStacks": {
+              "Type": "Task",
+              "Resource": "${FailbackLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "delete_server_stacks",
+                "app_stack_name.$": "$.app_stack_name",
+                "server_stack_logical_ids.$": "$.server_stack_logical_ids",
+                "app_name.$": "$.app_name",
+                "sns_topic_arn.$": "$.sns_topic_arn"
+              },
+              "ResultPath": "$.delete_result",
+              "Next": "WaitForDeletion",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 15,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "WaitForDeletion": {
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckDeletionStatus"
+            },
+
+            "CheckDeletionStatus": {
+              "Type": "Task",
+              "Resource": "${FailbackLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_deletion_status",
+                "app_stack_name.$": "$.app_stack_name",
+                "server_stack_logical_ids.$": "$.server_stack_logical_ids"
+              },
+              "ResultPath": "$.check_result",
+              "Next": "AllDeleted",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "AllDeleted": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.check_result.all_deleted",
+                  "BooleanEquals": true,
+                  "Next": "TeardownInfrastructure"
+                }
+              ],
+              "Default": "WaitForDeletion"
+            },
+
+            "TeardownInfrastructure": {
+              "Type": "Task",
+              "Resource": "${FailbackLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "teardown_infrastructure",
+                "app_stack_name.$": "$.app_stack_name",
+                "network_stack_name.$": "$.network_stack_name",
+                "app_name.$": "$.app_name",
+                "sns_topic_arn.$": "$.sns_topic_arn"
+              },
+              "ResultPath": "$.teardown_result",
+              "End": true,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailbackFailed": {
+              "Type": "Task",
+              "Resource": "${FailbackLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "notify_failure",
+                "app_name.$": "$.app_name",
+                "sns_topic_arn.$": "$.sns_topic_arn",
+                "error.$": "$.error"
+              },
+              "Next": "FailState"
+            },
+
+            "FailState": {
+              "Type": "Fail",
+              "Error": "FailbackFailed",
+              "Cause": "DR Failback failed. Check SNS notification and CloudWatch logs."
+            }
+
+          }
+        }
+
+####
+# Outputs
+####
+
+Outputs:
+
+  FailoverLambdaArn:
+    Description: ARN of the centralized DR Failover Lambda
+    Value: !GetAtt FailoverLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FailoverLambdaArn'
+
+  FailoverLambdaName:
+    Description: Name of the centralized DR Failover Lambda
+    Value: !Ref FailoverLambdaFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-FailoverLambdaName'
+
+  FailbackStateMachineArn:
+    Description: ARN of the centralized DR Failback State Machine
+    Value: !Ref FailbackStateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-FailbackStateMachineArn'
+
+  FailbackStateMachineName:
+    Description: Name of the centralized DR Failback State Machine
+    Value: !GetAtt FailbackStateMachine.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-FailbackStateMachineName'
