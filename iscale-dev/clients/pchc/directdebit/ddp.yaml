@@ -1,0 +1,1056 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Direct Debit Platform Resources
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Load Balancer Configuration
+        Parameters:
+          - ClientDomainName
+          - DeletionProtection
+          - LoadBalancerCertificateArn
+          - LoadBalancerHostName
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceKeyName
+          - InstanceAMI
+      - Label:
+          default: Scheduler Configuration
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+      - Label:
+          default: Disaster Recovery
+        Parameters:
+          - DeployPaidResources
+          - SnapshotIdentifier
+          - DBMasterUserPassword
+          - EnableCrossRegionBackupReplication
+          - SourceDbInstanceArn
+          - BackupReplicationRetentionPeriod
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DeletionProtection:
+        default: ELB deletion protection
+      InstanceAMI:
+        default: Instance AMI ID
+      InstanceKeyName:
+        default: Instance Key Name
+      LoadBalancerCertificateArn:
+        default: Load Balancer SSL Certificate ARN
+      LoadBalancerHostName:
+        default: Load Balancer Host Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      ClientDomainName:
+        default: Domain Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      SnapshotIdentifier:
+        default: DB Snapshot Identifier (DR failover restore — leave blank for normal)
+      DBMasterUserPassword:
+        default: DB Master Password (DR failover only — leave blank for normal)
+      EnableCrossRegionBackupReplication:
+        default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
+      SourceDbInstanceArn:
+        default: Source DB Instance ARN (live region — required when replication is enabled)
+      BackupReplicationRetentionPeriod:
+        default: Backup Retention Period in DR region (days)
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 2
+    MaxLength: 9
+    Default: ddp
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com)
+    Type: String
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: pchcdev.com
+    MinLength: 1
+  DeletionProtection:
+    Description: Set to true to enable deletion protection (for production only)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-02166c47d457c16a3 #Default Amazon Linux 2023
+  InstanceKeyName:
+    Description: Instance Key Name
+    Type: String
+    Default: ''
+  LoadBalancerHostName:
+    Description: (Optional) Custom Hostname for load balancer URL
+    Type: String
+    Default: ''
+    MaxLength: 12
+  LoadBalancerCertificateArn:
+    Description: SSL Certificate for the ELB
+    Type: String
+    Default: arn:aws:acm:ap-southeast-1:470455329885:certificate/9f713d5d-cb7c-4e8e-acc2-46862d610ec8
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: pchc-dev-ase1-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: pchc-dev-ase1-sns
+    MinLength: 1
+  StartScheduleExpression:
+    Description: Schedule expression when to start the objects
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+  StopScheduleExpression:
+    Description: Schedule expression when to stop the objects
+    Type: String
+    Default: cron(0 10 ? * MON-FRI *)
+  DeployPaidResources:
+    Description: |
+      true (default): Deploy all paid resources — DB, Cache, LBs, and App Servers. Normal operation for all environments.
+      false: DR standby mode — suppress all paid resources to minimize idle cost. Only CodeDeploy infra stays alive.
+      DR failover: set back to true and provide SnapshotIdentifier to restore DB from the cross-region backup.
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  SnapshotIdentifier:
+    Description: |
+      (DR Failover only) ARN of the RDS snapshot to restore the database from.
+      Obtain by copying the latest automated backup from the live region into the DR region before failover.
+      Leave blank for normal fresh DB creation — existing deployments are unaffected.
+    Type: String
+    Default: ''
+  DBMasterUserPassword:
+    Description: |
+      (DR Failover only) Master user password of the source database.
+      Provide this during snapshot restore so the Secrets Manager secret stays in sync with the restored DB credentials.
+      Leave blank for auto-generated password — existing deployments are unaffected.
+    Type: String
+    Default: ''
+    NoEcho: true
+  EnableCrossRegionBackupReplication:
+    Description: |
+      Set to true to enable cross-region automated backup replication for the DB.
+      Deploy with this enabled in the DR region stack, pointing SourceDbInstanceArn to the live DB.
+      Replicates daily snapshots + transaction logs — enables PITR with ~5 minute RPO in the DR region.
+      Default false — existing deployments are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  SourceDbInstanceArn:
+    Description: |
+      ARN of the live region RDS DB instance to replicate from.
+      Required when EnableCrossRegionBackupReplication=true.
+      Format: arn:aws:rds:<live-region>:<account-id>:db:<db-identifier>
+      Obtain from the live stack DBStack output: DBInstanceARN.
+    Type: String
+    Default: ''
+  BackupReplicationRetentionPeriod:
+    Description: Number of days to retain replicated backups in the DR region (1-35)
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsDR: !Or
+    - !Equals [!Ref EnvName, ProductionDR]
+    - !Equals [!Ref EnvName, StagingDR]
+    - !Equals [!Ref EnvName, DevelopmentDR]
+    - !Equals [!Ref EnvName, TestDR]
+  IsProdOrProductionDR: !Or
+    - Condition: IsProd
+    - !Equals [!Ref EnvName, ProductionDR]
+  # IsDeployPaidResources is driven by the explicit DeployPaidResources parameter (default true).
+  # DR standby: set DeployPaidResources=false to suppress DB, Cache, LBs, and App Servers.
+  # TO ACTIVATE FAILOVER: update the stack with DeployPaidResources=true and provide
+  # SnapshotIdentifier (cross-region snapshot ARN) and DBMasterUserPassword to restore the DB.
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
+  IsDRAndEnableCrossRegionBackupReplication: !And
+    - Condition: IsDR
+    - Condition: IsEnableCrossRegionBackupReplication
+  IsNotProdAndDeployPaidResources: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
+  IsProdOrProductionDRAndDeployPaidResources: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResources
+  IsDashboardDeployed: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResources
+
+Resources:
+
+##
+# Application Resources
+##
+
+# Database
+
+  DBStack:
+    # Set IsDeployPaidResources=false (i.e. DR env) to suppress. See conditions for failover instructions.
+    Condition: IsDeployPaidResources
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Ref Name
+        DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: !If [IsProd, 1000, 100]
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: mysql
+        EngineVersion: 8.4.7
+        Family: mysql8.4
+        InstanceType: !If [IsProd, db.t4g.medium, db.t4g.medium]
+        MasterUser: root
+        MultiAz: !If [IsProd, true, false]
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+        StorageType: gp3 # more IOPS
+        SnapshotIdentifier: !Ref SnapshotIdentifier
+        MasterUserPassword: !Ref DBMasterUserPassword
+        ExistingSecretArn: !If [IsDR, !Ref DRDBSecret, '']
+
+  DBSchedulerStack:
+    DependsOn:
+      - DBStack
+    Condition: IsNotProdAndDeployPaidResources
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        DatabaseInstanceName:
+          Fn::GetAtt:
+            - DBStack
+            - Outputs.DBInstanceName
+
+####
+# Disaster Recovery
+# All resources below are deployed ONLY when EnvName is a DR variant (ProductionDR, StagingDR, etc.).
+# These resources are always-on in the DR region at zero/minimal cost.
+# They pre-provision the infrastructure needed to activate the environment at failover time.
+####
+
+  # Placeholder Secrets Manager secret for DB credentials in the DR region.
+  # Created at DR stack deploy time with placeholder values.
+  # The secrets-sync Lambda overwrites the values whenever the live region secret rotates,
+  # ensuring correct credentials are available before failover is triggered.
+  # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
+  # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
+  DRDBSecret:
+    Condition: IsDR
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: !Sub 'DR placeholder secret for ${OrgName} ${Name} — values synced from the live region secret by the secrets-sync Lambda before failover.'
+      SecretString: !Sub |
+        {
+          "DB_ROOT_USER": "root",
+          "DB_ROOT_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "DB_NAME": "${Name}db",
+          "DB_USER": "${Name}",
+          "DB_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "MAGENTO_ADMIN_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE"
+        }
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  # Pre-deployed DB subnet group for PITR restore in DR standby.
+  # Uses -dr suffix to avoid naming conflict with DBStack's own subnet group at failover.
+  DBStandbySubnetGroup:
+    Condition: IsDR
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      DBSubnetGroupName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+
+  # Pre-deployed DB security group for PITR restore in DR standby.
+  # App server stacks can add ingress rules to this SG at restore time.
+  DBStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+
+  # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
+  # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
+  # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
+  DBReplicationStack:
+    Condition: IsDRAndEnableCrossRegionBackupReplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-replication.yaml
+      Parameters:
+        Name: !Ref Name
+        OrgName: !Ref OrgName
+        EnvName: !Ref EnvName
+        SourceDbInstanceArn: !Ref SourceDbInstanceArn
+        BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
+
+  AllowJumpHostIntoDB:
+    Condition: IsDeployPaidResources
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.SecurityGroupId
+      FromPort:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.DBInstancePort
+      ToPort:
+        Fn::GetAtt:
+          - DBStack
+          - Outputs.DBInstancePort
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  CacheStack:
+    # Set IsDeployPaidResources=false (i.e. DR env) to suppress. See conditions for failover instructions.
+    Condition: IsDeployPaidResources
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        EncryptInTransit: TRUE
+        EngineVersion: 6.0
+        NodeType: cache.t3.micro
+        NumCacheClusters: 1
+        OrgName: !Ref OrgName
+        SnapshotRetentionLimit: !If [IsProd, 30, !Ref 'AWS::NoValue']
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: TRUE
+
+###
+# Portal App Server
+###
+
+  PortalELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, portal]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        DeletionProtection: !Ref DeletionProtection
+        SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+        InstancePort: 80
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        DeployPaidResources: !Ref DeployPaidResources
+
+  PortalDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, portal]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  PortalServerStack:
+    DependsOn:
+      - PortalDeployStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGMaxSize: 3
+        ASGDesiredSize: !If [IsDR, 0, 3]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 80
+        InstanceSubnet: Private
+        InstanceType: t3.large
+        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', ddp]
+        LoadBalancerStackName: !If
+          - IsDeployPaidResources
+          - !Select [ 1, !Split [ '/', !Ref PortalELBStack]]
+          - ''
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
+        VolumeSize: 10 #GB
+        VolumeType: gp3
+        LaunchTemplate: True
+
+  PortalSchedulerStack:
+    DependsOn:
+      - PortalServerStack
+    Condition: IsNotProdAndDeployPaidResources
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - PortalDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - PortalDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+###
+# API
+###
+
+  NetworkAPIELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, api]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        DeletionProtection: !Ref DeletionProtection
+        ElbProtocol: TCP
+        ElbType: network
+        InstancePort: 443
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        DeployPaidResources: !Ref DeployPaidResources
+
+  APIServerDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,api]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  APIServerStack:
+    DependsOn:
+      - APIServerDeployStack
+      - PortalServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,api]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGMaxSize: 3
+        ASGDesiredSize: !If [IsDR, 0, 3]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
+        ExternalEFSID:
+          Fn::GetAtt: [PortalServerStack, Outputs.AppServerEFS]
+        ExternalEFSSecurityGroup:
+          Fn::GetAtt: [PortalServerStack, Outputs.AppServerEFSSecurityGroup]
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 443
+        InstanceSubnet: Private
+        InstanceType: t3.large
+        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', api-ddp]
+        LoadBalancerStackName: !If
+          - IsDeployPaidResources
+          - !Select [ 1, !Split [ '/', !Ref NetworkAPIELBStack]]
+          - ''
+        LoadBalancerStackType: Network
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
+        VolumeSize: 10 #GB
+        VolumeType: gp3
+        LaunchTemplate: True
+
+  AllowHTTPtoPesonetAPIAppServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow HTTP
+      IpProtocol: TCP
+      GroupId:
+        Fn::GetAtt:
+          - APIServerStack
+          - Outputs.AppServerSecurityGroup
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  APIServerSchedulerStack:
+    DependsOn:
+      - APIServerStack
+    Condition: IsNotProdAndDeployPaidResources
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - APIServerDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - APIServerDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+###
+# Sidekiq
+###
+
+  NetworkSidekiqELBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name, kiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CertificateArn: !Ref LoadBalancerCertificateArn
+        DeletionProtection: !Ref DeletionProtection
+        ElbProtocol: TCP
+        ElbType: network
+        InstancePort: 443
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+        DeployPaidResources: !Ref DeployPaidResources
+
+  SidekiqServerDeployStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,skiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        NetworkStackName: !Ref NetworkStackName
+        SNSStackName: !Ref SNSStackName
+
+  SidekiqServerStack:
+    DependsOn:
+      - SidekiqServerDeployStack
+      - PortalServerStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
+      Parameters:
+        Name: !Join ['-', [!Ref Name,skiq]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        ASGMaxSize: 1
+        ASGDesiredSize: !If [IsDR, 0, 1]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
+        ClientDomainName: !Ref ClientDomainName
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
+        ExternalEFSID:
+          Fn::GetAtt: [PortalServerStack, Outputs.AppServerEFS]
+        ExternalEFSSecurityGroup:
+          Fn::GetAtt: [PortalServerStack, Outputs.AppServerEFSSecurityGroup]
+        InstanceAMI: !Ref InstanceAMI
+        InstanceKeyName: !Ref InstanceKeyName
+        InstancePort: 443
+        InstanceSubnet: Private
+        InstanceType: !If [IsProd, t3.large, t3.medium]
+        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', ddp-skiq]
+        LoadBalancerStackName: !If
+          - IsDeployPaidResources
+          - !Select [ 1, !Split [ '/', !Ref NetworkSidekiqELBStack]]
+          - ''
+        LoadBalancerStackType: Network
+        NetworkStackName: !Ref NetworkStackName
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
+        SNSStackName: !Ref SNSStackName
+        UseFriendlyNames: FALSE
+        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
+        VolumeSize: 10 #GB
+        VolumeType: gp3
+        LaunchTemplate: True
+
+  SidekiqServerSchedulerStack:
+    DependsOn:
+      - SidekiqServerStack
+    Condition: IsNotProdAndDeployPaidResources
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
+        UseFriendlyNames: FALSE
+        CodeDeployApplicationName:
+          Fn::GetAtt:
+            - SidekiqServerDeployStack
+            - Outputs.CodeDeployApplicationName
+        CodeDeployDeploymentGroupName:
+          Fn::GetAtt:
+            - SidekiqServerDeployStack
+            - Outputs.CodeDeployDeploymentGroupName
+
+  BackupStack:
+    DependsOn:
+      - DBStack
+      - PortalServerStack
+    Condition: IsProdOrProductionDRAndDeployPaidResources
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        BackupARNList: !Join
+          - ','
+          - - Fn::GetAtt:
+              - DBStack
+              - Outputs.DBInstanceARN
+            - Fn::GetAtt:
+              - PortalServerStack
+              - Outputs.AppServerEFSArn
+        BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
+
+  Dashboard:
+    DependsOn:
+      - DBStack
+      - CacheStack
+      - PortalELBStack
+      - PortalServerStack
+      - APIServerStack
+    Condition: IsDashboardDeployed
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+        DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        DashboardBody: !Sub
+          - |
+            {
+              "widgets": [
+                {
+                  "height": 12,
+                  "width": 6,
+                  "y": 0,
+                  "x": 0,
+                  "type": "alarm",
+                  "properties": {
+                    "title": "Alarms",
+                    "alarms": [
+                      "${CACHE_HIGH_CPU}",
+                      "${CACHE_LOW_MEM}",
+                      "${DB_HIGH_CPU}",
+                      "${DB_LOW_STORAGE}",
+                      "${DB_LOW_CPU_CREDIT}",
+                      "${DB_ERRORS}",
+                      "${DB_ERROR_DENIED}",
+                      "${TG_UNHEALTHY}",
+                      "${TG_SLOW}"
+                    ]
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 6,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS" } ],
+                      [ "AWS/ElastiCache", "CPUUtilization", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis" } ],
+                      [ "AWS/EC2", "CPUUtilization", "ImageId", "${APP_SERVER_AMI}" , { "label": "App Servers" }]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "CPU",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "label": "Utilization"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 6,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ { "expression": "100-((m4/(16*1024*1000000))*100)", "label": "RDS (memory)", "id": "e1", "region": "${REGION}" } ],
+                      [ "AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m4", "visible": false } ],
+                      [ "AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis (memory)" } ],
+                      [ "CWAgent", "mem_used_percent", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "${APP_SERVER_TYPE}" , { "label": "App Servers (memory)" }],
+                      [ { "expression": "100-(m1/(20*1024*1000000)*100)", "label": "RDS (disk)", "id": "e2", "region": "${REGION}" } ],
+                      [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m1", "visible": false } ],
+                      [ "CWAgent", "disk_used_percent", "path", "/", "InstanceId", "${APP_SERVER_ID}", "AutoScalingGroupName", "${ASG_GROUP_NAME}", "ImageId", "${APP_SERVER_AMI}", "InstanceType", "${APP_SERVER_TYPE}", "device", "nvme0n1p1", "fstype", "xfs" , { "label": "App Servers (disk)" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "Memory / Storage",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "label": "Utilization"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 12,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
+                      [ "AWS/RDS", "ReadLatency", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" } ],
+                      [ ".", "WriteLatency", ".", ".", { "label": "RDS Write" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "Performance",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "showUnits": true,
+                        "label": "Time"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 18,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/EC2", "NetworkIn", "ImageId", "${APP_SERVER_AMI}", { "label": "App Servers (In)" }],
+                      [ ".", "NetworkOut", ".", ".", { "label": "App Servers (out)" }],
+                      [ "AWS/ApplicationELB", "ProcessedBytes", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
+                      [ "AWS/RDS", "NetworkReceiveThroughput", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS (In)" }],
+                      [ ".", "NetworkTransmitThroughput", ".", ".", { "label": "RDS (Out)" }],
+                      [ "AWS/ElastiCache", "NetworkBytesIn", "CacheClusterId", "${CACHE_INSTANCE_ID}", { "label": "Redis (In)" }],
+                      [ ".", "NetworkBytesOut", ".", ".", { "label": "Redis (Out)" }]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "title": "Network",
+                    "region": "${REGION}",
+                    "period": 300,
+                    "stat": "Average",
+                    "legend": {
+                      "position": "bottom"
+                    },
+                    "yAxis": {
+                      "left": {
+                        "label": "Volume"
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 12,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/RDS", "ReadThroughput", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" }],
+                      [ ".", "WriteThroughput", ".", ".", { "label": "RDS Write" }],
+                      [ "AWS/EFS", "DataReadIOBytes", "FileSystemId", "${EFS_ID}", { "label": "EFS Read" }],
+                      [ ".", "DataWriteIOBytes", ".", ".", { "label": "EFS Write" }]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "period": 300,
+                    "title": "I/O",
+                    "stat": "Average",
+                    "yAxis": {
+                      "left": {
+                        "label": "Count",
+                        "showUnits": false
+                      }
+                    }
+                  }
+                },
+                {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 18,
+                  "type": "metric",
+                  "properties": {
+                    "metrics": [
+                      [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB HTTP 5XX_Count" } ],
+                      [ ".", "HTTPCode_ELB_4XX_Count", ".", ".", { "label": "ELB HTTP 4XX_Count" } ]
+                    ],
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${REGION}",
+                    "title": "Error Count",
+                    "period": 300,
+                    "stat": "Average"
+                  }
+                }
+              ]
+            }
+          - CACHE_HIGH_CPU: !GetAtt [CacheStack, Outputs.HighCPUAlarm]
+            CACHE_LOW_MEM: !GetAtt [CacheStack, Outputs.LowMemoryAlarm]
+            DB_HIGH_CPU: !GetAtt [DBStack, Outputs.DBHighCPUAlarm]
+            DB_LOW_STORAGE: !GetAtt [DBStack, Outputs.DBLowStorageAlarm]
+            DB_LOW_CPU_CREDIT: !GetAtt [DBStack, Outputs.CPUCreditBalanceAlarm]
+            DB_ERRORS: !GetAtt [DBStack, Outputs.DBErrorsAlarm]
+            DB_ERROR_DENIED: !GetAtt [DBStack, Outputs.DBErrorDeniedAlarm]
+            TG_SLOW: !GetAtt [APIServerStack, Outputs.AppServerSlowTargetGroupAlarm]
+            TG_UNHEALTHY: !GetAtt [APIServerStack, Outputs.UnhealthyTargetGroupAlarm]
+            DB_INSTANCE_ID: !GetAtt [DBStack, Outputs.DBInstanceName]
+            CACHE_INSTANCE_ID: !Join ['-', [!GetAtt [CacheStack, Outputs.ElasticacheReplicationGroup], '001']]
+            REGION: !Ref 'AWS::Region'
+            ELB_FULL_NAME: !GetAtt [PortalELBStack, Outputs.LoadBalancerFullName]
+            ASG_GROUP_NAME: "CodeDeploy_pchc-prd-ase1-pesonet-APIServerDeployStack-1QYHN20GUEB0A-CodeDeployDeploymentGroup-1VK61UCQ8GMCY_d-KRKVJ95SJ" #First time, it will be empty, that's OK
+            APP_SERVER_AMI: !Ref InstanceAMI
+            APP_SERVER_ID: i-0d6e53ff58d0902e6 #Hardcoded for now
+            APP_SERVER_TYPE: t3.medium
+            EFS_ID: !GetAtt [PortalServerStack, Outputs.AppServerEFS]
+
+Outputs:
+
+  DRDBSecretArn:
+    Condition: IsDR
+    Description: ARN of the DR Secrets Manager secret — set this in the secrets-sync Lambda so it keeps values current from the live region
+    Value: !Ref DRDBSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-DRDBSecretArn'
+
+  DBStandbySubnetGroup:
+    Condition: IsDR
+    Description: Pre-deployed DB subnet group for PITR restore — use in restore-db-instance-from-db-snapshot command
+    Value: !Ref DBStandbySubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySubnetGroup'
+
+  DBStandbySecurityGroup:
+    Condition: IsDR
+    Description: Pre-deployed DB security group for PITR restore — use in restore-db-instance-from-db-snapshot command
+    Value: !GetAtt DBStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySecurityGroupId'
+
+# DeploymentUserGroup:
+#   Description: Add the BitBucket user into this group
+#   Value:
+#       Fn::GetAtt:
+#         - AppServerDeployStack
+#         - Outputs.DeploymentUserGroup
