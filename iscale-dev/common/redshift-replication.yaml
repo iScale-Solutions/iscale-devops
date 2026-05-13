@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  Enables Redshift cross-region snapshot copy for a source cluster via a Lambda
+  custom resource. Deploy in the DESTINATION (DR) region. The Lambda calls
+  redshift:EnableSnapshotCopy on the live-region cluster cross-region, copying
+  automated snapshots to this region. On stack delete, snapshot copy is disabled.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Replication Configuration
+        Parameters:
+          - SourceClusterIdentifier
+          - SourceRegion
+          - RetentionPeriod
+          - SnapshotCopyGrantName
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      SourceClusterIdentifier:
+        default: Source Redshift Cluster Identifier (live region)
+      SourceRegion:
+        default: Source Region (live region)
+      RetentionPeriod:
+        default: Snapshot Retention Period in DR region (days)
+      SnapshotCopyGrantName:
+        default: Snapshot Copy Grant Name (KMS, optional)
+
+Parameters:
+  Name:
+    Description: Unique name/identifier matching the source app stack name
+    Type: String
+    MinLength: 3
+    MaxLength: 12
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+  EnvName:
+    Description: The name of the environment (DR region environment name)
+    Type: String
+    Default: ProductionDR
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+      - PreProd
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+  SourceClusterIdentifier:
+    Description: |
+      Identifier of the live region Redshift cluster to copy snapshots from.
+      This is the cluster identifier string (not ARN).
+      Obtain from the live stack RedshiftStack output or the Redshift console
+    Type: String
+    ConstraintDescription: Must be a valid Redshift cluster identifier
+  SourceRegion:
+    Description: |
+      AWS region where the live Redshift cluster is deployed (e.g. ap-southeast-1).
+      The Lambda calls the Redshift API in this region to enable snapshot copy.
+    Type: String
+  RetentionPeriod:
+    Description: Number of days to retain copied snapshots in the DR region (1-35)
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+  SnapshotCopyGrantName:
+    Description: |
+      (Optional) Name of the snapshot copy grant in the DR region for KMS-encrypted clusters.
+      Required only if the source cluster is encrypted with a customer-managed KMS key.
+      Leave blank if the cluster uses the default AWS-managed key.
+    Type: String
+    Default: ''
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasSnapshotCopyGrant: !Not [!Equals [!Ref SnapshotCopyGrantName, '']]
+
+Resources:
+
+####
+# IAM
+####
+
+  ReplicationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RedshiftReplicationPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift:EnableSnapshotCopy
+                  - redshift:DisableSnapshotCopy
+                  - redshift:DescribeSnapshotCopies
+                Resource: '*'
+
+####
+# Lambda custom resource
+####
+
+  ReplicationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-', [!Ref OrgName, !Ref Name, redshift, replication]]
+      Description: |
+        Custom resource Lambda that enables/disables Redshift cross-region snapshot copy.
+        Calls EnableSnapshotCopy on Create, DisableSnapshotCopy on Delete — cross-region
+        to the live region where the source cluster is deployed.
+      Handler: index.lambda_handler
+      Role: !GetAtt ReplicationLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+            logger.info(event)
+            request_type = event['RequestType']
+            props = event['ResourceProperties']
+
+            cluster_id = props['SourceClusterIdentifier']
+            source_region = props['SourceRegion']
+            retention = int(props['RetentionPeriod'])
+            grant_name = props.get('SnapshotCopyGrantName', '')
+            dr_region = context.invoked_function_arn.split(':')[3]
+
+            # Call Redshift API in the live region (source_region), not the DR region
+            redshift = boto3.client('redshift', region_name=source_region)
+
+            try:
+              if request_type == 'Create':
+                kwargs = dict(
+                  ClusterIdentifier=cluster_id,
+                  DestinationRegion=dr_region,
+                  RetentionPeriod=retention,
+                )
+                if grant_name:
+                  kwargs['SnapshotCopyGrantName'] = grant_name
+                redshift.enable_snapshot_copy(**kwargs)
+                logger.info(f'Snapshot copy enabled from {cluster_id} ({source_region}) to {dr_region}')
+
+              elif request_type == 'Update':
+                old_props = event.get('OldResourceProperties', {})
+                old_cluster_id = old_props.get('SourceClusterIdentifier', cluster_id)
+                old_source_region = old_props.get('SourceRegion', source_region)
+
+                # If source cluster or region changed, disable old and re-enable
+                if old_cluster_id != cluster_id or old_source_region != source_region:
+                  old_redshift = boto3.client('redshift', region_name=old_source_region)
+                  try:
+                    old_redshift.disable_snapshot_copy(ClusterIdentifier=old_cluster_id)
+                    logger.info(f'Disabled old snapshot copy from {old_cluster_id} ({old_source_region})')
+                  except Exception as e:
+                    logger.warning(f'Could not disable old snapshot copy: {str(e)} — continuing')
+
+                kwargs = dict(
+                  ClusterIdentifier=cluster_id,
+                  DestinationRegion=dr_region,
+                  RetentionPeriod=retention,
+                )
+                if grant_name:
+                  kwargs['SnapshotCopyGrantName'] = grant_name
+                redshift.enable_snapshot_copy(**kwargs)
+                logger.info(f'Snapshot copy re-enabled from {cluster_id} ({source_region}) to {dr_region}')
+
+              elif request_type == 'Delete':
+                try:
+                  redshift.disable_snapshot_copy(ClusterIdentifier=cluster_id)
+                  logger.info(f'Snapshot copy disabled for {cluster_id}')
+                except redshift.exceptions.SnapshotCopyAlreadyDisabledFault:
+                  logger.warning(f'Snapshot copy already disabled for {cluster_id} — skipping')
+                except Exception as e:
+                  # Log but do not fail DELETE — always allow stack cleanup
+                  logger.warning(f'Could not disable snapshot copy: {str(e)} — continuing delete')
+
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                'SourceClusterIdentifier': cluster_id,
+                'SourceRegion': source_region,
+                'RetentionPeriod': str(retention),
+              })
+
+            except Exception as e:
+              logger.exception('Error managing Redshift snapshot copy')
+              if request_type == 'Delete':
+                logger.warning('Returning SUCCESS on Delete despite error to allow stack cleanup')
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              else:
+                cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  RedshiftSnapshotCopy:
+    Type: Custom::RedshiftSnapshotCopy
+    Properties:
+      ServiceToken: !GetAtt ReplicationLambdaFunction.Arn
+      SourceClusterIdentifier: !Ref SourceClusterIdentifier
+      SourceRegion: !Ref SourceRegion
+      RetentionPeriod: !Ref RetentionPeriod
+      SnapshotCopyGrantName: !If [HasSnapshotCopyGrant, !Ref SnapshotCopyGrantName, '']
+
+Outputs:
+
+  SourceClusterIdentifier:
+    Description: Identifier of the source Redshift cluster being replicated
+    Value: !Ref SourceClusterIdentifier
+
+  SourceRegion:
+    Description: Region of the source Redshift cluster being replicated
+    Value: !Ref SourceRegion
+
+  RetentionPeriod:
+    Description: Retention period for replicated backups in DR region
+    Value: !Ref RetentionPeriod
+
+  ReplicationNote:
+    Description: How to use copied snapshots at failover
+    Value: !Sub |
+      At failover, go to Redshift in ${AWS::Region} → Snapshots → Cluster snapshots.
+      Select the most recent copied snapshot and restore to a cluster using the
+      same identifier that common/redshift.yaml will create.
+      Complete the restore before updating the app stack with DeployPaidResources=true.
