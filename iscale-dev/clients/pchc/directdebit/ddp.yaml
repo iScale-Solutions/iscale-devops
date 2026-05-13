@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Pesonet20 Resources
+Description: Direct Debit Platform Resources
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -86,9 +86,9 @@ Parameters:
   Name:
     Description: Unique name/identifier (Can be client name or resource name)
     Type: String
-    MinLength: 3
+    MinLength: 2
     MaxLength: 9
-    Default: pesonet20
+    Default: ddp
   OrgName:
     Description: The name of the organization
     Type: String
@@ -125,7 +125,7 @@ Parameters:
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-00b8d9cb8a7161e41 #Default Amazon Linux 2 for Singapore
+    Default: ami-02166c47d457c16a3 #Default Amazon Linux 2023
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -271,7 +271,7 @@ Resources:
         Engine: mysql
         EngineVersion: 8.4.7
         Family: mysql8.4
-        InstanceType: !If [IsProd, db.t4g.2xlarge, db.t4g.medium]
+        InstanceType: !If [IsProd, db.t4g.medium, db.t4g.medium]
         MasterUser: root
         MultiAz: !If [IsProd, true, false]
         NetworkStackName: !Ref NetworkStackName
@@ -423,15 +423,15 @@ Resources:
         UseFriendlyNames: TRUE
 
 ###
-# App Server Treasury
+# Portal App Server
 ###
 
-  TreasuryELBStack:
+  PortalELBStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
       Parameters:
-        Name: !Join ['-', [!Ref Name, tre]]
+        Name: !Join ['-', [!Ref Name, portal]]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         CertificateArn: !Ref LoadBalancerCertificateArn
@@ -442,25 +442,25 @@ Resources:
         SNSStackName: !Ref SNSStackName
         DeployPaidResources: !Ref DeployPaidResources
 
-  TreasuryDeployStack:
+  PortalDeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
       Parameters:
-        Name: !Join ['-', [!Ref Name, tre]]
+        Name: !Join ['-', [!Ref Name, portal]]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
 
-  TreasuryServerStack:
+  PortalServerStack:
     DependsOn:
-      - TreasuryDeployStack
+      - PortalDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
       Parameters:
-        Name: !Join ['-', [!Ref Name, tre]]
+        Name: !Join ['-', [!Ref Name]]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         ASGMaxSize: 3
@@ -495,22 +495,10 @@ Resources:
         InstancePort: 80
         InstanceSubnet: Private
         InstanceType: t3.large
-        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', pesonet20]
+        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', ddp]
         LoadBalancerStackName: !If
           - IsDeployPaidResources
-          - !Select [ 1, !Split [ '/', !Ref TreasuryELBStack]]
-          - ''
-        LoadBalancerDNSName: !If
-          - IsDeployPaidResources
-          - !GetAtt TreasuryELBStack.Outputs.DNSName
-          - ''
-        LoadBalancerCanonicalHostedZoneID: !If
-          - IsDeployPaidResources
-          - !GetAtt TreasuryELBStack.Outputs.CanonicalHostedZoneID
-          - ''
-        LoadBalancerHttpListenerArn: !If
-          - IsDeployPaidResources
-          - !GetAtt TreasuryELBStack.Outputs.HttpListenerArn
+          - !Select [ 1, !Split [ '/', !Ref PortalELBStack]]
           - ''
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId: !If
@@ -521,12 +509,12 @@ Resources:
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
         VolumeSize: 10 #GB
-        VolumeType: gp2
+        VolumeType: gp3
         LaunchTemplate: True
 
-  TreasurySchedulerStack:
+  PortalSchedulerStack:
     DependsOn:
-      - TreasuryServerStack
+      - PortalServerStack
     Condition: IsNotProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -540,11 +528,11 @@ Resources:
         UseFriendlyNames: FALSE
         CodeDeployApplicationName:
           Fn::GetAtt:
-            - TreasuryDeployStack
+            - PortalDeployStack
             - Outputs.CodeDeployApplicationName
         CodeDeployDeploymentGroupName:
           Fn::GetAtt:
-            - TreasuryDeployStack
+            - PortalDeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
 ###
@@ -582,7 +570,7 @@ Resources:
   APIServerStack:
     DependsOn:
       - APIServerDeployStack
-      - TreasuryServerStack
+      - PortalServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -618,26 +606,18 @@ Resources:
           - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
           - ''
         ExternalEFSID:
-          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFS]
+          Fn::GetAtt: [PortalServerStack, Outputs.AppServerEFS]
         ExternalEFSSecurityGroup:
-          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFSSecurityGroup]
+          Fn::GetAtt: [PortalServerStack, Outputs.AppServerEFSSecurityGroup]
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 443
         InstanceSubnet: Private
         InstanceType: t3.large
-        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', api-pesonet20]
+        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', api-ddp]
         LoadBalancerStackName: !If
           - IsDeployPaidResources
           - !Select [ 1, !Split [ '/', !Ref NetworkAPIELBStack]]
-          - ''
-        LoadBalancerDNSName: !If
-          - IsDeployPaidResources
-          - !GetAtt NetworkAPIELBStack.Outputs.DNSName
-          - ''
-        LoadBalancerCanonicalHostedZoneID: !If
-          - IsDeployPaidResources
-          - !GetAtt NetworkAPIELBStack.Outputs.CanonicalHostedZoneID
           - ''
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
@@ -649,7 +629,7 @@ Resources:
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
         VolumeSize: 10 #GB
-        VolumeType: gp2
+        VolumeType: gp3
         LaunchTemplate: True
 
   AllowHTTPtoPesonetAPIAppServer:
@@ -723,7 +703,7 @@ Resources:
   SidekiqServerStack:
     DependsOn:
       - SidekiqServerDeployStack
-      - TreasuryServerStack
+      - PortalServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
@@ -759,26 +739,18 @@ Resources:
           - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
           - ''
         ExternalEFSID:
-          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFS]
+          Fn::GetAtt: [PortalServerStack, Outputs.AppServerEFS]
         ExternalEFSSecurityGroup:
-          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFSSecurityGroup]
+          Fn::GetAtt: [PortalServerStack, Outputs.AppServerEFSSecurityGroup]
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
         InstancePort: 443
         InstanceSubnet: Private
-        InstanceType: !If [IsProd, t3.2xlarge, t3.medium]
-        LoadBalancerHostName: !If [IsTest, pesonet20-skiq, 'AWS::NoValue']
+        InstanceType: !If [IsProd, t3.large, t3.medium]
+        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', ddp-skiq]
         LoadBalancerStackName: !If
           - IsDeployPaidResources
           - !Select [ 1, !Split [ '/', !Ref NetworkSidekiqELBStack]]
-          - ''
-        LoadBalancerDNSName: !If
-          - IsDeployPaidResources
-          - !GetAtt NetworkSidekiqELBStack.Outputs.DNSName
-          - ''
-        LoadBalancerCanonicalHostedZoneID: !If
-          - IsDeployPaidResources
-          - !GetAtt NetworkSidekiqELBStack.Outputs.CanonicalHostedZoneID
           - ''
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
@@ -790,7 +762,7 @@ Resources:
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
         VolumeSize: 10 #GB
-        VolumeType: gp2
+        VolumeType: gp3
         LaunchTemplate: True
 
   SidekiqServerSchedulerStack:
@@ -816,139 +788,10 @@ Resources:
             - SidekiqServerDeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
-###
-# Customer Service Stack
-###
-
-  CustomerServiceELBStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, cs]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        CertificateArn: !Ref LoadBalancerCertificateArn
-        DeletionProtection: !Ref DeletionProtection
-        SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
-        InstancePort: 80
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
-        DeployPaidResources: !Ref DeployPaidResources
-
-  CustomerServiceDeployStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/deployment.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, cs]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        NetworkStackName: !Ref NetworkStackName
-        SNSStackName: !Ref SNSStackName
-
-  CustomerServiceServerStack:
-    DependsOn:
-      - CustomerServiceDeployStack
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/appserver-basic2.yaml
-      Parameters:
-        Name: !Join ['-', [!Ref Name, cs]]
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        ASGMaxSize: 3
-        ASGDesiredSize: !If [IsDR, 0, 3]
-        CacheEndpoint: !If
-          - IsDeployPaidResources
-          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
-          - ''
-        CachePort: !If
-          - IsDeployPaidResources
-          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
-          - 6379
-        CacheSecurityGroupId: !If
-          - IsDeployPaidResources
-          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
-          - ''
-        ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint: !If
-          - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
-          - ''
-        DatabasePort: !If
-          - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
-          - 3306
-        DatabaseSecurityGroupId: !If
-          - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
-          - ''
-        ExternalEFSID:
-          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFS]
-        ExternalEFSSecurityGroup:
-          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFSSecurityGroup]
-        InstanceAMI: !Ref InstanceAMI
-        InstanceKeyName: !Ref InstanceKeyName
-        InstancePort: 80
-        InstanceSubnet: Private
-        InstanceType: t3.small
-        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', pesonet20-cs]
-        LoadBalancerStackName: !If
-          - IsDeployPaidResources
-          - !Select [ 1, !Split [ '/', !Ref CustomerServiceELBStack]]
-          - ''
-        LoadBalancerDNSName: !If
-          - IsDeployPaidResources
-          - !GetAtt CustomerServiceELBStack.Outputs.DNSName
-          - ''
-        LoadBalancerCanonicalHostedZoneID: !If
-          - IsDeployPaidResources
-          - !GetAtt CustomerServiceELBStack.Outputs.CanonicalHostedZoneID
-          - ''
-        LoadBalancerHttpListenerArn: !If
-          - IsDeployPaidResources
-          - !GetAtt CustomerServiceELBStack.Outputs.HttpListenerArn
-          - ''
-        NetworkStackName: !Ref NetworkStackName
-        SharedSecretId: !If
-          - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
-          - ''
-        SNSStackName: !Ref SNSStackName
-        UseFriendlyNames: FALSE
-        VolumeName: /dev/xvda # Amazon Linux 2 AMI uses /dev/xvda
-        VolumeSize: 10 #GB
-        VolumeType: gp2
-        LaunchTemplate: True
-
-  CustomerServiceSchedulerStack:
-    DependsOn:
-      - CustomerServiceServerStack
-    Condition: IsNotProdAndDeployPaidResources
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
-      Parameters:
-        Name: !Ref Name
-        EnvName: !Ref EnvName
-        OrgName: !Ref OrgName
-        StartScheduleExpression: !Ref StartScheduleExpression
-        StopScheduleExpression: !Ref StopScheduleExpression
-        UseFriendlyNames: FALSE
-        CodeDeployApplicationName:
-          Fn::GetAtt:
-            - CustomerServiceDeployStack
-            - Outputs.CodeDeployApplicationName
-        CodeDeployDeploymentGroupName:
-          Fn::GetAtt:
-            - CustomerServiceDeployStack
-            - Outputs.CodeDeployDeploymentGroupName
-
   BackupStack:
     DependsOn:
       - DBStack
-      - TreasuryServerStack
+      - PortalServerStack
     Condition: IsProdOrProductionDRAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -963,11 +806,17 @@ Resources:
               - DBStack
               - Outputs.DBInstanceARN
             - Fn::GetAtt:
-              - TreasuryServerStack
+              - PortalServerStack
               - Outputs.AppServerEFSArn
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
 
   Dashboard:
+    DependsOn:
+      - DBStack
+      - CacheStack
+      - PortalELBStack
+      - PortalServerStack
+      - APIServerStack
     Condition: IsDashboardDeployed
     Type: AWS::CloudWatch::Dashboard
     Properties:
@@ -1169,12 +1018,12 @@ Resources:
             DB_INSTANCE_ID: !GetAtt [DBStack, Outputs.DBInstanceName]
             CACHE_INSTANCE_ID: !Join ['-', [!GetAtt [CacheStack, Outputs.ElasticacheReplicationGroup], '001']]
             REGION: !Ref 'AWS::Region'
-            ELB_FULL_NAME: !GetAtt [TreasuryELBStack, Outputs.LoadBalancerFullName]
+            ELB_FULL_NAME: !GetAtt [PortalELBStack, Outputs.LoadBalancerFullName]
             ASG_GROUP_NAME: "CodeDeploy_pchc-prd-ase1-pesonet-APIServerDeployStack-1QYHN20GUEB0A-CodeDeployDeploymentGroup-1VK61UCQ8GMCY_d-KRKVJ95SJ" #First time, it will be empty, that's OK
             APP_SERVER_AMI: !Ref InstanceAMI
             APP_SERVER_ID: i-0d6e53ff58d0902e6 #Hardcoded for now
             APP_SERVER_TYPE: t3.medium
-            EFS_ID: !GetAtt [APIServerStack, Outputs.AppServerEFS]
+            EFS_ID: !GetAtt [PortalServerStack, Outputs.AppServerEFS]
 
 Outputs:
 
