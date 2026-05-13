@@ -37,6 +37,9 @@ Metadata:
           default: Disaster Recovery
         Parameters:
           - DeployPaidResources
+          - EnableRedshiftSnapshotCopy
+          - SourceClusterIdentifier
+          - SnapshotCopyRetentionPeriod
 
     ParameterLabels:
       Name:
@@ -73,6 +76,12 @@ Metadata:
         default: Reports Queries Instance AMI
       DeployPaidResources:
         default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      EnableRedshiftSnapshotCopy:
+        default: Enable Redshift Snapshot Copy for DR
+      SourceClusterIdentifier:
+        default: Source Redshift Cluster Identifier (live region)
+      SnapshotCopyRetentionPeriod:
+        default: Retention Period (days) for copied snapshots in DR region
 
 Parameters:
   Name:
@@ -176,6 +185,26 @@ Parameters:
     AllowedValues:
       - 'true'
       - 'false'
+  EnableRedshiftSnapshotCopy:
+    Description: Set to true in DR standby to enable cross-region snapshot copy from the live Redshift cluster
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  SourceClusterIdentifier:
+    Description: |
+      Identifier of the live region Redshift cluster to copy snapshots from.
+      Obtain from the live stack RedshiftStack output or the Redshift console.
+      Required when EnableRedshiftSnapshotCopy=true.
+    Type: String
+    Default: ''
+  SnapshotCopyRetentionPeriod:
+    Description: Number of days to retain copied snapshots in the DR region (1-35)
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
 
 Mappings:
   Fn::Transform:
@@ -200,6 +229,10 @@ Conditions:
     IsNotDevAndDeployPaidResources: !And
       - Condition: IsNotDev
       - Condition: IsDeployPaidResources
+    IsEnableRedshiftSnapshotCopy: !Equals [!Ref EnableRedshiftSnapshotCopy, 'true']
+    IsDRAndEnableRedshiftSnapshotCopy: !And
+      - Condition: IsDR
+      - Condition: IsEnableRedshiftSnapshotCopy
 
 Resources:
 
@@ -1193,6 +1226,33 @@ Resources:
       FromPort: 5439
       ToPort: 5439
       SourceSecurityGroupId: !GetAtt ReportQueriesSecurityGroup.GroupId
+
+####
+# Disaster Recovery — Redshift Snapshot Replication
+# Resources below are deployed ONLY when EnableRedshiftSnapshotCopy=true and EnvName is a DR variant.
+# These run at zero cost in the DR region (Lambda custom resource only — no cluster).
+# They pre-configure snapshot copy so that a recent Redshift snapshot is available at failover time.
+####
+
+# Enables cross-region snapshot copy from the live Redshift cluster to this DR region.
+# The Lambda calls redshift:EnableSnapshotCopy on the live cluster cross-region (SourceRegion),
+# so automated snapshots are continuously copied here on the cluster's snapshot schedule.
+# At failover, restore the Redshift cluster manually from the most recent copied snapshot
+# before updating the stack with DeployPaidResources=true.
+# On stack delete, the Lambda disables snapshot copy automatically.
+
+  RedshiftReplicationStack:
+    Condition: IsDRAndEnableRedshiftSnapshotCopy
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/redshift-replication.yaml
+      Parameters:
+        Name: !Ref Name
+        OrgName: !Ref OrgName
+        EnvName: !Ref EnvName
+        SourceClusterIdentifier: !Ref SourceClusterIdentifier
+        SourceRegion: !Ref SourceRegion
+        RetentionPeriod: !Ref SnapshotCopyRetentionPeriod
 
 Outputs:
 
