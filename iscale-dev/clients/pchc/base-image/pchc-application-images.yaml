@@ -832,6 +832,134 @@ Resources:
                     - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/cics2-process-queue-cloudwatch.json
 
 
+  RubyOnRails5Component:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: RubyOnRails5
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.2
+      Description: Installs Ruby 3.2.3 from pinned source tarball to /usr/local (system-wide)
+      ChangeDescription: Initial version
+      Data: |
+        name: RubyOnRails5 - InlineData
+        description: |
+          Compiles Ruby 3.2.3 from a SHA256-verified source tarball and installs to /usr/local.
+          No version manager - ruby/gem/bundle are on PATH system-wide for all users and services.
+          Bundler pinned to 4.0.10 to match Gemfile.lock. SHA256 from https://www.ruby-lang.org/en/downloads/releases/
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallBuildDependencies
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - dnf update -y
+                    - dnf groupinstall "Development Tools" -y
+                    - dnf install -y gcc make autoconf bzip2 bzip2-devel libffi-devel zlib-devel gdbm-devel ncurses-devel openssl-devel readline-devel libxml2 libxml2-devel libxslt libxslt-devel libyaml-devel tar
+              - name: DownloadAndVerifyRuby
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      RUBY_VERSION="3.2.3"
+                      RUBY_SHA256="af7f1757d9ddb630345988139211f1fd5703122e8d5f63e3ab1015f3be5d3c5e"
+                      cd /tmp
+                      curl -fLO "https://cache.ruby-lang.org/pub/ruby/3.2/ruby-${RUBY_VERSION}.tar.gz"
+                      echo "${RUBY_SHA256}  ruby-${RUBY_VERSION}.tar.gz" | sha256sum -c -
+              - name: CompileAndInstall
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      cd /tmp
+                      tar xzf ruby-3.2.3.tar.gz
+                      cd ruby-3.2.3
+                      ./configure --prefix=/usr/local --enable-shared --disable-install-doc
+                      make -j$(nproc)
+                      make install
+              - name: InstallBundler
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - /usr/local/bin/gem install bundler -v 4.0.10 --no-document
+              - name: Cleanup
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - rm -rf /tmp/ruby-3.2.3 /tmp/ruby-3.2.3.tar.gz
+          - name: test
+            steps:
+              - name: VerifyRubyVersion
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - ruby -v | grep -F "3.2.3"
+              - name: VerifyBundlerVersion
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - bundle -v | grep -F "4.0.10"
+              - name: VerifySystemPath
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - which ruby | grep -F "/usr/local/bin/ruby"
+                    - which bundle | grep -F "/usr/local/bin/bundle"
+
+  DDLogComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: DD_Logs
+      Platform: Linux
+      SupportedOsVersions:
+        - Amazon Linux 2023
+      Version: 1.0.0
+      Description: Setup DD app logs monitoring
+      ChangeDescription: Initial version
+      Data: |
+        name: DDLogs - InlineData
+        description: Setup DD app logs monitoring
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: CreateCloudWatchConfig
+                action: CreateFile
+                inputs:
+                  - path: /tmp/dd-cloudwatch.json
+                    content: |
+                      {
+                        "logs": {
+                          "logs_collected": {
+                            "files": {
+                              "collect_list": [
+                                {
+                                  "file_path": "/var/www/dd/log/puma.stderr.log",
+                                  "log_group_name": "/var/www/dd/log/puma.stderr.log"
+                                },
+                                {
+                                  "file_path": "/var/www/dd/log/puma.stdout.log",
+                                  "log_group_name": "/var/www/dd/log/puma.stdout.log"
+                                },
+                                {
+                                  "file_path": "/var/www/dd/log/sidekiq.log",
+                                  "log_group_name": "/var/www/dd/log/sidekiq.log"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    overwrite: true
+              - name: RestartAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/dd-cloudwatch.json
+
   PHP82Component:
     Type: AWS::ImageBuilder::Component
     Properties:
@@ -1358,7 +1486,7 @@ Resources:
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'philpass']]
       Version: 2026.05.11
-      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-base-amazon-linux2023/2026.05.09/2']]
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-base-amazon-linux2023/', !Ref AmazonLinux2023Version]]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'philpass']]
       Components: #Max 20
@@ -1635,6 +1763,49 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         OrgName: !Ref OrgName
         ImageRecipeARN: !Ref Cics2ImageRecipe
+        ShareImage: !Ref ShareImage
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
+        SNSStackName: !Ref SNSStackName
+        RetainAmiCount: !Ref RetainAmiCount
+
+  DDImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join [' ', [!Ref OrgName, 'dd']]
+      Version: 2026.05.141
+      ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-base-amazon-linux2023/', !Ref AmazonLinux2023Version]]
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'dd (Rails 7.1 / Ruby 3.2.3 / Puma / Sidekiq)']]
+      Components: #Max 20
+        - ComponentArn: !Ref MariaDBClientComponent
+        - ComponentArn: !Ref NginxComponent
+        - ComponentArn: !Ref NodeJS20Component
+        - ComponentArn: !Ref RubyOnRails5Component
+        - ComponentArn: !Ref SupervisorComponent
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformationlogs/1.0.4']]
+        - ComponentArn: !Ref DDLogComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
+            VolumeType: gp3
+            VolumeSize: 8
+
+  DDBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters:
+        Name: dd
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref DDImageRecipe
+        InstanceTypeName: !Ref InstanceTypeName
         ShareImage: !Ref ShareImage
         ShareAccountList: !Join [',', !Ref ShareAccountList]
         SecondRegion: !Ref SecondRegion
