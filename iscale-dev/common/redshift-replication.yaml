@@ -29,10 +29,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
-      SourceClusterIdentifier:
-        default: Source Redshift Cluster Identifier (live region)
-      SourceRegion:
-        default: Source Region (live region)
+      SourceClusterArn:
+        default: Source Redshift Cluster ARN (live region)
       RetentionPeriod:
         default: Snapshot Retention Period in DR region (days)
       SnapshotCopyGrantName:
@@ -64,18 +62,14 @@ Parameters:
       - StagingDR
       - DevelopmentDR
       - TestDR
-  SourceClusterIdentifier:
+  SourceClusterArn:
     Description: |
-      Identifier of the live region Redshift cluster to copy snapshots from.
-      This is the cluster identifier string (not ARN).
-      Obtain from the live stack RedshiftStack output or the Redshift console
+      ARN of the live region Redshift cluster to copy snapshots from.
+      Format: arn:aws:redshift:<region>:<account-id>:cluster:<cluster-identifier>
+      Obtain from the live region Redshift console or RedshiftStack output.
+      Required when EnableRedshiftSnapshotCopy=true.
     Type: String
-    ConstraintDescription: Must be a valid Redshift cluster identifier
-  SourceRegion:
-    Description: |
-      AWS region where the live Redshift cluster is deployed (e.g. ap-southeast-1).
-      The Lambda calls the Redshift API in this region to enable snapshot copy.
-    Type: String
+    Default: ''
   RetentionPeriod:
     Description: Number of days to retain copied snapshots in the DR region (1-35)
     Type: Number
@@ -163,8 +157,10 @@ Resources:
             request_type = event['RequestType']
             props = event['ResourceProperties']
 
-            cluster_id = props['SourceClusterIdentifier']
-            source_region = props['SourceRegion']
+            source_arn = props['SourceClusterArn']
+            arn_parts = source_arn.split(':')
+            source_region = arn_parts[3]
+            cluster_id = arn_parts[6]
             retention = int(props['RetentionPeriod'])
             grant_name = props.get('SnapshotCopyGrantName', '')
             dr_region = context.invoked_function_arn.split(':')[3]
@@ -236,20 +232,15 @@ Resources:
     Type: Custom::RedshiftSnapshotCopy
     Properties:
       ServiceToken: !GetAtt ReplicationLambdaFunction.Arn
-      SourceClusterIdentifier: !Ref SourceClusterIdentifier
-      SourceRegion: !Ref SourceRegion
+      SourceClusterArn: !Ref SourceClusterArn
       RetentionPeriod: !Ref RetentionPeriod
       SnapshotCopyGrantName: !If [HasSnapshotCopyGrant, !Ref SnapshotCopyGrantName, '']
 
 Outputs:
 
-  SourceClusterIdentifier:
-    Description: Identifier of the source Redshift cluster being replicated
-    Value: !Ref SourceClusterIdentifier
-
-  SourceRegion:
-    Description: Region of the source Redshift cluster being replicated
-    Value: !Ref SourceRegion
+  SourceClusterArn:
+    Description: ARN of the source Redshift cluster being replicated
+    Value: !Ref SourceClusterArn
 
   RetentionPeriod:
     Description: Retention period for replicated backups in DR region
