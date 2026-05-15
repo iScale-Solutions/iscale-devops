@@ -832,16 +832,16 @@ Resources:
                     - sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:/tmp/cics2-process-queue-cloudwatch.json
 
 
-  RubyOnRails5Component:
+  Ruby323Component:
     Type: AWS::ImageBuilder::Component
     Properties:
-      Name: RubyOnRails5
+      Name: Ruby-3.2.3
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2023
-      Version: 1.0.3
+      Version: 1.0.4
       Description: Installs Ruby 3.2.3 from pinned source tarball to /usr/local (system-wide)
-      ChangeDescription: Initial version
+      ChangeDescription: Grant ec2-user write access to gems directory so bundle install succeeds at deploy time
       Data: |
         name: RubyOnRails5 - InlineData
         description: |
@@ -883,6 +883,11 @@ Resources:
                 inputs:
                   commands:
                     - /usr/local/bin/gem install bundler -v 4.0.10 --no-document
+              - name: ConfigureGemPermissions
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - chown -R ec2-user:ec2-user /usr/local/lib/ruby/gems
               - name: Cleanup
                 action: ExecuteBash
                 inputs:
@@ -906,6 +911,11 @@ Resources:
                   commands:
                     - which ruby | grep -F "/usr/local/bin/ruby"
                     - which bundle | grep -F "/usr/local/bin/bundle"
+              - name: VerifyGemPermissions
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - stat -c "%U" /usr/local/lib/ruby/gems | grep -F "ec2-user"
 
   DDLogComponent:
     Type: AWS::ImageBuilder::Component
@@ -914,9 +924,9 @@ Resources:
       Platform: Linux
       SupportedOsVersions:
         - Amazon Linux 2023
-      Version: 1.0.0
+      Version: 1.0.1
       Description: Setup DD app logs monitoring
-      ChangeDescription: Initial version
+      ChangeDescription: Fix log paths from /var/www/dd to /var/www/ddp to match actual deploy destination
       Data: |
         name: DDLogs - InlineData
         description: Setup DD app logs monitoring
@@ -935,16 +945,12 @@ Resources:
                             "files": {
                               "collect_list": [
                                 {
-                                  "file_path": "/var/www/dd/log/puma.stderr.log",
-                                  "log_group_name": "/var/www/dd/log/puma.stderr.log"
+                                  "file_path": "/var/www/ddp/log/puma.log",
+                                  "log_group_name": "/var/www/ddp/log/puma.log"
                                 },
                                 {
-                                  "file_path": "/var/www/dd/log/puma.stdout.log",
-                                  "log_group_name": "/var/www/dd/log/puma.stdout.log"
-                                },
-                                {
-                                  "file_path": "/var/www/dd/log/sidekiq.log",
-                                  "log_group_name": "/var/www/dd/log/sidekiq.log"
+                                  "file_path": "/var/www/ddp/log/sidekiq.log",
+                                  "log_group_name": "/var/www/ddp/log/sidekiq.log"
                                 }
                               ]
                             }
@@ -1772,7 +1778,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: !Join [' ', [!Ref OrgName, 'dd']]
-      Version: 2026.05.142
+      Version: 2026.05.151
       ParentImage: !Join ['', ['arn:aws:imagebuilder:', !Ref AWS::Region, ':', !Ref AWS::AccountId, ':image/', !Ref OrgName, '-base-amazon-linux2023/', !Ref AmazonLinux2023Version]]
       WorkingDirectory: /tmp
       Description: !Join [' ', ['Base image for', !Ref OrgName, 'dd (Rails 7.1 / Ruby 3.2.3 / Puma / Sidekiq)']]
@@ -1780,7 +1786,7 @@ Resources:
         - ComponentArn: !Ref MariaDBClientComponent
         - ComponentArn: !Ref NginxComponent
         - ComponentArn: !Ref NodeJS20Component
-        - ComponentArn: !Ref RubyOnRails5Component
+        - ComponentArn: !Ref Ruby323Component
         - ComponentArn: !Ref SupervisorComponent
         - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'component/cloudformationlogs/1.0.4']]
         - ComponentArn: !Ref DDLogComponent
@@ -1791,7 +1797,7 @@ Resources:
             Encrypted: !If [IsImageShared, false, true]
             KmsKeyId: !If [IsImageShared, !Ref 'AWS::NoValue', !Join [':', ['arn:aws:kms', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'alias/aws/ebs']]]
             VolumeType: gp3
-            VolumeSize: 8
+            VolumeSize: 16
 
   DDBuilder:
     Type: AWS::CloudFormation::Stack
