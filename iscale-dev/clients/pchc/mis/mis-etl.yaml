@@ -134,7 +134,7 @@ Parameters:
     Default: pchc-dev-uw2-mis-network
     MinLength: 1
   GlueEmailLambdaName:
-    Description: Name of Glue Email Lambda
+    Description: Name of Glue Email Lambda. Only used in live region (Pesonet20PostGlueUpsertLambda is not deployed in DR).
     Type: String
     Default: pchc-test-uw2-etl-email-notification
     MinLength: 1
@@ -233,6 +233,9 @@ Conditions:
     IsDRAndEnableRedshiftSnapshotCopy: !And
       - Condition: IsDR
       - Condition: IsEnableRedshiftSnapshotCopy
+    IsNotDRAndDeployPaidResources: !And
+      - Condition: IsDeployPaidResources
+      - !Not [Condition: IsDR]
 
 Resources:
 
@@ -518,9 +521,11 @@ Resources:
 
 ###
 # Pesonet20 Post Glue upsert lambda
+# Deployed in live region only (IsNotDRAndDeployPaidResources).
+# No Glue jobs run in the DR region — source databases are in the live region only.
 ###
   Pesonet20PostGlueUpsertLambda:
-    Condition: IsDeployPaidResources
+    Condition: IsNotDRAndDeployPaidResources
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-post-glue-upsert]]
@@ -733,7 +738,7 @@ Resources:
           EMAIL_LAMBDA_NAME: !Ref GlueEmailLambdaName
 
   Pesonet20PostGlueUpsertLambdaRole:
-    Condition: IsDeployPaidResources
+    Condition: IsNotDRAndDeployPaidResources
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -788,6 +793,7 @@ Resources:
                 Resource: "*"
   
   Pesonet20PostGlueUpsertSecurityGroup:
+    Condition: IsNotDRAndDeployPaidResources
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-post-glue-upsert-security-group]]
@@ -796,7 +802,7 @@ Resources:
           !Sub "${NetworkStackName}-VpcId"
   
   Pesonet20PostGlueUpsertSsmDocument:
-    Condition: IsDeployPaidResources
+    Condition: IsNotDRAndDeployPaidResources
     Type: AWS::SSM::Document
     Properties:
       Content:
@@ -1267,28 +1273,28 @@ Outputs:
       Name: !Sub ${AWS::StackName}-RedshiftSecurityGroupId
 
   Pesonet20PostGlueUpsertLambdaArn:
-    Condition: IsDeployPaidResources
+    Condition: IsNotDRAndDeployPaidResources
     Description: ARN of Pesonet20 Post Glue Upsert Lambda
     Value: !GetAtt Pesonet20PostGlueUpsertLambda.Arn
     Export:
       Name: !Sub ${AWS::StackName}-Pesonet20PostGlueUpsertLambdaArn
 
   ReportsQueriesRunCommandDocumentName:
-    Condition: IsDeployPaidResources
+    Condition: IsNotDRAndDeployPaidResources
     Description: SSM Document name for running reports queries
     Value: !Ref ReportsQueriesRunCommand
     Export:
       Name: !Sub ${AWS::StackName}-ReportsQueriesRunCommandDocumentName
   
   ReportsQueriesInstanceId:
-    Condition: IsDeployPaidResources
+    Condition: IsNotDRAndDeployPaidResources
     Description: Instance ID of EC2 instance for running reports queries
     Value: !Ref ReportQueriesInstance
     Export:
       Name: !Sub ${AWS::StackName}-ReportsQueriesInstanceId
 
   Pesonet20PostGlueUpsertSsmDocumentName:
-    Condition: IsDeployPaidResources
+    Condition: IsNotDRAndDeployPaidResources
     Description: SSM Document name for refreshing materialized views after pesonet20 upsert
     Value: !Ref Pesonet20PostGlueUpsertSsmDocument
     Export:
