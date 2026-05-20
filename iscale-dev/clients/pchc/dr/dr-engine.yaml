@@ -385,9 +385,20 @@ Resources:
         ZipFile: |
           import boto3
           import logging
+          import os
+          import re
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
+
+          # LB parameter keys to comment/uncomment in *ServerStack resources.
+          # Longer names listed first so the regex alternation matches greedily.
+          LB_PARAMS = [
+            'LoadBalancerCanonicalHostedZoneID',
+            'LoadBalancerHttpListenerArn',
+            'LoadBalancerStackName',
+            'LoadBalancerDNSName',
+          ]
 
           def lambda_handler(event, context):
             """
@@ -408,7 +419,6 @@ Resources:
                 "network_stack_name": "...", "app_name": "...", "sns_topic_arn": "..." }
             """
             action = event.get('action')
-            import os
             region = os.environ['AWS_REGION']
             cf = boto3.client('cloudformation', region_name=region)
 
@@ -416,8 +426,14 @@ Resources:
               return delete_server_stacks(cf, event)
             elif action == 'check_deletion_status':
               return check_deletion_status(cf, event)
+            elif action == 'comment_lb_params':
+              return comment_lb_params_action(cf, event)
+            elif action == 'check_stack_update_status':
+              return check_stack_update_status(cf, event)
             elif action == 'teardown_infrastructure':
               return teardown_infrastructure(cf, event)
+            elif action == 'uncomment_lb_params':
+              return uncomment_lb_params_action(cf, event)
             else:
               raise ValueError(f'Unknown action: {action}')
 
@@ -503,21 +519,65 @@ Resources:
             return {'all_deleted': all_deleted, 'pending': pending}
 
 
+          def comment_lb_params_action(cf, event):
+            """
+            Step 1 of failback: fetches the app stack YAML template, comments out the
+            LB param blocks in every *ServerStack resource, and submits the 1st CF update.
+            DeployPaidResources is unchanged — only the template text is modified.
+            Returns patched=True if a CF update was submitted, False if nothing to comment.
+            """
+            app_stack = event['app_stack_name']
+            app_name  = event.get('app_name', app_stack)
+            sns_topic = event.get('sns_topic_arn', '') or os.environ.get('SNS_TOPIC_ARN', '')
+
+            modified = _fetch_and_patch(cf, app_stack, comment=True)
+            if modified:
+              update_stack(cf, app_stack, deploy_paid=None, template_body=modified)
+              logger.info(f'[COMMENT] CF update submitted for {app_stack}')
+              notify(sns_topic, f'DR Failback — LB Params Commented [{app_name}]',
+                     f'CF update submitted: LB params commented out in {app_stack}.')
+            else:
+              logger.info(f'[COMMENT] No active LB params found in {app_stack} — skipping CF update')
+            return {'patched': modified is not None}
+
+
+          def check_stack_update_status(cf, event):
+            """
+            Polls whether the app CF stack has reached a terminal (non-updating) status.
+            Used after comment_lb_params, teardown_infrastructure, and uncomment_lb_params.
+            Returns update_complete=True when the stack is no longer in *_IN_PROGRESS.
+            """
+            stack_name = event['app_stack_name']
+            try:
+              resp = cf.describe_stacks(StackName=stack_name)
+              status = resp['Stacks'][0]['StackStatus']
+            except Exception as e:
+              logger.warning(f'Could not describe {stack_name}: {e}')
+              return {'update_complete': False, 'status': 'UNKNOWN'}
+            terminal = {
+              'CREATE_COMPLETE', 'UPDATE_COMPLETE', 'UPDATE_ROLLBACK_COMPLETE',
+              'ROLLBACK_COMPLETE', 'DELETE_COMPLETE', 'IMPORT_COMPLETE',
+              'IMPORT_ROLLBACK_COMPLETE',
+            }
+            complete = status in terminal
+            logger.info(f'{stack_name} status: {status} — complete={complete}')
+            return {'update_complete': complete, 'status': status}
+
+
           def teardown_infrastructure(cf, event):
             """
-            Updates app stack then network stack with DeployPaidResources=false.
-            Server stacks are already gone — ELB exports are now free to be removed.
+            Step 2 of failback: sets DeployPaidResources=false on the app and network stacks
+            using UsePreviousTemplate (the template already has LB params commented out from
+            the prior comment_lb_params step). Non-blocking — state machine polls for completion.
             """
             app_stack     = event['app_stack_name']
             network_stack = event['network_stack_name']
             app_name      = event.get('app_name', app_stack)
             sns_topic     = event.get('sns_topic_arn', '') or os.environ.get('SNS_TOPIC_ARN', '')
 
-            # Step 1: App stack — remove ELBs, Cache, DB
             logger.info(f'[TEARDOWN 1/2] Updating app stack: {app_stack}')
             update_stack(cf, app_stack, deploy_paid='false')
 
-            # Step 2: Network stack — remove NAT GWs, Jump Host, VPC Endpoints
             logger.info(f'[TEARDOWN 2/2] Updating network stack: {network_stack}')
             update_stack(cf, network_stack, deploy_paid='false')
 
@@ -525,12 +585,131 @@ Resources:
               f'DR Failback teardown initiated for [{app_name}].\n'
               f'App stack     : {app_stack}\n'
               f'Network stack : {network_stack}\n\n'
-              f'CloudFormation is now deprovisioning ELBs, Cache, DB, and NAT GWs. '
-              f'S3, snapshots, and AMIs are retained.'
+              f'CF is deprovisioning ELBs, Cache, DB, NAT GWs. '
+              f'S3, snapshots, AMIs are retained.'
             )
             logger.info(summary)
             notify(sns_topic, f'DR Failback — Teardown Initiated [{app_name}]', summary)
             return {'statusCode': 200, 'body': summary}
+
+
+          def uncomment_lb_params_action(cf, event):
+            """
+            Step 3 of failback: restores the template by uncommenting the LB param blocks.
+            DeployPaidResources remains false — this is a template-only cleanup so the repo
+            template is pristine for the next failover cycle.
+            Returns restored=True if a CF update was submitted.
+            """
+            app_stack = event['app_stack_name']
+            app_name  = event.get('app_name', app_stack)
+            sns_topic = event.get('sns_topic_arn', '') or os.environ.get('SNS_TOPIC_ARN', '')
+
+            modified = _fetch_and_patch(cf, app_stack, comment=False)
+            if modified:
+              update_stack(cf, app_stack, deploy_paid=None, template_body=modified)
+              logger.info(f'[UNCOMMENT] CF update submitted — template restored for {app_stack}')
+              notify(sns_topic, f'DR Failback — LB Params Restored [{app_name}]',
+                     f'CF update submitted: LB params uncommented in {app_stack}. Failback complete.')
+            else:
+              logger.info(f'[UNCOMMENT] No commented LB params found in {app_stack} — skipping')
+            return {'restored': modified is not None}
+
+
+          def _fetch_and_patch(cf, stack_name, comment):
+            """
+            Fetches the YAML template body via GetTemplate(TemplateStage='Original'),
+            runs _comment_params or _uncomment_params, and returns the modified text.
+            Returns None if no changes were made or if the template could not be patched
+            (e.g. it is JSON, not YAML). Never raises.
+            """
+            try:
+              resp = cf.get_template(StackName=stack_name, TemplateStage='Original')
+              raw = resp['TemplateBody']
+            except Exception as e:
+              logger.warning(f'[PATCH] Cannot fetch template for {stack_name}: {e}')
+              return None
+            if isinstance(raw, dict):
+              logger.warning('[PATCH] Template is JSON — text-based patching not applicable')
+              return None
+            fn = _comment_params if comment else _uncomment_params
+            modified = fn(raw)
+            return modified if modified != raw else None
+
+
+          def _comment_params(text):
+            """
+            For each key in LB_PARAMS, locates the parameter entry inside any
+            Parameters block and comments it out by inserting '# ' at the key's
+            base-indent position for the key line and every continuation line
+            (lines indented deeper than the key that immediately follow it).
+
+            Input / output for a 4-line block (8-space base indent):
+              Before: '        LoadBalancerStackName: !If'
+                      '          - IsDeployPaidResources'
+                      '          - !Select ...'
+                      "          - ''"
+              After:  '        # LoadBalancerStackName: !If'
+                      '        #   - IsDeployPaidResources'
+                      '        #   - !Select ...'
+                      "        #   - ''"
+
+            Idempotent — skips keys whose line already starts with '#'.
+            """
+            pat = r'^( +)(' + '|'.join(re.escape(k) for k in LB_PARAMS) + r')(\s*:)'
+            lines = text.split('\n')
+            out = []
+            i = 0
+            while i < len(lines):
+              m = re.match(pat, lines[i])
+              if m and not lines[i].lstrip().startswith('#'):
+                base = len(m.group(1))
+                pfx  = ' ' * base
+                out.append(pfx + '# ' + lines[i][base:])
+                i += 1
+                while i < len(lines):
+                  nxt = lines[i]
+                  if not nxt.strip():
+                    break
+                  if (len(nxt) - len(nxt.lstrip())) <= base:
+                    break
+                  out.append(pfx + '# ' + nxt[base:])
+                  i += 1
+              else:
+                out.append(lines[i])
+                i += 1
+            return '\n'.join(out)
+
+
+          def _uncomment_params(text):
+            """
+            Reverses _comment_params: removes '# ' at the base-indent position from
+            commented LB_PARAMS entries and their continuation lines.
+            Idempotent — skips keys that are not commented.
+            """
+            pat = r'^( +)# (' + '|'.join(re.escape(k) for k in LB_PARAMS) + r')(\s*:)'
+            lines = text.split('\n')
+            out = []
+            i = 0
+            while i < len(lines):
+              m = re.match(pat, lines[i])
+              if m:
+                base = len(m.group(1))
+                pfx  = ' ' * base
+                out.append(pfx + lines[i][base + 2:])
+                i += 1
+                while i < len(lines):
+                  nxt = lines[i]
+                  if not nxt.startswith(pfx + '# '):
+                    break
+                  restored = pfx + nxt[base + 2:]
+                  if not restored.strip():
+                    break
+                  out.append(restored)
+                  i += 1
+              else:
+                out.append(lines[i])
+                i += 1
+            return '\n'.join(out)
 
 
           def get_current_parameters(cf, stack_name):
@@ -539,20 +718,30 @@ Resources:
             return {p['ParameterKey']: p['ParameterValue'] for p in stack.get('Parameters', [])}
 
 
-          def update_stack(cf, stack_name, deploy_paid):
+          def update_stack(cf, stack_name, deploy_paid=None, template_body=None):
+            """
+            deploy_paid=None  → keep DeployPaidResources at its current value (UsePreviousValue).
+            deploy_paid='true'/'false' → override DeployPaidResources.
+            template_body=None → UsePreviousTemplate=True.
+            template_body=str  → submit new TemplateBody (YAML text with comments preserved).
+            """
             current_params = get_current_parameters(cf, stack_name)
             parameters = []
             for key in current_params:
-              if key == 'DeployPaidResources':
+              if key == 'DeployPaidResources' and deploy_paid is not None:
                 parameters.append({'ParameterKey': key, 'ParameterValue': deploy_paid})
               else:
                 parameters.append({'ParameterKey': key, 'UsePreviousValue': True})
-            cf.update_stack(
+            kwargs = dict(
               StackName=stack_name,
-              UsePreviousTemplate=True,
               Parameters=parameters,
               Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
             )
+            if template_body:
+              kwargs['TemplateBody'] = template_body
+            else:
+              kwargs['UsePreviousTemplate'] = True
+            cf.update_stack(**kwargs)
 
 
           def notify(sns_topic_arn, subject, message):
@@ -575,7 +764,7 @@ Resources:
       RoleArn: !GetAtt StepFunctionsRole.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "DR Failback — deletes server stacks, polls until gone, then tears down ELBs and network.",
+          "Comment": "DR Failback — 3-step template patching: comment LB params, teardown, restore template.",
           "StartAt": "ValidateConfirmFailback",
           "States": {
 
@@ -665,13 +854,88 @@ Resources:
                 {
                   "Variable": "$.check_result.all_deleted",
                   "BooleanEquals": true,
-                  "Next": "TeardownInfrastructure"
+                  "Next": "CommentLBParams"
                 }
               ],
               "Default": "WaitForDeletion"
             },
 
+            "CommentLBParams": {
+              "Comment": "Step 1 — comment out LB params in appserver stacks. Submits 1st CF update (template-only, DeployPaidResources unchanged).",
+              "Type": "Task",
+              "Resource": "${FailbackLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "comment_lb_params",
+                "app_stack_name.$": "$.app_stack_name",
+                "app_name.$": "$.app_name",
+                "sns_topic_arn.$": "$.sns_topic_arn"
+              },
+              "ResultPath": "$.comment_result",
+              "Next": "WaitForCommentUpdate",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 15,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "WaitForCommentUpdate": {
+              "Comment": "CF stack update is async — poll until terminal status.",
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckCommentUpdateStatus"
+            },
+
+            "CheckCommentUpdateStatus": {
+              "Type": "Task",
+              "Resource": "${FailbackLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_stack_update_status",
+                "app_stack_name.$": "$.app_stack_name"
+              },
+              "ResultPath": "$.comment_update_result",
+              "Next": "CommentUpdateDone",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "CommentUpdateDone": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.comment_update_result.update_complete",
+                  "BooleanEquals": true,
+                  "Next": "TeardownInfrastructure"
+                }
+              ],
+              "Default": "WaitForCommentUpdate"
+            },
+
             "TeardownInfrastructure": {
+              "Comment": "Step 2 — set DeployPaidResources=false using the template already patched in Step 1.",
               "Type": "Task",
               "Resource": "${FailbackLambdaFunction.Arn}",
               "Parameters": {
@@ -682,6 +946,80 @@ Resources:
                 "sns_topic_arn.$": "$.sns_topic_arn"
               },
               "ResultPath": "$.teardown_result",
+              "Next": "WaitForTeardownUpdate",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "WaitForTeardownUpdate": {
+              "Comment": "Teardown involves DB/Cache/ELB deletion — use a longer initial wait.",
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckTeardownUpdateStatus"
+            },
+
+            "CheckTeardownUpdateStatus": {
+              "Type": "Task",
+              "Resource": "${FailbackLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_stack_update_status",
+                "app_stack_name.$": "$.app_stack_name"
+              },
+              "ResultPath": "$.teardown_update_result",
+              "Next": "TeardownUpdateDone",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "TeardownUpdateDone": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.teardown_update_result.update_complete",
+                  "BooleanEquals": true,
+                  "Next": "UncommentLBParams"
+                }
+              ],
+              "Default": "WaitForTeardownUpdate"
+            },
+
+            "UncommentLBParams": {
+              "Comment": "Step 3 — restore template (uncomment LB params). DeployPaidResources stays false. Template is now pristine for the next failover cycle.",
+              "Type": "Task",
+              "Resource": "${FailbackLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "uncomment_lb_params",
+                "app_stack_name.$": "$.app_stack_name",
+                "app_name.$": "$.app_name",
+                "sns_topic_arn.$": "$.sns_topic_arn"
+              },
+              "ResultPath": "$.uncomment_result",
               "End": true,
               "Retry": [
                 {
