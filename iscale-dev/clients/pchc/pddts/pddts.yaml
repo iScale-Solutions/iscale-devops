@@ -72,6 +72,18 @@ Metadata:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      SnapshotIdentifier:
+        default: DB Snapshot Identifier (DR failover restore — leave blank for normal)
+      DBMasterUserPassword:
+        default: DB Master Password (DR failover only — leave blank for normal)
+      EnableCrossRegionBackupReplication:
+        default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
+      SourceDbInstanceArn:
+        default: Source DB Instance ARN (live region — required when replication is enabled)
+      BackupReplicationRetentionPeriod:
+        default: Backup Retention Period in DR region (days)
 
 Parameters:
   Name:
@@ -156,7 +168,7 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
-    DeployPaidResources:
+  DeployPaidResources:
     Description: |
       true (default): Deploy all paid resources — DB, Cache, LBs, and App Servers. Normal operation for all environments.
       false: DR standby mode — suppress all paid resources to minimize idle cost. Only CodeDeploy infra stays alive.
@@ -219,17 +231,54 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
+  IsDR: !Or
+    - !Equals [!Ref EnvName, ProductionDR]
+    - !Equals [!Ref EnvName, StagingDR]
+    - !Equals [!Ref EnvName, DevelopmentDR]
+    - !Equals [!Ref EnvName, TestDR]
+  IsProdOrProductionDR: !Or
+    - Condition: IsProd
+    - !Equals [!Ref EnvName, ProductionDR]
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
+  IsDRAndEnableCrossRegionBackupReplication: !And
+    - Condition: IsDR
+    - Condition: IsEnableCrossRegionBackupReplication
+  IsNotProdAndDeployPaidResources: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
+  IsProdOrProductionDRAndDeployPaidResources: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResources
+  IsDashboardDeployed: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResources
+  IsDeployPaidResourcesAndNotDR: !And        # NEW — for Manila AZ read replica
+    - Condition: IsDeployPaidResources
+    - !Not [Condition: IsDR]
+  IsProdAndDeployPaidResources: !And         # NEW — for DBResizer
+    - Condition: IsProd
+    - Condition: IsDeployPaidResources
+  IsNotProdAndDeployPaidResourcesAndNotDR: !And   # NEW — for schedulers; prevents scheduler from running during DR failover
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResourcesAndNotDR
+  IsNotTestOrDevelopmentDR: !Not # NEW — for VPN to deploy only in PROD and PROD DR envoironment
+    - !Or
+      - !Equals [!Ref EnvName, TestDR]
+      - !Equals [!Ref EnvName, DevelopmentDR]
 
 Resources:
 
   BSPVPNGatewayEIP1: # - Hardcoded for BSP
-    DeletionPolicy: Retain #Make sure to retain always
-    # Condition: IsProd
+    Condition: IsNotTestOrDevelopmentDR
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Type: AWS::EC2::EIP
 
   BSPVPNGatewayEIP2: # - Hardcoded for BSP
-    DeletionPolicy: Retain #Make sure to retain always
-    # Condition: IsProd
+    Condition: IsNotTestOrDevelopmentDR
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Type: AWS::EC2::EIP
 
   ##
@@ -248,8 +297,10 @@ Resources:
         SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+        DeployPaidResources: !Ref DeployPaidResources
 
   DBStack:
+    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -272,9 +323,12 @@ Resources:
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
+        SnapshotIdentifier: !Ref SnapshotIdentifier
+        MasterUserPassword: !Ref DBMasterUserPassword
+        ExistingSecret: !If [IsDR, !Ref DRDBSecret, '']
 
   DBResizer:
-    Condition: IsProd
+    Condition: IsProdAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-resizer.yaml
@@ -294,6 +348,7 @@ Resources:
 ###
 
   PDDTSReadReplicaInstance:
+    Condition: IsDeployPaidResourcesAndNotDR
     Type: AWS::EC2::Instance
     Metadata: 
       AWS::CloudFormation::Init: 
@@ -376,6 +431,7 @@ Resources:
 
   # Security group rules
   AllowReadReplicaEC2IntoDB:
+    Condition: IsDeployPaidResourcesAndNotDR
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from rds-read-replica instance
@@ -395,6 +451,7 @@ Resources:
       SourceSecurityGroupId: !GetAtt PDDTSReadReplicaInstanceSecGroup.GroupId
 
   AllowDBIntoReadReplicaEC2:
+    Condition: IsDeployPaidResourcesAndNotDR
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from rds to instance
@@ -461,7 +518,7 @@ Resources:
   DBSchedulerStack:
     DependsOn:
       - DBStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -477,6 +534,64 @@ Resources:
             - DBStack
             - Outputs.DBInstanceName
 
+  DRDBSecret:
+    Condition: IsDR
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: !Sub 'DR placeholder secret for ${OrgName} ${Name} — values synced from the live region secret by the secrets-sync Lambda before failover.'
+      SecretString: !Sub |
+        {
+          "DB_ROOT_USER": "root",
+          "DB_ROOT_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "DB_NAME": "pddtsprddb",
+          "DB_USER": "${Name}",
+          "DB_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE"
+        }
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  DBStandbySubnetGroup:
+    Condition: IsDR
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      DBSubnetGroupName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+          
+  DBStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+
+  DBReplicationStack:
+    Condition: IsDRAndEnableCrossRegionBackupReplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-replication.yaml
+      Parameters:
+        Name: !Ref Name
+        OrgName: !Ref OrgName
+        EnvName: !Ref EnvName
+        SourceDbInstanceArn: !Ref SourceDbInstanceArn
+        BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
+
   DeployStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -489,6 +604,7 @@ Resources:
         SNSStackName: !Ref SNSStackName
 
   CacheStack:
+    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/elasticache.yaml
@@ -507,7 +623,6 @@ Resources:
 
   ServerStack:
     DependsOn:
-      - DBStack
       - DeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -516,45 +631,49 @@ Resources:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
+        ASGDesiredSize: !If [IsDR, 0, 1]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
         InstancePort: 80
         InstanceSubnet: Private
         InstanceType: !Ref InstanceType
         # LoadBalancerHostName: !If [IsProd, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
-        LoadBalancerHostName: !Ref LoadBalancerHostName
+        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', !Ref LoadBalancerHostName]
         LoadBalancerPriority: 100
-        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        LoadBalancerStackName: !If 
+          - IsDeployPaidResources
+          - !Select [ 1, !Split [ '/', !Ref ELBStack]]
+          - ''
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !If 
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         LaunchTemplate: True
@@ -563,7 +682,7 @@ Resources:
     DependsOn:
       - DBStack
       - ServerStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -586,7 +705,7 @@ Resources:
 # SFTP Server using Transfer Family
 
   SFTPServer:
-    Condition: IsProd
+    Condition: IsProdOrProductionDRAndDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/transfer-family.yaml
@@ -614,6 +733,7 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   AllowJumpHostIntoDB:
+    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from jump host
@@ -651,7 +771,6 @@ Resources:
 
   SidekiqServerStack:
     DependsOn:
-      - DBStack
       - SidekiqDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -660,31 +779,32 @@ Resources:
         Name: !Join ['-', [!Ref Name, sidek]]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
+        ASGDesiredSize: !If [IsDR, 0, 1]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
         InstancePort: 80
@@ -692,7 +812,10 @@ Resources:
         InstanceType: !Ref InstanceType
         # LoadBalancerHostName: No need of URL for sidekiq
         LoadBalancerPriority: 105
-        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        LoadBalancerStackName: !If 
+          - IsDeployPaidResources
+          - !Select [ 1, !Split [ '/', !Ref ELBStack]]
+          - ''
         NetworkStackName: !Ref NetworkStackName
         ExternalEFSID:
           Fn::GetAtt:
@@ -702,10 +825,10 @@ Resources:
           Fn::GetAtt:
             - ServerStack
             - Outputs.AppServerEFSSecurityGroup
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !If 
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         LaunchTemplate: True
@@ -714,7 +837,7 @@ Resources:
     DependsOn:
       - DBStack
       - SidekiqServerStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -735,7 +858,7 @@ Resources:
             - Outputs.CodeDeployDeploymentGroupName
 
   BackupStack:
-    Condition: IsProd
+    Condition: IsProdOrProductionDRAndDeployPaidResources
     DependsOn:
       - DBStack
       - ServerStack
@@ -760,7 +883,7 @@ Resources:
         MonthlyExpiration: 3650 # 10 years
 
   Dashboard:
-    Condition: IsProd
+    Condition: IsDashboardDeployed
     Type: AWS::CloudWatch::Dashboard
     Properties:
         DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -1002,3 +1125,26 @@ Outputs:
       Fn::Sub: '${NetworkStackName}-VpcId'
     Export:
       Name: !Sub '${AWS::StackName}-VpcId'
+  
+  # DR outputs
+
+  DRDBSecretArn:
+    Condition: IsDR
+    Description: ARN of the DR Secrets Manager secret — wire into secrets-sync Lambda
+    Value: !Ref DRDBSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-DRDBSecretArn'
+
+  DBStandbySubnetGroup:
+    Condition: IsDR
+    Description: Pre-deployed DB subnet group for PITR restore
+    Value: !Ref DBStandbySubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySubnetGroup'
+
+  DBStandbySecurityGroup:
+    Condition: IsDR
+    Description: Pre-deployed DB security group for PITR restore
+    Value: !GetAtt DBStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySecurityGroupId'
