@@ -1,14 +1,15 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: |
-  CFN Template Modifier — Fetches a CloudFormation stack template by app name,
-  comments out or restores LoadBalancerStackName in every *ServerStack resource
-  (including multi-line !If continuations), and logs the modified template
-  to CloudWatch Logs.
+  DR Failback — Orchestrates CloudFormation template patching and parameter updates
+  for the PCHC failback workflow. Comments out or restores LoadBalancerStackName in
+  every *ServerStack resource, sets DeployPaidResources=false, and drives the full
+  4-step failover sequence via Step Functions.
 
   Event payload:
+    { "app_name": "pchc-tdr-ue2-pesonet", "action": "failover", "network_stack_name": "pchc-tdr-ue2-pesonet-network" }
     { "app_name": "pchc-tdr-ue2-pesonet", "action": "comment" }
     { "app_name": "pchc-tdr-ue2-pesonet", "action": "uncomment" }
-  action defaults to "comment" if omitted.
+    { "app_name": "pchc-tdr-ue2-pesonet", "action": "set_deploy_paid_false" }
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -36,7 +37,7 @@ Parameters:
   Name:
     Description: Unique identifier used in the function name and all resource names.
     Type: String
-    Default: cfn-template-modifier
+    Default: dr-failback
 
   OrgName:
     Description: Organization name prefix (e.g. pchc).
@@ -89,7 +90,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${AWS::StackName}'
       Description: >-
-        Actions: comment | uncomment | update_stack | set_deploy_paid_false |
+        DR Failback Lambda. Actions: comment | uncomment | update_stack | set_deploy_paid_false |
         set_deploy_paid_false_both | check_stack_status | check_both_stacks_status.
         Payload: { "app_name": "pchc-tdr-ue2-pesonet", "action": "<action>" }
       Handler: index.handler
@@ -468,7 +469,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "CFN Template Modifier — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failover 4-step sequential orchestration. Routed by 'action' in the input payload.",
+          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failover 4-step sequential orchestration. Routed by 'action' in the input payload.",
           "StartAt": "ValidateAction",
           "States": {
 
@@ -1112,37 +1113,37 @@ Resources:
 Outputs:
 
   LambdaArn:
-    Description: ARN of the CFN Template Modifier Lambda
+    Description: ARN of the DR Failback Lambda
     Value: !GetAtt LambdaFunction.Arn
     Export:
       Name: !Sub '${AWS::StackName}-LambdaArn'
 
   LambdaName:
-    Description: Name of the CFN Template Modifier Lambda
+    Description: Name of the DR Failback Lambda
     Value: !Ref LambdaFunction
     Export:
       Name: !Sub '${AWS::StackName}-LambdaName'
 
   LambdaLogGroupName:
-    Description: CloudWatch Log Group for the Lambda function
+    Description: CloudWatch Log Group for the DR Failback Lambda
     Value: !Ref LambdaLogGroup
     Export:
       Name: !Sub '${AWS::StackName}-LambdaLogGroup'
 
   StateMachineArn:
-    Description: ARN of the CFN Template Modifier State Machine
+    Description: ARN of the DR Failback State Machine
     Value: !Ref StateMachine
     Export:
       Name: !Sub '${AWS::StackName}-StateMachineArn'
 
   StateMachineName:
-    Description: Name of the CFN Template Modifier State Machine
+    Description: Name of the DR Failback State Machine
     Value: !GetAtt StateMachine.Name
     Export:
       Name: !Sub '${AWS::StackName}-StateMachineName'
 
   StateMachineLogGroupName:
-    Description: CloudWatch Log Group for State Machine execution history
+    Description: CloudWatch Log Group for DR Failback State Machine execution history
     Value: !Ref StateMachineLogGroup
     Export:
       Name: !Sub '${AWS::StackName}-StateMachineLogGroup'
