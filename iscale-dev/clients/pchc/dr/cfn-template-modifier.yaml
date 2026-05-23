@@ -1,0 +1,1148 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  CFN Template Modifier — Fetches a CloudFormation stack template by app name,
+  comments out or restores LoadBalancerStackName in every *ServerStack resource
+  (including multi-line !If continuations), and logs the modified template
+  to CloudWatch Logs.
+
+  Event payload:
+    { "app_name": "pchc-tdr-ue2-pesonet", "action": "comment" }
+    { "app_name": "pchc-tdr-ue2-pesonet", "action": "uncomment" }
+  action defaults to "comment" if omitted.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - Name
+          - OrgName
+      - Label:
+          default: Configuration
+        Parameters:
+          - LogRetentionDays
+
+    ParameterLabels:
+      Name:
+        default: Stack / Function Name
+      OrgName:
+        default: Organization Name
+      LogRetentionDays:
+        default: CloudWatch Log Retention (days)
+
+Parameters:
+
+  Name:
+    Description: Unique identifier used in the function name and all resource names.
+    Type: String
+    Default: cfn-template-modifier
+
+  OrgName:
+    Description: Organization name prefix (e.g. pchc).
+    Type: String
+    Default: pchc
+
+  LogRetentionDays:
+    Description: Number of days to retain Lambda CloudWatch logs.
+    Type: Number
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+Resources:
+
+####
+# IAM
+####
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+####
+# CloudWatch Logs
+####
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+####
+# Lambda
+####
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}'
+      Description: >-
+        Actions: comment | uncomment | update_stack | set_deploy_paid_false |
+        set_deploy_paid_false_both | check_stack_status | check_both_stacks_status.
+        Payload: { "app_name": "pchc-tdr-ue2-pesonet", "action": "<action>" }
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import logging
+          import boto3
+          from botocore.exceptions import ClientError
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          TERMINAL_STATES = {
+              'CREATE_COMPLETE', 'UPDATE_COMPLETE',
+              'UPDATE_ROLLBACK_COMPLETE', 'UPDATE_ROLLBACK_FAILED',
+              'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED',
+              'DELETE_COMPLETE', 'DELETE_FAILED', 'CREATE_FAILED',
+          }
+          ROLLBACK_STATES = {
+              'UPDATE_ROLLBACK_COMPLETE', 'UPDATE_ROLLBACK_FAILED',
+              'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED',
+              'DELETE_FAILED', 'CREATE_FAILED',
+          }
+
+          def _comment_line(line):
+              ending = ''
+              content = line
+              if content.endswith('\r\n'):
+                  ending, content = '\r\n', content[:-2]
+              elif content.endswith('\n'):
+                  ending, content = '\n', content[:-1]
+              elif content.endswith('\r'):
+                  ending, content = '\r', content[:-1]
+              stripped = content.lstrip(' ')
+              indent = len(content) - len(stripped)
+              return ' ' * indent + '# ' + stripped + ending
+
+          def _uncomment_line(line):
+              ending = ''
+              content = line
+              if content.endswith('\r\n'):
+                  ending, content = '\r\n', content[:-2]
+              elif content.endswith('\n'):
+                  ending, content = '\n', content[:-1]
+              elif content.endswith('\r'):
+                  ending, content = '\r', content[:-1]
+              stripped = content.lstrip(' ')
+              indent = len(content) - len(stripped)
+              if stripped.startswith('# '):
+                  return ' ' * indent + stripped[2:] + ending
+              return line
+
+          def _patch_cfn_parameter(template_body, param_key, comment):
+              SEARCHING, IN_RESOURCE, IN_PROPS, IN_PARAMS, PATCHING = range(5)
+              target     = f'{param_key}:'  if comment else f'# {param_key}:'
+              patch_line = _comment_line    if comment else _uncomment_line
+              state = SEARCHING
+              resource_indent = props_indent = params_indent = key_indent = 0
+              result = []
+              for line in template_body.splitlines(keepends=True):
+                  raw      = line.rstrip('\r\n')
+                  stripped = raw.lstrip()
+                  indent   = len(raw) - len(stripped)
+                  is_blank = not stripped
+                  if state == SEARCHING:
+                      if not is_blank and stripped.endswith('ServerStack:'):
+                          state = IN_RESOURCE
+                          resource_indent = indent
+                      result.append(line)
+                  elif state == IN_RESOURCE:
+                      if not is_blank and indent <= resource_indent:
+                          if stripped.endswith('ServerStack:'):
+                              resource_indent = indent
+                              props_indent = params_indent = key_indent = 0
+                          else:
+                              state = SEARCHING
+                          result.append(line)
+                          continue
+                      if stripped == 'Properties:' and indent > resource_indent:
+                          state = IN_PROPS
+                          props_indent = indent
+                      result.append(line)
+                  elif state == IN_PROPS:
+                      if not is_blank and indent <= resource_indent:
+                          if stripped.endswith('ServerStack:'):
+                              state = IN_RESOURCE
+                              resource_indent = indent
+                              props_indent = params_indent = key_indent = 0
+                          else:
+                              state = SEARCHING
+                          result.append(line)
+                          continue
+                      if not is_blank and indent <= props_indent:
+                          state = IN_RESOURCE
+                          result.append(line)
+                          continue
+                      if stripped == 'Parameters:' and indent > props_indent:
+                          state = IN_PARAMS
+                          params_indent = indent
+                      result.append(line)
+                  elif state == IN_PARAMS:
+                      if not is_blank and indent <= resource_indent:
+                          if stripped.endswith('ServerStack:'):
+                              state = IN_RESOURCE
+                              resource_indent = indent
+                              props_indent = params_indent = key_indent = 0
+                          else:
+                              state = SEARCHING
+                          result.append(line)
+                          continue
+                      if not is_blank and indent <= props_indent:
+                          state = IN_RESOURCE
+                          result.append(line)
+                          continue
+                      if not is_blank and indent <= params_indent:
+                          state = IN_PROPS
+                          result.append(line)
+                          continue
+                      if stripped.startswith(target) and indent > params_indent:
+                          state = PATCHING
+                          key_indent = indent
+                          result.append(patch_line(line))
+                          continue
+                      result.append(line)
+                  elif state == PATCHING:
+                      if is_blank or indent <= key_indent:
+                          state = IN_PARAMS
+                          result.append(line)
+                      else:
+                          result.append(patch_line(line))
+              return ''.join(result)
+
+          def _get_app_name(event):
+              app_name = (event.get('app_name') or event.get('AppName')
+                          or event.get('stack_name') or event.get('StackName'))
+              if not app_name:
+                  raise ValueError("Event must contain 'app_name'")
+              return app_name
+
+          def _get_current_parameters(cfn, stack_name):
+              resp = cfn.describe_stacks(StackName=stack_name)
+              return resp['Stacks'][0].get('Parameters', [])
+
+          def _submit_deploy_paid_false(cfn, stack_name):
+              params = []
+              for p in _get_current_parameters(cfn, stack_name):
+                  if p['ParameterKey'] == 'DeployPaidResources':
+                      logger.info("[SET_DEPLOY_PAID_FALSE] Current value=%s | stack=%s", p['ParameterValue'], stack_name)
+                      params.append({'ParameterKey': 'DeployPaidResources', 'ParameterValue': 'false'})
+                  else:
+                      params.append({'ParameterKey': p['ParameterKey'], 'UsePreviousValue': True})
+              try:
+                  cfn.update_stack(
+                      StackName=stack_name,
+                      UsePreviousTemplate=True,
+                      Parameters=params,
+                      Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
+                  )
+                  logger.info("[SET_DEPLOY_PAID_FALSE] Update submitted | stack=%s", stack_name)
+                  return {'submitted': True}
+              except ClientError as e:
+                  code = e.response['Error']['Code']
+                  msg  = e.response['Error']['Message']
+                  if code == 'ValidationError' and 'No updates are to be performed' in msg:
+                      logger.info("[SET_DEPLOY_PAID_FALSE] Already false | stack=%s", stack_name)
+                      return {'submitted': False, 'reason': 'already_false'}
+                  raise
+
+          def _get_stack_status(cfn, stack_name):
+              try:
+                  resp   = cfn.describe_stacks(StackName=stack_name)
+                  status = resp['Stacks'][0]['StackStatus']
+              except ClientError as e:
+                  logger.warning("[GET_STATUS] Could not describe stack | stack=%s | error=%s", stack_name, e)
+                  return {'status': 'UNKNOWN', 'complete': False, 'rollback': False}
+              complete = status in TERMINAL_STATES
+              rollback = status in ROLLBACK_STATES
+              return {'status': status, 'complete': complete, 'rollback': rollback}
+
+          def _handle_patch(event, action):
+              app_name = _get_app_name(event)
+              logger.info("[PATCH] Start | stack=%s | action=%s", app_name, action)
+              cfn = boto3.client('cloudformation')
+              response = cfn.get_template(StackName=app_name, TemplateStage='Original')
+              template_body = response['TemplateBody']
+              if isinstance(template_body, dict):
+                  import json as _json
+                  template_body = _json.dumps(template_body, indent=2)
+                  logger.info("[PATCH] Template returned as dict by boto3 (CFN stores internally as JSON) — serialised to JSON string | stack=%s", app_name)
+              else:
+                  first_char = template_body.lstrip()[:1]
+                  fmt = 'JSON' if first_char == '{' else 'YAML'
+                  logger.info("[PATCH] Template returned as string | format=%s | stack=%s", fmt, app_name)
+              logger.info("[PATCH] Template downloaded | size=%d chars | stack=%s", len(template_body), app_name)
+              modified = _patch_cfn_parameter(template_body, param_key='LoadBalancerStackName', comment=(action == 'comment'))
+              patched = modified != template_body
+              logger.info("[PATCH] Result | patched=%s | stack=%s | action=%s", patched, app_name, action)
+              if patched:
+                  sep = '=' * 72
+                  logger.info("[PATCH] Modified template for %s:\n%s\n%s\n%s", app_name, sep, modified, sep)
+              else:
+                  logger.info("[PATCH] No changes — already in desired state | stack=%s | action=%s", app_name, action)
+              return {'stack_name': app_name, 'action': action, 'patched': patched, 'modified_template': modified}
+
+          def _handle_update_stack(event):
+              app_name = _get_app_name(event)
+              template_body = event.get('template_body') or event.get('modified_template')
+              if not template_body:
+                  raise ValueError("update_stack action requires 'template_body' in the event")
+              logger.info("[UPDATE_STACK] Submitting template update | stack=%s", app_name)
+              cfn = boto3.client('cloudformation')
+              parameters = [{'ParameterKey': p['ParameterKey'], 'UsePreviousValue': True}
+                            for p in _get_current_parameters(cfn, app_name)]
+              try:
+                  cfn.update_stack(
+                      StackName=app_name,
+                      TemplateBody=template_body,
+                      Parameters=parameters,
+                      Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
+                  )
+                  logger.info("[UPDATE_STACK] Submitted | stack=%s", app_name)
+                  return {'submitted': True, 'stack_name': app_name}
+              except ClientError as e:
+                  code = e.response['Error']['Code']
+                  msg  = e.response['Error']['Message']
+                  if code == 'ValidationError' and 'No updates are to be performed' in msg:
+                      logger.info("[UPDATE_STACK] No resource changes needed | stack=%s", app_name)
+                      return {'submitted': False, 'reason': 'no_resource_changes_needed', 'stack_name': app_name}
+                  raise
+
+          def _handle_set_deploy_paid_false(event):
+              app_name = _get_app_name(event)
+              logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s", app_name)
+              cfn = boto3.client('cloudformation')
+              result = _submit_deploy_paid_false(cfn, app_name)
+              if result['submitted']:
+                  return {'submitted': True, 'stack_name': app_name}
+              return {'submitted': False, 'reason': result.get('reason', 'already_false'), 'stack_name': app_name}
+
+          def _handle_set_deploy_paid_false_both(event):
+              app_name = _get_app_name(event)
+              network_stack = event.get('network_stack_name') or f'{app_name}-network'
+              logger.info("[SET_DEPLOY_PAID_FALSE_BOTH] Start | app=%s | network=%s", app_name, network_stack)
+              cfn = boto3.client('cloudformation')
+              app_result     = _submit_deploy_paid_false(cfn, app_name)
+              network_result = _submit_deploy_paid_false(cfn, network_stack)
+              logger.info(
+                  "[SET_DEPLOY_PAID_FALSE_BOTH] Done | app_submitted=%s | network_submitted=%s",
+                  app_result['submitted'], network_result['submitted'],
+              )
+              return {
+                  'app_name':           app_name,
+                  'network_stack_name': network_stack,
+                  'app_submitted':      app_result['submitted'],
+                  'network_submitted':  network_result['submitted'],
+              }
+
+          def _handle_check_stack_status(event):
+              app_name = _get_app_name(event)
+              cfn = boto3.client('cloudformation')
+              s = _get_stack_status(cfn, app_name)
+              if s['rollback']:
+                  logger.error("[CHECK_STATUS] ROLLBACK/FAILURE | stack=%s | status=%s", app_name, s['status'])
+              elif s['complete']:
+                  logger.info("[CHECK_STATUS] COMPLETE | stack=%s | status=%s", app_name, s['status'])
+              else:
+                  logger.info("[CHECK_STATUS] IN PROGRESS | stack=%s | status=%s", app_name, s['status'])
+              return {'update_complete': s['complete'], 'rollback_occurred': s['rollback'], 'status': s['status'], 'stack_name': app_name}
+
+          def _handle_check_both_stacks_status(event):
+              app_name = _get_app_name(event)
+              network_stack = event.get('network_stack_name') or f'{app_name}-network'
+              logger.info("[CHECK_BOTH_STATUS] Checking | app=%s | network=%s", app_name, network_stack)
+              cfn = boto3.client('cloudformation')
+              app_s     = _get_stack_status(cfn, app_name)
+              network_s = _get_stack_status(cfn, network_stack)
+              any_rollback  = app_s['rollback'] or network_s['rollback']
+              both_complete = app_s['complete'] and network_s['complete']
+              logger.info(
+                  "[CHECK_BOTH_STATUS] app=%s(%s) network=%s(%s) | both_complete=%s | any_rollback=%s",
+                  app_name, app_s['status'], network_stack, network_s['status'], both_complete, any_rollback,
+              )
+              return {
+                  'app_name':           app_name,
+                  'network_stack_name': network_stack,
+                  'app_status':         app_s['status'],
+                  'network_status':     network_s['status'],
+                  'both_complete':      both_complete,
+                  'any_rollback':       any_rollback,
+              }
+
+          def handler(event, context):
+              action = event.get('action', 'comment').lower()
+              if action in ('comment', 'uncomment'):
+                  return _handle_patch(event, action)
+              if action == 'update_stack':
+                  return _handle_update_stack(event)
+              if action == 'set_deploy_paid_false':
+                  return _handle_set_deploy_paid_false(event)
+              if action == 'set_deploy_paid_false_both':
+                  return _handle_set_deploy_paid_false_both(event)
+              if action == 'check_stack_status':
+                  return _handle_check_stack_status(event)
+              if action == 'check_both_stacks_status':
+                  return _handle_check_both_stacks_status(event)
+              raise ValueError(f"Unknown action: {action!r}")
+
+####
+# IAM — Step Functions
+####
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-sfn-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt LambdaFunction.Arn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+####
+# CloudWatch Logs — Step Functions
+####
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/states/${AWS::StackName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+####
+# Step Functions — Standard State Machine
+####
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: StateMachineLogGroup
+    Properties:
+      StateMachineName: !Sub '${AWS::StackName}'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "CFN Template Modifier — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failover 4-step sequential orchestration. Routed by 'action' in the input payload.",
+          "StartAt": "ValidateAction",
+          "States": {
+
+            "ValidateAction": {
+              "Comment": "Route to the correct workflow based on action.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.action",
+                  "StringEquals": "comment",
+                  "Next": "PatchTemplate"
+                },
+                {
+                  "Variable": "$.action",
+                  "StringEquals": "uncomment",
+                  "Next": "PatchTemplate"
+                },
+                {
+                  "Variable": "$.action",
+                  "StringEquals": "set_deploy_paid_false",
+                  "Next": "SetDeployPaidFalse"
+                },
+                {
+                  "Variable": "$.action",
+                  "StringEquals": "failover",
+                  "Next": "FailoverStep1Comment"
+                }
+              ],
+              "Default": "InvalidAction"
+            },
+
+            "InvalidAction": {
+              "Type": "Fail",
+              "Error": "InvalidAction",
+              "Cause": "action must be 'comment', 'uncomment', 'set_deploy_paid_false', or 'failover'."
+            },
+
+            "PatchTemplate": {
+              "Comment": "PATCH STEP 1 — Fetch template, comment/uncomment LoadBalancerStackName in all *ServerStack resources. Returns patched flag + modified template body.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "app_name.$": "$.app_name",
+                "action.$": "$.action"
+              },
+              "ResultPath": "$.patch_result",
+              "Next": "CheckIfPatched",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "PatchFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "CheckIfPatched": {
+              "Comment": "If template was unchanged exit gracefully. Otherwise submit the stack update.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.patch_result.patched",
+                  "BooleanEquals": true,
+                  "Next": "ApplyStackUpdate"
+                }
+              ],
+              "Default": "NoChanges"
+            },
+
+            "NoChanges": {
+              "Comment": "Template already in desired state — stamp reason and exit cleanly.",
+              "Type": "Pass",
+              "Parameters": {
+                "message": "No changes were made. Template already in desired state for the requested action.",
+                "app_name.$": "$.app_name",
+                "action.$": "$.action"
+              },
+              "ResultPath": "$.exit_reason",
+              "Next": "GracefulExit"
+            },
+
+            "ApplyStackUpdate": {
+              "Comment": "PATCH STEP 2 — Submit CloudFormation UpdateStack with the patched template. All parameters preserved via UsePreviousValue.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "update_stack",
+                "app_name.$": "$.app_name",
+                "template_body.$": "$.patch_result.modified_template"
+              },
+              "ResultPath": "$.update_result",
+              "Next": "Complete",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 15,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "UpdateFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "SetDeployPaidFalse": {
+              "Comment": "DEPLOY_PAID STEP 1 — Set DeployPaidResources=false. UsePreviousTemplate + UsePreviousValue for all other params. Non-blocking submit.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "set_deploy_paid_false",
+                "app_name.$": "$.app_name"
+              },
+              "ResultPath": "$.deploy_result",
+              "Next": "CheckIfSubmitted",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "DeployPaidFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "CheckIfSubmitted": {
+              "Comment": "If DeployPaidResources was already false nothing was submitted — exit gracefully. Otherwise start polling.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.deploy_result.submitted",
+                  "BooleanEquals": true,
+                  "Next": "WaitForDeployPaidUpdate"
+                }
+              ],
+              "Default": "AlreadyFalse"
+            },
+
+            "AlreadyFalse": {
+              "Comment": "DeployPaidResources already false — stamp reason and exit cleanly.",
+              "Type": "Pass",
+              "Parameters": {
+                "message": "No update submitted. DeployPaidResources is already false.",
+                "app_name.$": "$.app_name",
+                "action.$": "$.action"
+              },
+              "ResultPath": "$.exit_reason",
+              "Next": "GracefulExit"
+            },
+
+            "WaitForDeployPaidUpdate": {
+              "Comment": "DEPLOY_PAID STEP 2 — Initial wait before first poll. CloudFormation needs time to start the update.",
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckDeployPaidStatus"
+            },
+
+            "CheckDeployPaidStatus": {
+              "Comment": "DEPLOY_PAID STEP 3 — Poll CloudFormation for terminal state.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_stack_status",
+                "app_name.$": "$.app_name"
+              },
+              "ResultPath": "$.status_result",
+              "Next": "DeployPaidUpdateDone",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "DeployPaidFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "DeployPaidUpdateDone": {
+              "Comment": "Rollback check first — fail fast. Complete → done. Still in progress → loop.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.status_result.rollback_occurred",
+                  "BooleanEquals": true,
+                  "Next": "DeployPaidRollback"
+                },
+                {
+                  "Variable": "$.status_result.update_complete",
+                  "BooleanEquals": true,
+                  "Next": "Complete"
+                }
+              ],
+              "Default": "WaitForDeployPaidUpdate"
+            },
+
+            "FailoverStep1Comment": {
+              "Comment": "FAILOVER STEP 1a — Comment out LoadBalancerStackName in all *ServerStack resources.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "comment",
+                "app_name.$": "$.app_name"
+              },
+              "ResultPath": "$.fo_s1_patch",
+              "Next": "FailoverStep1ApplyUpdate",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep1ApplyUpdate": {
+              "Comment": "FAILOVER STEP 1b — Submit UpdateStack with the commented template.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "update_stack",
+                "app_name.$": "$.app_name",
+                "template_body.$": "$.fo_s1_patch.modified_template"
+              },
+              "ResultPath": "$.fo_s1_update",
+              "Next": "FailoverStep1Wait",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 15,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep1Wait": {
+              "Comment": "FAILOVER STEP 1c — Wait for CFN to begin processing the template update.",
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "FailoverStep1Poll"
+            },
+
+            "FailoverStep1Poll": {
+              "Comment": "FAILOVER STEP 1d — Poll app stack for terminal state.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_stack_status",
+                "app_name.$": "$.app_name"
+              },
+              "ResultPath": "$.fo_s1_status",
+              "Next": "FailoverStep1Done",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep1Done": {
+              "Comment": "Fail fast on rollback. Advance to Step 2 when complete. Otherwise loop.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.fo_s1_status.rollback_occurred",
+                  "BooleanEquals": true,
+                  "Next": "FailoverFailed"
+                },
+                {
+                  "Variable": "$.fo_s1_status.update_complete",
+                  "BooleanEquals": true,
+                  "Next": "FailoverStep2SetDeployPaid"
+                }
+              ],
+              "Default": "FailoverStep1Wait"
+            },
+
+            "FailoverStep2SetDeployPaid": {
+              "Comment": "FAILOVER STEP 2a — Set DeployPaidResources=false on app stack (paid resources down).",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "set_deploy_paid_false",
+                "app_name.$": "$.app_name"
+              },
+              "ResultPath": "$.fo_s2",
+              "Next": "FailoverStep2Wait",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep2Wait": {
+              "Comment": "FAILOVER STEP 2b — Wait for CFN to begin tearing down paid resources.",
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "FailoverStep2Poll"
+            },
+
+            "FailoverStep2Poll": {
+              "Comment": "FAILOVER STEP 2c — Poll app stack for terminal state.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_stack_status",
+                "app_name.$": "$.app_name"
+              },
+              "ResultPath": "$.fo_s2_status",
+              "Next": "FailoverStep2Done",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep2Done": {
+              "Comment": "Fail fast on rollback. Advance to Step 3 when complete. Otherwise loop.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.fo_s2_status.rollback_occurred",
+                  "BooleanEquals": true,
+                  "Next": "FailoverFailed"
+                },
+                {
+                  "Variable": "$.fo_s2_status.update_complete",
+                  "BooleanEquals": true,
+                  "Next": "FailoverStep3Uncomment"
+                }
+              ],
+              "Default": "FailoverStep2Wait"
+            },
+
+            "FailoverStep3Uncomment": {
+              "Comment": "FAILOVER STEP 3a — Restore LoadBalancerStackName in all *ServerStack resources.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "uncomment",
+                "app_name.$": "$.app_name"
+              },
+              "ResultPath": "$.fo_s3_patch",
+              "Next": "FailoverStep3ApplyUpdate",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep3ApplyUpdate": {
+              "Comment": "FAILOVER STEP 3b — Submit UpdateStack with the uncommented template.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "update_stack",
+                "app_name.$": "$.app_name",
+                "template_body.$": "$.fo_s3_patch.modified_template"
+              },
+              "ResultPath": "$.fo_s3_update",
+              "Next": "FailoverStep3Wait",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 15,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep3Wait": {
+              "Comment": "FAILOVER STEP 3c — Wait for CFN to begin processing the template restore.",
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "FailoverStep3Poll"
+            },
+
+            "FailoverStep3Poll": {
+              "Comment": "FAILOVER STEP 3d — Poll app stack for terminal state.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_stack_status",
+                "app_name.$": "$.app_name"
+              },
+              "ResultPath": "$.fo_s3_status",
+              "Next": "FailoverStep3Done",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep3Done": {
+              "Comment": "Fail fast on rollback. Advance to Step 4 when complete. Otherwise loop.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.fo_s3_status.rollback_occurred",
+                  "BooleanEquals": true,
+                  "Next": "FailoverFailed"
+                },
+                {
+                  "Variable": "$.fo_s3_status.update_complete",
+                  "BooleanEquals": true,
+                  "Next": "FailoverStep4SetDeployPaidBoth"
+                }
+              ],
+              "Default": "FailoverStep3Wait"
+            },
+
+            "FailoverStep4SetDeployPaidBoth": {
+              "Comment": "FAILOVER STEP 4a — Set DeployPaidResources=false on BOTH app and network stacks simultaneously.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "set_deploy_paid_false_both",
+                "app_name.$": "$.app_name",
+                "network_stack_name.$": "$.network_stack_name"
+              },
+              "ResultPath": "$.fo_s4",
+              "Next": "FailoverStep4Wait",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep4Wait": {
+              "Comment": "FAILOVER STEP 4b — Wait for CFN to begin tearing down paid resources on both stacks.",
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "FailoverStep4Poll"
+            },
+
+            "FailoverStep4Poll": {
+              "Comment": "FAILOVER STEP 4c — Poll both stacks; returns both_complete + any_rollback.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_both_stacks_status",
+                "app_name.$": "$.app_name",
+                "network_stack_name.$": "$.network_stack_name"
+              },
+              "ResultPath": "$.fo_s4_status",
+              "Next": "FailoverStep4Done",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailoverFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "FailoverStep4Done": {
+              "Comment": "Fail fast on any rollback. Both complete → success. Otherwise loop.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.fo_s4_status.any_rollback",
+                  "BooleanEquals": true,
+                  "Next": "FailoverFailed"
+                },
+                {
+                  "Variable": "$.fo_s4_status.both_complete",
+                  "BooleanEquals": true,
+                  "Next": "Complete"
+                }
+              ],
+              "Default": "FailoverStep4Wait"
+            },
+
+            "FailoverFailed": {
+              "Type": "Fail",
+              "Error": "FailoverFailed",
+              "Cause": "Failover workflow aborted — a CloudFormation stack entered a rollback or failure state. Check the CF console and CloudWatch Logs."
+            },
+
+            "GracefulExit": {
+              "Type": "Succeed"
+            },
+
+            "Complete": {
+              "Type": "Succeed"
+            },
+
+            "PatchFailed": {
+              "Type": "Fail",
+              "Error": "PatchFailed",
+              "Cause": "Lambda failed to fetch or patch the CFN template. Check CloudWatch Logs."
+            },
+
+            "UpdateFailed": {
+              "Type": "Fail",
+              "Error": "UpdateFailed",
+              "Cause": "CloudFormation UpdateStack submission failed. Check CloudWatch Logs and the CF console."
+            },
+
+            "DeployPaidFailed": {
+              "Type": "Fail",
+              "Error": "DeployPaidFailed",
+              "Cause": "set_deploy_paid_false Lambda failed after retries. Check CloudWatch Logs."
+            },
+
+            "DeployPaidRollback": {
+              "Type": "Fail",
+              "Error": "DeployPaidRollback",
+              "Cause": "CloudFormation entered a rollback or failure state during DeployPaidResources update. Check the CF console."
+            }
+
+          }
+        }
+
+####
+# Outputs
+####
+
+Outputs:
+
+  LambdaArn:
+    Description: ARN of the CFN Template Modifier Lambda
+    Value: !GetAtt LambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+
+  LambdaName:
+    Description: Name of the CFN Template Modifier Lambda
+    Value: !Ref LambdaFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaName'
+
+  LambdaLogGroupName:
+    Description: CloudWatch Log Group for the Lambda function
+    Value: !Ref LambdaLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaLogGroup'
+
+  StateMachineArn:
+    Description: ARN of the CFN Template Modifier State Machine
+    Value: !Ref StateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineArn'
+
+  StateMachineName:
+    Description: Name of the CFN Template Modifier State Machine
+    Value: !GetAtt StateMachine.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineName'
+
+  StateMachineLogGroupName:
+    Description: CloudWatch Log Group for State Machine execution history
+    Value: !Ref StateMachineLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineLogGroup'
