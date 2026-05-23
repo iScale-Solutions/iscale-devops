@@ -1071,20 +1071,19 @@ Resources:
                 {
                   "Variable": "$.fo_s3_status.update_complete",
                   "BooleanEquals": true,
-                  "Next": "FailbackStep4SetDeployPaidBoth"
+                  "Next": "FailbackStep4SetDeployPaidNetwork"
                 }
               ],
               "Default": "FailbackStep3Wait"
             },
 
-            "FailbackStep4SetDeployPaidBoth": {
-              "Comment": "FAILOVER STEP 4a — Set DeployPaidResources=false on BOTH app and network stacks simultaneously.",
+            "FailbackStep4SetDeployPaidNetwork": {
+              "Comment": "FAILBACK STEP 4a — Set DeployPaidResources=false on the network stack (NAT GWs, Jump Host, VPC Endpoints down). App stack was already handled in Step 2.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
-                "action": "set_deploy_paid_false_both",
-                "app_name.$": "$.app_name",
-                "network_stack_name.$": "$.network_stack_name"
+                "action": "set_deploy_paid_false",
+                "app_name.$": "$.network_stack_name"
               },
               "ResultPath": "$.fo_s4",
               "Next": "FailbackStep4Wait",
@@ -1106,20 +1105,19 @@ Resources:
             },
 
             "FailbackStep4Wait": {
-              "Comment": "FAILOVER STEP 4b — Wait for CFN to begin tearing down paid resources on both stacks.",
+              "Comment": "FAILBACK STEP 4b — Wait for CFN to begin tearing down network paid resources.",
               "Type": "Wait",
               "Seconds": 60,
               "Next": "FailbackStep4Poll"
             },
 
             "FailbackStep4Poll": {
-              "Comment": "FAILOVER STEP 4c — Poll both stacks; returns both_complete + any_rollback.",
+              "Comment": "FAILBACK STEP 4c — Poll network stack for terminal state.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
-                "action": "check_both_stacks_status",
-                "app_name.$": "$.app_name",
-                "network_stack_name.$": "$.network_stack_name"
+                "action": "check_stack_status",
+                "app_name.$": "$.network_stack_name"
               },
               "ResultPath": "$.fo_s4_status",
               "Next": "FailbackStep4Done",
@@ -1141,16 +1139,16 @@ Resources:
             },
 
             "FailbackStep4Done": {
-              "Comment": "Fail fast on any rollback. Both complete → success. Otherwise loop.",
+              "Comment": "Fail fast on rollback. Network stack complete → success. Otherwise loop.",
               "Type": "Choice",
               "Choices": [
                 {
-                  "Variable": "$.fo_s4_status.any_rollback",
+                  "Variable": "$.fo_s4_status.rollback_occurred",
                   "BooleanEquals": true,
                   "Next": "FailbackFailed"
                 },
                 {
-                  "Variable": "$.fo_s4_status.both_complete",
+                  "Variable": "$.fo_s4_status.update_complete",
                   "BooleanEquals": true,
                   "Next": "Complete"
                 }
