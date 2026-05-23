@@ -8,6 +8,133 @@ logger.setLevel(logging.INFO)
 
 
 # ---------------------------------------------------------------------------
+# CFN dict/JSON-string → YAML converter
+# ---------------------------------------------------------------------------
+
+def _cfn_to_yaml(obj, _depth=0):
+    """
+    Convert a CloudFormation template dict (or JSON-string) to YAML text.
+    Uses long-form intrinsics (Fn::Sub, Fn::If, Ref …) which are valid CFN YAML.
+    No third-party dependencies — stdlib json used only for string quoting.
+    """
+    import json as _j
+
+    if isinstance(obj, str):
+        obj = _j.loads(obj)
+
+    def _key(k):
+        s = str(k)
+        if not s or ': ' in s or s[0] in '!&*[{|>\'"':
+            return _j.dumps(s)
+        return s
+
+    def _scalar(v):
+        if v is None:             return 'null'
+        if isinstance(v, bool):   return 'true' if v else 'false'
+        if isinstance(v, (int, float)): return str(v)
+        s = str(v)
+        if not s: return '""'
+        if (any(c in s for c in ':#{}[]!,&*|>\'"') or
+                s[0] in ' -?' or s[-1] == ' ' or '\n' in s or
+                s.lower() in ('true', 'false', 'null', 'yes', 'no', 'on', 'off')):
+            return _j.dumps(s)
+        try:
+            float(s)
+            return _j.dumps(s)
+        except ValueError:
+            pass
+        return s
+
+    def _node(o, d):
+        p = '  ' * d
+        if isinstance(o, dict):
+            parts = []
+            for k, v in o.items():
+                ks = _key(k)
+                if isinstance(v, (dict, list)):
+                    if v:
+                        parts.append(f'{p}{ks}:')
+                        parts.append(_node(v, d + 1))
+                    else:
+                        parts.append(f'{p}{ks}: {{}}' if isinstance(v, dict) else f'{p}{ks}: []')
+                elif isinstance(v, bool):
+                    parts.append(f'{p}{ks}: {"true" if v else "false"}')
+                elif v is None:
+                    parts.append(f'{p}{ks}: null')
+                elif isinstance(v, (int, float)):
+                    parts.append(f'{p}{ks}: {v}')
+                else:
+                    parts.append(f'{p}{ks}: {_scalar(str(v))}')
+            return '\n'.join(parts)
+        # list
+        parts = []
+        for item in o:
+            if isinstance(item, dict) and item:
+                kvs = list(item.items())
+                fk, fv = _key(str(kvs[0][0])), kvs[0][1]
+                if isinstance(fv, (dict, list)) and fv:
+                    parts.append(f'{p}- {fk}:')
+                    parts.append(_node(fv, d + 1))
+                elif isinstance(fv, bool):
+                    parts.append(f'{p}- {fk}: {"true" if fv else "false"}')
+                elif fv is None:
+                    parts.append(f'{p}- {fk}: null')
+                elif isinstance(fv, (int, float)):
+                    parts.append(f'{p}- {fk}: {fv}')
+                else:
+                    parts.append(f'{p}- {fk}: {_scalar(str(fv))}')
+                cp = p + '  '
+                for rk, rv in kvs[1:]:
+                    rks = _key(str(rk))
+                    if isinstance(rv, (dict, list)) and rv:
+                        parts.append(f'{cp}{rks}:')
+                        parts.append(_node(rv, d + 1))
+                    elif isinstance(rv, bool):
+                        parts.append(f'{cp}{rks}: {"true" if rv else "false"}')
+                    elif rv is None:
+                        parts.append(f'{cp}{rks}: null')
+                    elif isinstance(rv, (int, float)):
+                        parts.append(f'{cp}{rks}: {rv}')
+                    else:
+                        parts.append(f'{cp}{rks}: {_scalar(str(rv))}')
+            elif isinstance(item, list) and item:
+                parts.append(f'{p}-')
+                parts.append(_node(item, d + 1))
+            elif isinstance(item, bool):
+                parts.append(f'{p}- {"true" if item else "false"}')
+            elif item is None:
+                parts.append(f'{p}- null')
+            elif isinstance(item, (int, float)):
+                parts.append(f'{p}- {item}')
+            else:
+                parts.append(f'{p}- {_scalar(str(item))}')
+        return '\n'.join(parts)
+
+    return _node(obj, _depth)
+
+
+def _fetch_as_yaml(cfn, stack_name: str) -> str:
+    """
+    Fetch the stack template and always return it as a YAML string.
+    Converts dict or JSON-string responses to YAML so CloudFormation
+    never normalises the stored template to JSON on subsequent updates.
+    """
+    resp = cfn.get_template(StackName=stack_name, TemplateStage='Original')
+    body = resp['TemplateBody']
+
+    if isinstance(body, dict):
+        logger.info("[FETCH_TEMPLATE] Returned as dict — converting to YAML | stack=%s", stack_name)
+        return _cfn_to_yaml(body)
+
+    if body.lstrip().startswith('{'):
+        logger.info("[FETCH_TEMPLATE] Returned as JSON string — converting to YAML | stack=%s", stack_name)
+        return _cfn_to_yaml(body)
+
+    logger.info("[FETCH_TEMPLATE] Returned as YAML string | stack=%s", stack_name)
+    return body
+
+
+# ---------------------------------------------------------------------------
 # YAML text-level helpers
 # ---------------------------------------------------------------------------
 
@@ -162,7 +289,12 @@ def _get_current_parameters(cfn, stack_name: str) -> list:
 
 
 def _submit_deploy_paid_false(cfn, stack_name: str) -> dict:
-    """Submit DeployPaidResources=false on a single stack. Returns {submitted, reason}."""
+    """
+    Set DeployPaidResources=false on a single stack.
+    Fetches the current template and resubmits it as YAML with TemplateBody
+    instead of UsePreviousTemplate=True — this prevents CloudFormation from
+    normalising the stored template to JSON during the update.
+    """
     params = []
     for p in _get_current_parameters(cfn, stack_name):
         if p['ParameterKey'] == 'DeployPaidResources':
@@ -170,10 +302,13 @@ def _submit_deploy_paid_false(cfn, stack_name: str) -> dict:
             params.append({'ParameterKey': 'DeployPaidResources', 'ParameterValue': 'false'})
         else:
             params.append({'ParameterKey': p['ParameterKey'], 'UsePreviousValue': True})
+
+    template_body = _fetch_as_yaml(cfn, stack_name)
+
     try:
         cfn.update_stack(
             StackName=stack_name,
-            UsePreviousTemplate=True,
+            TemplateBody=template_body,
             Parameters=params,
             Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
         )
@@ -217,24 +352,13 @@ def _get_stack_status(cfn, stack_name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _handle_patch(event: dict, action: str) -> dict:
-    """Fetch template, patch it, return modified template + whether a change was made."""
+    """Fetch template as YAML, patch it, return modified template + whether a change was made."""
     app_name = _get_app_name(event)
     logger.info("[PATCH] Start | stack=%s | action=%s", app_name, action)
 
     cfn = boto3.client('cloudformation')
-    response = cfn.get_template(StackName=app_name, TemplateStage='Original')
-    template_body = response['TemplateBody']
-
-    if isinstance(template_body, dict):
-        import json as _json
-        template_body = _json.dumps(template_body, indent=2)
-        logger.info("[PATCH] Template returned as dict by boto3 (CFN stores internally as JSON) — serialised to JSON string | stack=%s", app_name)
-    else:
-        first_char = template_body.lstrip()[:1]
-        fmt = 'JSON' if first_char == '{' else 'YAML'
-        logger.info("[PATCH] Template returned as string | format=%s | stack=%s", fmt, app_name)
-
-    logger.info("[PATCH] Template downloaded | size=%d chars | stack=%s", len(template_body), app_name)
+    template_body = _fetch_as_yaml(cfn, app_name)
+    logger.info("[PATCH] Template ready | size=%d chars | stack=%s", len(template_body), app_name)
 
     modified = _patch_cfn_parameter(
         template_body,
@@ -299,15 +423,10 @@ def _handle_update_stack(event: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Action: set_deploy_paid_false  (parameter-only update)
+# Action: set_deploy_paid_false  (parameter-only update, YAML template preserved)
 # ---------------------------------------------------------------------------
 
 def _handle_set_deploy_paid_false(event: dict) -> dict:
-    """
-    Set DeployPaidResources=false on the target stack using UsePreviousTemplate.
-    All other parameters are preserved via UsePreviousValue.
-    Gracefully handles the case where DeployPaidResources is already false.
-    """
     app_name = _get_app_name(event)
     logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s", app_name)
 
@@ -320,16 +439,11 @@ def _handle_set_deploy_paid_false(event: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Action: set_deploy_paid_false_both  (submit both stacks in parallel)
+# Action: set_deploy_paid_false_both  (submit both stacks)
 # ---------------------------------------------------------------------------
 
 def _handle_set_deploy_paid_false_both(event: dict) -> dict:
-    """
-    Submit DeployPaidResources=false on both app_name and network_stack_name.
-    network_stack_name defaults to '{app_name}-network' if omitted.
-    Returns per-stack submission results.
-    """
-    app_name = _get_app_name(event)
+    app_name      = _get_app_name(event)
     network_stack = event.get('network_stack_name') or f'{app_name}-network'
 
     logger.info("[SET_DEPLOY_PAID_FALSE_BOTH] Start | app=%s | network=%s", app_name, network_stack)
@@ -345,15 +459,15 @@ def _handle_set_deploy_paid_false_both(event: dict) -> dict:
     )
 
     return {
-        'app_name':          app_name,
+        'app_name':           app_name,
         'network_stack_name': network_stack,
-        'app_submitted':     app_result['submitted'],
-        'network_submitted': network_result['submitted'],
+        'app_submitted':      app_result['submitted'],
+        'network_submitted':  network_result['submitted'],
     }
 
 
 # ---------------------------------------------------------------------------
-# Action: check_stack_status  (poll CloudFormation for terminal state)
+# Action: check_stack_status
 # ---------------------------------------------------------------------------
 
 TERMINAL_STATES = {
@@ -370,12 +484,6 @@ ROLLBACK_STATES = {
 }
 
 def _handle_check_stack_status(event: dict) -> dict:
-    """
-    Describe the stack and return its current status plus two boolean flags
-    for the Step Functions Choice state to branch on:
-      update_complete   — True when a terminal state is reached
-      rollback_occurred — True when the terminal state is a rollback/failure
-    """
     app_name = _get_app_name(event)
 
     cfn = boto3.client('cloudformation')
@@ -405,18 +513,11 @@ def _handle_check_stack_status(event: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Action: check_both_stacks_status  (poll both app + network stacks)
+# Action: check_both_stacks_status
 # ---------------------------------------------------------------------------
 
 def _handle_check_both_stacks_status(event: dict) -> dict:
-    """
-    Check both app_name and network_stack_name stacks.
-    Returns:
-      both_complete  — True when both are in a terminal state
-      any_rollback   — True when either is in a rollback/failure state
-    Fails fast: if either stack has rolled back, any_rollback=True regardless of the other.
-    """
-    app_name = _get_app_name(event)
+    app_name      = _get_app_name(event)
     network_stack = event.get('network_stack_name') or f'{app_name}-network'
 
     logger.info("[CHECK_BOTH_STATUS] Checking | app=%s | network=%s", app_name, network_stack)
@@ -436,12 +537,12 @@ def _handle_check_both_stacks_status(event: dict) -> dict:
     )
 
     return {
-        'app_name':            app_name,
-        'network_stack_name':  network_stack,
-        'app_status':          app_s['status'],
-        'network_status':      network_s['status'],
-        'both_complete':       both_complete,
-        'any_rollback':        any_rollback,
+        'app_name':           app_name,
+        'network_stack_name': network_stack,
+        'app_status':         app_s['status'],
+        'network_status':     network_s['status'],
+        'both_complete':      both_complete,
+        'any_rollback':       any_rollback,
     }
 
 
@@ -450,36 +551,18 @@ def _handle_check_both_stacks_status(event: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def handler(event, context):
-    """
-    Dispatch table:
-
-    action = "comment"                    → patch template (comment LB params)
-    action = "uncomment"                  → patch template (restore LB params)
-    action = "update_stack"               → submit CFN UpdateStack with provided template_body
-    action = "set_deploy_paid_false"      → set DeployPaidResources=false via parameter update
-    action = "set_deploy_paid_false_both" → set DeployPaidResources=false on app + network stacks
-    action = "check_stack_status"         → poll CFN for terminal state (used by SFN polling loop)
-    action = "check_both_stacks_status"   → poll both app + network stacks for terminal state
-
-    Returns a flat dict for direct Step Functions consumption.
-    """
     action = event.get('action', 'comment').lower()
 
     if action in ('comment', 'uncomment'):
         return _handle_patch(event, action)
-
     if action == 'update_stack':
         return _handle_update_stack(event)
-
     if action == 'set_deploy_paid_false':
         return _handle_set_deploy_paid_false(event)
-
     if action == 'set_deploy_paid_false_both':
         return _handle_set_deploy_paid_false_both(event)
-
     if action == 'check_stack_status':
         return _handle_check_stack_status(event)
-
     if action == 'check_both_stacks_status':
         return _handle_check_both_stacks_status(event)
 
