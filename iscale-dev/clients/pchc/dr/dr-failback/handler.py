@@ -305,13 +305,27 @@ def _submit_deploy_paid_false(cfn, stack_name: str) -> dict:
 
     template_body = _fetch_as_yaml(cfn, stack_name)
 
-    try:
-        cfn.update_stack(
+    # CFN TemplateBody limit is 51,200 bytes. Fall back to UsePreviousTemplate=True
+    # for large templates — format may normalise to JSON, but that is acceptable when
+    # no subsequent template-reading step (comment/uncomment) follows on this stack.
+    if len(template_body.encode('utf-8')) > 51200:
+        logger.info("[SET_DEPLOY_PAID_FALSE] Template >51200 bytes — using UsePreviousTemplate | stack=%s", stack_name)
+        update_kwargs = dict(
+            StackName=stack_name,
+            UsePreviousTemplate=True,
+            Parameters=params,
+            Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
+        )
+    else:
+        update_kwargs = dict(
             StackName=stack_name,
             TemplateBody=template_body,
             Parameters=params,
             Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
         )
+
+    try:
+        cfn.update_stack(**update_kwargs)
         logger.info("[SET_DEPLOY_PAID_FALSE] Update submitted | stack=%s", stack_name)
         return {'submitted': True}
     except ClientError as e:
