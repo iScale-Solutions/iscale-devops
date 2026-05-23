@@ -6,7 +6,7 @@ Description: |
   4-step failover sequence via Step Functions.
 
   Event payload:
-    { "app_name": "pchc-tdr-ue2-pesonet", "action": "failover", "network_stack_name": "pchc-tdr-ue2-pesonet-network" }
+    { "app_name": "pchc-tdr-ue2-pesonet", "action": "failback", "network_stack_name": "pchc-tdr-ue2-pesonet-network" }
     { "app_name": "pchc-tdr-ue2-pesonet", "action": "comment" }
     { "app_name": "pchc-tdr-ue2-pesonet", "action": "uncomment" }
     { "app_name": "pchc-tdr-ue2-pesonet", "action": "set_deploy_paid_false" }
@@ -562,7 +562,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failover 4-step sequential orchestration. Routed by 'action' in the input payload.",
+          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failback 4-step sequential orchestration. Routed by 'action' in the input payload.",
           "StartAt": "ValidateAction",
           "States": {
 
@@ -587,8 +587,8 @@ Resources:
                 },
                 {
                   "Variable": "$.action",
-                  "StringEquals": "failover",
-                  "Next": "FailoverStep1Comment"
+                  "StringEquals": "failback",
+                  "Next": "FailbackStep1Comment"
                 }
               ],
               "Default": "InvalidAction"
@@ -597,7 +597,7 @@ Resources:
             "InvalidAction": {
               "Type": "Fail",
               "Error": "InvalidAction",
-              "Cause": "action must be 'comment', 'uncomment', 'set_deploy_paid_false', or 'failover'."
+              "Cause": "action must be 'comment', 'uncomment', 'set_deploy_paid_false', or 'failback'."
             },
 
             "PatchTemplate": {
@@ -784,7 +784,7 @@ Resources:
               "Default": "WaitForDeployPaidUpdate"
             },
 
-            "FailoverStep1Comment": {
+            "FailbackStep1Comment": {
               "Comment": "FAILOVER STEP 1a — Comment out LoadBalancerStackName in all *ServerStack resources.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -793,7 +793,7 @@ Resources:
                 "app_name.$": "$.app_name"
               },
               "ResultPath": "$.fo_s1_patch",
-              "Next": "FailoverStep1ApplyUpdate",
+              "Next": "FailbackStep1ApplyUpdate",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -805,13 +805,13 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep1ApplyUpdate": {
+            "FailbackStep1ApplyUpdate": {
               "Comment": "FAILOVER STEP 1b — Submit UpdateStack with the commented template.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -821,7 +821,7 @@ Resources:
                 "template_body.$": "$.fo_s1_patch.modified_template"
               },
               "ResultPath": "$.fo_s1_update",
-              "Next": "FailoverStep1Wait",
+              "Next": "FailbackStep1Wait",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -833,20 +833,20 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep1Wait": {
+            "FailbackStep1Wait": {
               "Comment": "FAILOVER STEP 1c — Wait for CFN to begin processing the template update.",
               "Type": "Wait",
               "Seconds": 30,
-              "Next": "FailoverStep1Poll"
+              "Next": "FailbackStep1Poll"
             },
 
-            "FailoverStep1Poll": {
+            "FailbackStep1Poll": {
               "Comment": "FAILOVER STEP 1d — Poll app stack for terminal state.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -855,7 +855,7 @@ Resources:
                 "app_name.$": "$.app_name"
               },
               "ResultPath": "$.fo_s1_status",
-              "Next": "FailoverStep1Done",
+              "Next": "FailbackStep1Done",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -867,31 +867,31 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep1Done": {
+            "FailbackStep1Done": {
               "Comment": "Fail fast on rollback. Advance to Step 2 when complete. Otherwise loop.",
               "Type": "Choice",
               "Choices": [
                 {
                   "Variable": "$.fo_s1_status.rollback_occurred",
                   "BooleanEquals": true,
-                  "Next": "FailoverFailed"
+                  "Next": "FailbackFailed"
                 },
                 {
                   "Variable": "$.fo_s1_status.update_complete",
                   "BooleanEquals": true,
-                  "Next": "FailoverStep2SetDeployPaid"
+                  "Next": "FailbackStep2SetDeployPaid"
                 }
               ],
-              "Default": "FailoverStep1Wait"
+              "Default": "FailbackStep1Wait"
             },
 
-            "FailoverStep2SetDeployPaid": {
+            "FailbackStep2SetDeployPaid": {
               "Comment": "FAILOVER STEP 2a — Set DeployPaidResources=false on app stack (paid resources down).",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -900,7 +900,7 @@ Resources:
                 "app_name.$": "$.app_name"
               },
               "ResultPath": "$.fo_s2",
-              "Next": "FailoverStep2Wait",
+              "Next": "FailbackStep2Wait",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -912,20 +912,20 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep2Wait": {
+            "FailbackStep2Wait": {
               "Comment": "FAILOVER STEP 2b — Wait for CFN to begin tearing down paid resources.",
               "Type": "Wait",
               "Seconds": 60,
-              "Next": "FailoverStep2Poll"
+              "Next": "FailbackStep2Poll"
             },
 
-            "FailoverStep2Poll": {
+            "FailbackStep2Poll": {
               "Comment": "FAILOVER STEP 2c — Poll app stack for terminal state.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -934,7 +934,7 @@ Resources:
                 "app_name.$": "$.app_name"
               },
               "ResultPath": "$.fo_s2_status",
-              "Next": "FailoverStep2Done",
+              "Next": "FailbackStep2Done",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -946,31 +946,31 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep2Done": {
+            "FailbackStep2Done": {
               "Comment": "Fail fast on rollback. Advance to Step 3 when complete. Otherwise loop.",
               "Type": "Choice",
               "Choices": [
                 {
                   "Variable": "$.fo_s2_status.rollback_occurred",
                   "BooleanEquals": true,
-                  "Next": "FailoverFailed"
+                  "Next": "FailbackFailed"
                 },
                 {
                   "Variable": "$.fo_s2_status.update_complete",
                   "BooleanEquals": true,
-                  "Next": "FailoverStep3Uncomment"
+                  "Next": "FailbackStep3Uncomment"
                 }
               ],
-              "Default": "FailoverStep2Wait"
+              "Default": "FailbackStep2Wait"
             },
 
-            "FailoverStep3Uncomment": {
+            "FailbackStep3Uncomment": {
               "Comment": "FAILOVER STEP 3a — Restore LoadBalancerStackName in all *ServerStack resources.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -979,7 +979,7 @@ Resources:
                 "app_name.$": "$.app_name"
               },
               "ResultPath": "$.fo_s3_patch",
-              "Next": "FailoverStep3ApplyUpdate",
+              "Next": "FailbackStep3ApplyUpdate",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -991,13 +991,13 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep3ApplyUpdate": {
+            "FailbackStep3ApplyUpdate": {
               "Comment": "FAILOVER STEP 3b — Submit UpdateStack with the uncommented template.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -1007,7 +1007,7 @@ Resources:
                 "template_body.$": "$.fo_s3_patch.modified_template"
               },
               "ResultPath": "$.fo_s3_update",
-              "Next": "FailoverStep3Wait",
+              "Next": "FailbackStep3Wait",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -1019,20 +1019,20 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep3Wait": {
+            "FailbackStep3Wait": {
               "Comment": "FAILOVER STEP 3c — Wait for CFN to begin processing the template restore.",
               "Type": "Wait",
               "Seconds": 30,
-              "Next": "FailoverStep3Poll"
+              "Next": "FailbackStep3Poll"
             },
 
-            "FailoverStep3Poll": {
+            "FailbackStep3Poll": {
               "Comment": "FAILOVER STEP 3d — Poll app stack for terminal state.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -1041,7 +1041,7 @@ Resources:
                 "app_name.$": "$.app_name"
               },
               "ResultPath": "$.fo_s3_status",
-              "Next": "FailoverStep3Done",
+              "Next": "FailbackStep3Done",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -1053,31 +1053,31 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep3Done": {
+            "FailbackStep3Done": {
               "Comment": "Fail fast on rollback. Advance to Step 4 when complete. Otherwise loop.",
               "Type": "Choice",
               "Choices": [
                 {
                   "Variable": "$.fo_s3_status.rollback_occurred",
                   "BooleanEquals": true,
-                  "Next": "FailoverFailed"
+                  "Next": "FailbackFailed"
                 },
                 {
                   "Variable": "$.fo_s3_status.update_complete",
                   "BooleanEquals": true,
-                  "Next": "FailoverStep4SetDeployPaidBoth"
+                  "Next": "FailbackStep4SetDeployPaidBoth"
                 }
               ],
-              "Default": "FailoverStep3Wait"
+              "Default": "FailbackStep3Wait"
             },
 
-            "FailoverStep4SetDeployPaidBoth": {
+            "FailbackStep4SetDeployPaidBoth": {
               "Comment": "FAILOVER STEP 4a — Set DeployPaidResources=false on BOTH app and network stacks simultaneously.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -1087,7 +1087,7 @@ Resources:
                 "network_stack_name.$": "$.network_stack_name"
               },
               "ResultPath": "$.fo_s4",
-              "Next": "FailoverStep4Wait",
+              "Next": "FailbackStep4Wait",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -1099,20 +1099,20 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep4Wait": {
+            "FailbackStep4Wait": {
               "Comment": "FAILOVER STEP 4b — Wait for CFN to begin tearing down paid resources on both stacks.",
               "Type": "Wait",
               "Seconds": 60,
-              "Next": "FailoverStep4Poll"
+              "Next": "FailbackStep4Poll"
             },
 
-            "FailoverStep4Poll": {
+            "FailbackStep4Poll": {
               "Comment": "FAILOVER STEP 4c — Poll both stacks; returns both_complete + any_rollback.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
@@ -1122,7 +1122,7 @@ Resources:
                 "network_stack_name.$": "$.network_stack_name"
               },
               "ResultPath": "$.fo_s4_status",
-              "Next": "FailoverStep4Done",
+              "Next": "FailbackStep4Done",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
@@ -1134,20 +1134,20 @@ Resources:
               "Catch": [
                 {
                   "ErrorEquals": ["States.ALL"],
-                  "Next": "FailoverFailed",
+                  "Next": "FailbackFailed",
                   "ResultPath": "$.error"
                 }
               ]
             },
 
-            "FailoverStep4Done": {
+            "FailbackStep4Done": {
               "Comment": "Fail fast on any rollback. Both complete → success. Otherwise loop.",
               "Type": "Choice",
               "Choices": [
                 {
                   "Variable": "$.fo_s4_status.any_rollback",
                   "BooleanEquals": true,
-                  "Next": "FailoverFailed"
+                  "Next": "FailbackFailed"
                 },
                 {
                   "Variable": "$.fo_s4_status.both_complete",
@@ -1155,12 +1155,12 @@ Resources:
                   "Next": "Complete"
                 }
               ],
-              "Default": "FailoverStep4Wait"
+              "Default": "FailbackStep4Wait"
             },
 
-            "FailoverFailed": {
+            "FailbackFailed": {
               "Type": "Fail",
-              "Error": "FailoverFailed",
+              "Error": "FailbackFailed",
               "Cause": "Failover workflow aborted — a CloudFormation stack entered a rollback or failure state. Check the CF console and CloudWatch Logs."
             },
 
