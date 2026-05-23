@@ -11,15 +11,25 @@ Metadata:
           - OrgName
           - EnvName
       - Label:
-          default: Cloudformation Stack Configuration
+          default: DNS Configuration
         Parameters:
           - HostedZoneName
           - Hostname
       - Label:
-          default: Cloudformation Stack Configuration
+          default: Dependent Stack Names
         Parameters:
           - NetworkStackName
           - SNSStackName
+      - Label:
+          default: SFTP Server Configuration
+        Parameters:
+          - UseDefaultSecGroup
+          - EndpointType
+          - Domain
+      - Label:
+          default: Disaster Recovery
+        Parameters:
+          - DeployPaidResources
 
     ParameterLabels:
       Name:
@@ -36,6 +46,14 @@ Metadata:
         default: Network Stack
       SNSStackName:
         default: SNS Stack
+      UseDefaultSecGroup:
+        default: Use Default Security Group (0.0.0.0/0)
+      EndpointType:
+        default: SFTP Endpoint Type
+      Domain:
+        default: Storage Domain
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
 
 Parameters:
   Name:
@@ -49,7 +67,7 @@ Parameters:
     Type: String
     Default: iscale-dev
     AllowedPattern: '^[a-z]+(-[a-z]+)*$'
-    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    ConstraintDescription: Organization must only contain lowercase letters and hyphens
     MaxLength: 10
   EnvName:
     Description: The name of the environment
@@ -67,7 +85,7 @@ Parameters:
   Hostname:
     Type: String
     Description: Hostname for the SFTP Server
-    Default: sftp
+    Default: ''
   NetworkStackName:
     Description: The name of the cloudformation Network stack
     Type: String
@@ -101,6 +119,16 @@ Parameters:
     AllowedValues:
       - S3
       - EFS
+  DeployPaidResources:
+    Description: |
+      true (default): Deploy all paid resources — SFTP server, IAM roles, and DNS records. Normal operation for all environments.
+      false: DR standby mode — suppress all paid resources to minimize idle cost. Only S3 bucket stays alive.
+      DR failover: set back to true to activate SFTP server and update DNS to this region.
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
 
 Mappings:
   Fn::Transform:
@@ -113,6 +141,8 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  HasCustomHostname: !Not [!Equals [!Ref Hostname, '']]
   UseDefaultSecGroup: !Equals [!Ref UseDefaultSecGroup, TRUE]
   UsePUBLIC: !Equals [!Ref EndpointType, PUBLIC]
   # VPC endpoint, internet-facing: hosted in the VPC and fronted by an Elastic IP.
@@ -123,10 +153,24 @@ Conditions:
   UseVPC: !Or
     - !Condition UseVpcPublic
     - !Condition UseVpcPrivate
+  # Combined conditions — gate paid resources behind DeployPaidResources=true
+  IsPaidAndUseDefaultSecGroup: !And
+    - !Condition IsPaidResources
+    - !Condition UseDefaultSecGroup
+  IsPaidAndUseVPC: !And
+    - !Condition IsPaidResources
+    - !Condition UseVPC
+  IsPaidAndUseVpcPublic: !And
+    - !Condition IsPaidResources
+    - !Condition UseVpcPublic
+  IsPaidAndUsePUBLIC: !And
+    - !Condition IsPaidResources
+    - !Condition UsePUBLIC
 
 Resources:
   
   SFTPServerSecurityGroup:
+    Condition: IsPaidResources
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Join [' ', [!Ref Name, SFTP Server Security Group]]
@@ -135,7 +179,7 @@ Resources:
           !Sub '${NetworkStackName}-VpcId'
 
   SFTPDefaultSecurityGroup:
-    Condition: UseDefaultSecGroup
+    Condition: IsPaidAndUseDefaultSecGroup
     Type: AWS::EC2::SecurityGroupIngress
     Properties: 
       IpProtocol: TCP
@@ -145,11 +189,11 @@ Resources:
       CidrIp: 0.0.0.0/0
   
   SFTPServerEIP:
-    Condition: UseVpcPublic
+    Condition: IsPaidAndUseVpcPublic
     Type: AWS::EC2::EIP
 
   SFTPServerVPC:
-    Condition: UseVPC
+    Condition: IsPaidAndUseVPC
     Type: AWS::Transfer::Server
     Properties:
       Protocols:
@@ -174,7 +218,7 @@ Resources:
       SecurityPolicyName: TransferSecurityPolicy-2022-03
   
   SFTPServerPublic:
-    Condition: UsePUBLIC
+    Condition: IsPaidAndUsePUBLIC
     Type: AWS::Transfer::Server
     Properties:
       Protocols:
@@ -184,10 +228,7 @@ Resources:
       LoggingRole: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/AWSTransferLoggingAccess'
       PreAuthenticationLoginBanner: This system is for the use of authorized users only. Individuals using this computer system without authority, or in excess of their authority, are subject to having all of their activities on this system monitored and recorded by system personnel.
       SecurityPolicyName: TransferSecurityPolicy-2022-03
-      Tags:
-         - Key: transfer:customHostname
-           Value: !Join ['', [!Ref Name, '-', !Ref Hostname, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref HostedZoneName]]
-  
+
 ## Update DNS Records
 
   # Internet-facing VPC endpoint: point an A record at the Elastic IP.
@@ -195,10 +236,16 @@ Resources:
   # the private ENI addresses, so no public DNS record is created for that variant — clients
   # resolve it via the VPC endpoint's interface within the VPC / peered networks.
   SFTPServerDNSRecordVPC:
-    Condition: UseVpcPublic
+    Condition: IsPaidAndUseVpcPublic
     Type: AWS::Route53::RecordSet
     Properties:
-      Name: !Join ['', [!Ref Name, '-', !Ref Hostname, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref HostedZoneName]]
+      Name: !If
+        - HasCustomHostname
+        - !Join ['', [!Ref Hostname, '.', !Ref HostedZoneName]]
+        - !If
+          - IsProd
+          - !Join ['', ['sftp-', !Ref Name, '.', !Ref HostedZoneName]]
+          - !Join ['', ['sftp-', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref HostedZoneName]]
       HostedZoneName: !Join ['', [!Ref HostedZoneName, '.']]
       Type: A
       Comment: SFTP custom hostname
@@ -207,18 +254,26 @@ Resources:
         - !Ref SFTPServerEIP
 
   SFTPServerDNSRecordPUBLIC:
-    Condition: UsePUBLIC
+    Condition: IsPaidAndUsePUBLIC
     Type: AWS::Route53::RecordSet
     Properties:
-      Name: !Join ['', [!Ref Name, '-', !Ref Hostname, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref HostedZoneName]]
+      Name: !If
+        - HasCustomHostname
+        - !Join ['', [!Ref Hostname, '.', !Ref HostedZoneName]]
+        - !If
+          - IsProd
+          - !Join ['', ['sftp-', !Ref Name, '.', !Ref HostedZoneName]]
+          - !Join ['', ['sftp-', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref HostedZoneName]]
       HostedZoneName: !Join ['', [!Ref HostedZoneName, '.']]
       Type: CNAME
       Comment: SFTP custom hostname
       TTL: 300
-      ResourceRecords: 
+      ResourceRecords:
         - !Join ['.', [!GetAtt SFTPServerPublic.ServerId, server.transfer, !Ref 'AWS::Region', amazonaws.com]]
 
 ## Create S3 Bucket
+
+# For DR setup, manually configure S3 Cross region replication from primary to DR bucket.
 
   SFTPServerS3Bucket:
     Type: AWS::S3::Bucket
@@ -245,6 +300,7 @@ Resources:
           Value: !Ref OrgName
 
   SFTPServerUserSessionRWPolicy:
+    Condition: IsPaidResources
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: !Join [ '-', [!Ref OrgName , !FindInMap [EnvShort, !Ref EnvName, Name],  !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ftp, user, session, rw, policy]]
@@ -266,25 +322,8 @@ Resources:
               - s3:PutObjectACL
             Resource: !Join ['/', [!GetAtt SFTPServerS3Bucket.Arn, '*']]        
 
-  SFTPServerUserSessionReadOnlyPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      ManagedPolicyName: !Join [ '-', [!Ref OrgName , !FindInMap [EnvShort, !Ref EnvName, Name],  !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, ftp, user, session, readonly, policy]]
-      PolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Action:
-              - s3:ListBucket
-            Resource: !GetAtt SFTPServerS3Bucket.Arn
-          - Effect: Allow
-            Action:
-              - s3:GetObject
-              - s3:GetObjectVersion
-              - s3:GetObjectACL
-            Resource: !Join ['/', [!GetAtt SFTPServerS3Bucket.Arn, '*']]     
-
   SFTPServerRole:
+    Condition: IsPaidResources
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -329,9 +368,13 @@ Outputs:
 
   HostName:
     Description: FTP Hostname
-    Value: !Join ['.', [!Ref Hostname, !Ref HostedZoneName]]
-  
+    Value: !If
+      - IsProd
+      - !Join ['', ['sftp-', !Ref Name, '.', !Ref HostedZoneName]]
+      - !Join ['', ['sftp-', !Ref Name, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref HostedZoneName]]
+
   SecurityGroup:
+    Condition: IsPaidResources
     Description: FTP Security Group
     Value: !Ref SFTPServerSecurityGroup
 
