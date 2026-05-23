@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  DR Failover & Failback Trigger — one deployment per app.
+  Registers two EventBridge rules scoped to this app that invoke the centralized dr-engine:
+    - FailoverTriggerRule → invokes engine FailoverLambda (non-blocking CloudFormation update)
+    - FailbackTriggerRule → starts engine FailbackStateMachine (Step Functions, manages server stack deletion)
+  Also monitors CloudFormation stack completion events and notifies via SNS.
+
+  PREREQUISITE: pchc-productiondr-uw2-dr-engine stack must be deployed first.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "1. App Identity"
+        Parameters:
+          - OrgName
+          - AppName
+          - SourceRegion
+      - Label:
+          default: "2. Stack References"
+        Parameters:
+          - EngineStackName
+          - NetworkStackName
+          - AppStackName
+          - SNSStackName
+      - Label:
+          default: "3. DR Database Configuration"
+        Parameters:
+          - DBInstanceIdentifier
+          - DRDBSecretArn
+      - Label:
+          default: "4. Failback Configuration"
+        Parameters:
+          - ServerStackLogicalIds
+
+    ParameterLabels:
+      OrgName:
+        default: Organization Name
+      AppName:
+        default: Application Name
+      SourceRegion:
+        default: Live / Source Region
+      EngineStackName:
+        default: DR Engine Stack Name
+      NetworkStackName:
+        default: DR Network Stack Name
+      AppStackName:
+        default: DR Application Stack Name
+      SNSStackName:
+        default: SNS Stack Name
+      DBInstanceIdentifier:
+        default: DB Instance Identifier (DR region — for snapshot auto-discovery)
+      DRDBSecretArn:
+        default: DR DB Secret ARN (Secrets Manager — for auto-fetching DB master password)
+      ServerStackLogicalIds:
+        default: Server Stack Logical IDs (comma-separated, for failback deletion)
+
+Parameters:
+
+  OrgName:
+    Description: |
+      Organization name prefix used to build the DR AMI search pattern.
+      Must match the OrgName used in the EC2 Image Builder stack.
+      DR AMIs are discovered by the pattern: {OrgName}_{AppName}_dr-image_*
+      Example: pchc_pesonet20_dr-image_2025.11.2414480_2026-05-02T16-52-46.639Z
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+    ConstraintDescription: Lowercase letters, numbers, and hyphens only.
+
+  AppName:
+    Description: |
+      Short identifier for this application (e.g. pesonet20, mis, pddts).
+      Used to scope both EventBridge trigger rules — only events whose detail.app_name
+      matches this value will activate this stack's failover or failback.
+      Must be unique per deployment of this template. Use lowercase, hyphens allowed.
+    Type: String
+    MinLength: 2
+    MaxLength: 20
+    AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+    ConstraintDescription: Lowercase letters, numbers, and hyphens only.
+
+  SourceRegion:
+    Description: AWS region where the primary/live environment runs (e.g. ap-southeast-1). Informational only.
+    Type: String
+    Default: ap-southeast-1
+
+  EngineStackName:
+    Description: |
+      Name of the centralized DR Engine CloudFormation stack.
+      Must export: ${EngineStackName}-FailoverLambdaArn and ${EngineStackName}-FailbackStateMachineArn.
+    Type: String
+    Default: pchc-productiondr-uw2-dr-engine
+    MinLength: 1
+
+  NetworkStackName:
+    Description: |
+      Name of the DR network CloudFormation stack to update.
+      This stack must use common/network.yaml and have a DeployPaidResources parameter.
+      Failover sets DeployPaidResources=true  — provisions NAT Gateways, Jump Host, VPC Endpoints.
+      Failback sets DeployPaidResources=false — tears them down after the app stack is stopped.
+    Type: String
+    Default: pchc-productiondr-uw2-network
+    MinLength: 1
+
+  AppStackName:
+    Description: |
+      Name of the DR application CloudFormation stack to update.
+      Must have DeployPaidResources, SnapshotIdentifier, and DBMasterUserPassword parameters.
+      All other parameters are preserved with UsePreviousValue=true on every update.
+    Type: String
+    Default: pchc-productiondr-uw2-pesonet20
+    MinLength: 1
+
+  SNSStackName:
+    Description: |
+      Name of the SNS CloudFormation stack. Must export ${SNSStackName}-TopicArn.
+      Notifications are sent on failover/failback initiation, completion, and failure.
+    Type: String
+    Default: pchc-productiondr-uw2-sns
+    MinLength: 1
+
+  DBInstanceIdentifier:
+    Description: |
+      RDS DB instance identifier in the DR region used to auto-discover the latest available snapshot.
+      Cross-region snapshot copies appear as manual snapshots in the DR region.
+      Leave blank to skip auto-discovery — snapshot_identifier must then be provided explicitly
+      in the EventBridge event detail or Lambda invocation payload.
+      Only used during failover (ignored during failback).
+    Type: String
+    Default: ''
+
+  DRDBSecretArn:
+    Description: |
+      ARN of the Secrets Manager secret in the DR region containing DB credentials.
+      Use the DRDBSecretArn output of the app CloudFormation stack (e.g. pchc-productiondr-uw2-pesonet20).
+      At failover, the Lambda reads DB_ROOT_PASSWORD from this secret automatically —
+      no need to provide db_master_password in the EventBridge event payload.
+      Leave blank to require db_master_password explicitly in the event payload.
+    Type: String
+    Default: ''
+
+  ServerStackLogicalIds:
+    Description: |
+      Comma-separated logical IDs of nested server (ASG/EC2) stacks within AppStackName
+      that must be deleted before failback teardown. These are stateless stacks whose ELB
+      export dependencies block the ELB stacks from being updated during failback.
+      Example: TreasuryServerStack,APIServerStack,SidekiqServerStack,CustomerServiceServerStack
+      The FailbackStateMachine deletes these stacks, polls until DELETE_COMPLETE, then
+      updates AppStackName and NetworkStackName with DeployPaidResources=false.
+    Type: String
+    Default: ''
+
+Resources:
+
+####
+# IAM — EventBridge roles to invoke engine resources
+####
+
+  EventBridgeInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-eventbridge-invoke-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeEngineResources
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: InvokeFailoverLambda
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  Fn::ImportValue: !Sub '${EngineStackName}-FailoverLambdaArn'
+              - Sid: StartFailbackStateMachine
+                Effect: Allow
+                Action: states:StartExecution
+                Resource:
+                  Fn::ImportValue: !Sub '${EngineStackName}-FailbackStateMachineArn'
+
+####
+# EventBridge — manual failover trigger scoped to this app
+####
+
+  # DR operator publishes a FailoverRequest event to activate the DR environment.
+  # Rule is scoped to detail.app_name so each app deployment only responds to its own events.
+  FailoverTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-failover-trigger'
+      Description: !Sub 'Manual DR failover trigger for ${AppName}. Publish FailoverRequest with detail.app_name=${AppName}.'
+      EventBusName: default
+      EventPattern:
+        source:
+          - pchc.dr.failover
+        detail-type:
+          - FailoverRequest
+        detail:
+          app_name:
+            - !Ref AppName
+      State: ENABLED
+      Targets:
+        - Id: InvokeFailoverLambda
+          Arn:
+            Fn::ImportValue: !Sub '${EngineStackName}-FailoverLambdaArn'
+          RoleArn: !GetAtt EventBridgeInvokeRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              snapshot_identifier: '$.detail.snapshot_identifier'
+              db_master_password: '$.detail.db_master_password'
+            InputTemplate: !Sub |
+              {
+                "app_name": "${AppName}",
+                "org_name": "${OrgName}",
+                "app_stack_name": "${AppStackName}",
+                "network_stack_name": "${NetworkStackName}",
+                "db_instance_identifier": "${DBInstanceIdentifier}",
+                "dr_db_secret_arn": "${DRDBSecretArn}",
+                "source_region": "${SourceRegion}",
+                "snapshot_identifier": "<snapshot_identifier>",
+                "db_master_password": "<db_master_password>"
+              }
+
+  FailoverLambdaEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::ImportValue: !Sub '${EngineStackName}-FailoverLambdaArn'
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt FailoverTriggerRule.Arn
+
+####
+# EventBridge — manual failback trigger scoped to this app
+####
+
+  # DR operator publishes a FailbackRequest event to tear down DR and return to primary.
+  # The FailbackStateMachine requires confirm_failback=true as an explicit safety pin.
+  # Only trigger AFTER DNS has been switched back to the primary region.
+  FailbackTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-failback-trigger'
+      Description: !Sub 'Manual DR failback trigger for ${AppName}. Publish FailbackRequest with detail.app_name=${AppName} and confirm_failback=true.'
+      EventBusName: default
+      EventPattern:
+        source:
+          - pchc.dr.failover
+        detail-type:
+          - FailbackRequest
+        detail:
+          app_name:
+            - !Ref AppName
+      State: ENABLED
+      Targets:
+        - Id: StartFailbackStateMachine
+          Arn:
+            Fn::ImportValue: !Sub '${EngineStackName}-FailbackStateMachineArn'
+          RoleArn: !GetAtt EventBridgeInvokeRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              confirm_failback: '$.detail.confirm_failback'
+            InputTemplate: !Sub |
+              {
+                "confirm_failback": <confirm_failback>,
+                "app_name": "${AppName}",
+                "app_stack_name": "${AppStackName}",
+                "network_stack_name": "${NetworkStackName}",
+                "server_stack_logical_ids": "${ServerStackLogicalIds}",
+                "source_region": "${SourceRegion}"
+              }
+
+####
+# EventBridge — monitors CF stack events and notifies when failover/failback completes or fails
+####
+
+  StackEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-stack-completion'
+      Description: !Sub 'Notifies when DR network or app stack update for ${AppName} completes or fails.'
+      EventPattern:
+        source:
+          - aws.cloudformation
+        detail-type:
+          - CloudFormation Stack Status Change
+        detail:
+          stack-id:
+            - prefix: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${NetworkStackName}/'
+            - prefix: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/'
+          status-details:
+            status:
+              - UPDATE_COMPLETE
+              - UPDATE_ROLLBACK_COMPLETE
+              - UPDATE_FAILED
+              - UPDATE_ROLLBACK_FAILED
+      State: ENABLED
+      Targets:
+        - Id: NotifyStackCompletion
+          Arn:
+            Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+          InputTransformer:
+            InputPathsMap:
+              stack: '$.detail.stack-id'
+              status: '$.detail.status-details.status'
+              time: '$.time'
+            InputTemplate: !Sub |
+              "DR Stack Update — ${AppName}"
+              "Stack  : <stack>"
+              "Status : <status>"
+              "Time   : <time>"
+
+  StackEventRuleSNSPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource:
+              Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+Outputs:
+
+  HowToFailover:
+    Description: |
+      Trigger DR failover via EventBridge (recommended).
+      Omit snapshot_identifier to use auto-discovery (requires DBInstanceIdentifier to be set).
+      Run this when disaster is declared and DNS has been switched to the DR region.
+    Value: !Sub |
+      aws events put-events \
+        --region ${AWS::Region} \
+        --entries '[{
+          "Source": "pchc.dr.failover",
+          "DetailType": "FailoverRequest",
+          "EventBusName": "default",
+          "Detail": "{\"app_name\":\"${AppName}\",\"snapshot_identifier\":\"<arn-or-blank>\",\"db_master_password\":\"<password-or-blank>\"}"
+        }]'
+
+  HowToFailback:
+    Description: |
+      Trigger DR failback via EventBridge — starts the FailbackStateMachine which deletes server
+      stacks first, then tears down ELBs, DB, Cache, and NAT GWs.
+      confirm_failback=true is mandatory. The state machine rejects the request without it.
+      Run this ONLY AFTER DNS has been switched back to the primary region and
+      the primary environment is confirmed stable.
+    Value: !Sub |
+      aws events put-events \
+        --region ${AWS::Region} \
+        --entries '[{
+          "Source": "pchc.dr.failover",
+          "DetailType": "FailbackRequest",
+          "EventBusName": "default",
+          "Detail": "{\"app_name\":\"${AppName}\",\"confirm_failback\":true}"
+        }]'
+
+  EngineFailoverLambdaArn:
+    Description: ARN of the engine Failover Lambda this stack targets
+    Value:
+      Fn::ImportValue: !Sub '${EngineStackName}-FailoverLambdaArn'
+
+  EngineFailbackStateMachineArn:
+    Description: ARN of the engine Failback State Machine this stack targets
+    Value:
+      Fn::ImportValue: !Sub '${EngineStackName}-FailbackStateMachineArn'
