@@ -84,12 +84,16 @@ Parameters:
       - TRUE
       - FALSE
   EndpointType:
-    Description: Choose to make your server's endpoint publicly accessible (PUBLIC) or host it inside your VPC.
+    Description: >-
+      PUBLIC = AWS-managed public endpoint (CNAME, no static IP, no security groups).
+      VPC_INTERNET = endpoint hosted in your VPC with an Elastic IP (internet-facing, static IP, security groups).
+      VPC_INTERNAL = endpoint hosted in your VPC reachable only from within the VPC / peered networks / VPN / Direct Connect (no public IP).
     Type: String
     Default: PUBLIC
     AllowedValues:
       - PUBLIC
-      - VPC
+      - VPC_INTERNET
+      - VPC_INTERNAL
   Domain:
     Description: Specifies the domain of the storage system that is used for file transfers
     Type: String
@@ -110,8 +114,15 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   UseDefaultSecGroup: !Equals [!Ref UseDefaultSecGroup, TRUE]
-  UseVPC: !Equals [!Ref EndpointType, VPC]
   UsePUBLIC: !Equals [!Ref EndpointType, PUBLIC]
+  # VPC endpoint, internet-facing: hosted in the VPC and fronted by an Elastic IP.
+  UseVpcPublic: !Equals [!Ref EndpointType, VPC_INTERNET]
+  # VPC endpoint, internal only: hosted in the VPC with no public IP attached.
+  UseVpcPrivate: !Equals [!Ref EndpointType, VPC_INTERNAL]
+  # True for either VPC variant; used for resources common to both (server, security group).
+  UseVPC: !Or
+    - !Condition UseVpcPublic
+    - !Condition UseVpcPrivate
 
 Resources:
   
@@ -134,7 +145,7 @@ Resources:
       CidrIp: 0.0.0.0/0
   
   SFTPServerEIP:
-    Condition: UseVPC
+    Condition: UseVpcPublic
     Type: AWS::EC2::EIP
 
   SFTPServerVPC:
@@ -143,11 +154,14 @@ Resources:
     Properties:
       Protocols:
         - SFTP
-      EndpointType: !Ref EndpointType
+      EndpointType: VPC
       Domain: !Ref Domain
       EndpointDetails:
-        AddressAllocationIds:
-          - !GetAtt SFTPServerEIP.AllocationId
+        # Attach the Elastic IP only for the internet-facing variant; internal endpoints get no public IP.
+        AddressAllocationIds: !If
+          - UseVpcPublic
+          - - !GetAtt SFTPServerEIP.AllocationId
+          - !Ref AWS::NoValue
         SecurityGroupIds:
           - !Ref SFTPServerSecurityGroup
         SubnetIds:
@@ -165,7 +179,7 @@ Resources:
     Properties:
       Protocols:
         - SFTP
-      EndpointType: !Ref EndpointType
+      EndpointType: PUBLIC
       Domain: !Ref Domain
       LoggingRole: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/AWSTransferLoggingAccess'
       PreAuthenticationLoginBanner: This system is for the use of authorized users only. Individuals using this computer system without authority, or in excess of their authority, are subject to having all of their activities on this system monitored and recorded by system personnel.
@@ -176,8 +190,12 @@ Resources:
   
 ## Update DNS Records
 
+  # Internet-facing VPC endpoint: point an A record at the Elastic IP.
+  # Internal (VPC_INTERNAL) endpoints have no public IP and CloudFormation does not expose
+  # the private ENI addresses, so no public DNS record is created for that variant — clients
+  # resolve it via the VPC endpoint's interface within the VPC / peered networks.
   SFTPServerDNSRecordVPC:
-    Condition: UseVPC
+    Condition: UseVpcPublic
     Type: AWS::Route53::RecordSet
     Properties:
       Name: !Join ['', [!Ref Name, '-', !Ref Hostname, '-', !FindInMap [EnvShort, !Ref EnvName, Name], '.', !Ref HostedZoneName]]
