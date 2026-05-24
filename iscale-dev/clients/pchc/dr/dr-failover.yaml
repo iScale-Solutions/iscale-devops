@@ -444,7 +444,7 @@ Resources:
               'SnapshotIdentifier': snapshot_identifier,
               'DBMasterUserPassword': db_master_password,
               'InstanceAMI': instance_ami
-            })
+            }, preserve_yaml=True)
             logger.info(f'[FAILOVER 2/2] App stack update initiated.')
 
             summary = (
@@ -477,7 +477,7 @@ Resources:
 
             # Step 1: App stack ? deactivate DB, Cache, LBs, App Servers
             logger.info(f'[FAILBACK 1/2] Updating app stack: {app_stack}')
-            update_stack(cf, app_stack, deploy_paid='false')
+            update_stack(cf, app_stack, deploy_paid='false', preserve_yaml=True)
             logger.info(f'[FAILBACK 1/2] App stack update initiated.')
 
             # Step 2: Network stack ? deactivate NAT Gateways, Jump Host, VPC Endpoints
@@ -579,6 +579,110 @@ Resources:
             return latest['ImageId']
 
 
+          def _cfn_to_yaml(obj, _depth=0):
+            import json as _j
+            if isinstance(obj, str):
+              obj = _j.loads(obj)
+            def _key(k):
+              s = str(k)
+              if not s or ': ' in s or s[0] in '!&*[{|>\'"':
+                return _j.dumps(s)
+              return s
+            def _scalar(v):
+              if v is None: return 'null'
+              if isinstance(v, bool): return 'true' if v else 'false'
+              if isinstance(v, (int, float)): return str(v)
+              s = str(v)
+              if not s: return '""'
+              if (any(c in s for c in ':#{}[]!,&*|>\'"') or
+                  s[0] in ' -?' or s[-1] == ' ' or '\n' in s or
+                  s.lower() in ('true','false','null','yes','no','on','off')):
+                return _j.dumps(s)
+              try:
+                float(s)
+                return _j.dumps(s)
+              except ValueError:
+                pass
+              return s
+            def _node(o, d):
+              p = '  ' * d
+              if isinstance(o, dict):
+                parts = []
+                for k, v in o.items():
+                  ks = _key(k)
+                  if isinstance(v, (dict, list)):
+                    if v:
+                      parts.append(f'{p}{ks}:')
+                      parts.append(_node(v, d+1))
+                    else:
+                      parts.append(f'{p}{ks}: {{}}' if isinstance(v, dict) else f'{p}{ks}: []')
+                  elif isinstance(v, bool):
+                    parts.append(f'{p}{ks}: {"true" if v else "false"}')
+                  elif v is None:
+                    parts.append(f'{p}{ks}: null')
+                  elif isinstance(v, (int, float)):
+                    parts.append(f'{p}{ks}: {v}')
+                  else:
+                    parts.append(f'{p}{ks}: {_scalar(str(v))}')
+                return '\n'.join(parts)
+              parts = []
+              for item in o:
+                if isinstance(item, dict) and item:
+                  kvs = list(item.items())
+                  fk, fv = _key(str(kvs[0][0])), kvs[0][1]
+                  if isinstance(fv, (dict, list)) and fv:
+                    parts.append(f'{p}- {fk}:')
+                    parts.append(_node(fv, d+1))
+                  elif isinstance(fv, bool):
+                    parts.append(f'{p}- {fk}: {"true" if fv else "false"}')
+                  elif fv is None:
+                    parts.append(f'{p}- {fk}: null')
+                  elif isinstance(fv, (int, float)):
+                    parts.append(f'{p}- {fk}: {fv}')
+                  else:
+                    parts.append(f'{p}- {fk}: {_scalar(str(fv))}')
+                  cp = p + '  '
+                  for rk, rv in kvs[1:]:
+                    rks = _key(str(rk))
+                    if isinstance(rv, (dict, list)) and rv:
+                      parts.append(f'{cp}{rks}:')
+                      parts.append(_node(rv, d+1))
+                    elif isinstance(rv, bool):
+                      parts.append(f'{cp}{rks}: {"true" if rv else "false"}')
+                    elif rv is None:
+                      parts.append(f'{cp}{rks}: null')
+                    elif isinstance(rv, (int, float)):
+                      parts.append(f'{cp}{rks}: {rv}')
+                    else:
+                      parts.append(f'{cp}{rks}: {_scalar(str(rv))}')
+                elif isinstance(item, list) and item:
+                  parts.append(f'{p}-')
+                  parts.append(_node(item, d+1))
+                elif isinstance(item, bool):
+                  parts.append(f'{p}- {"true" if item else "false"}')
+                elif item is None:
+                  parts.append(f'{p}- null')
+                elif isinstance(item, (int, float)):
+                  parts.append(f'{p}- {item}')
+                else:
+                  parts.append(f'{p}- {_scalar(str(item))}')
+              return '\n'.join(parts)
+            return _node(obj, _depth)
+
+
+          def _fetch_as_yaml(cf, stack_name):
+            resp = cf.get_template(StackName=stack_name, TemplateStage='Original')
+            body = resp['TemplateBody']
+            if isinstance(body, dict):
+              logger.info(f'[FETCH_TEMPLATE] Returned as dict — converting to YAML | stack={stack_name}')
+              return _cfn_to_yaml(body)
+            if body.lstrip().startswith('{'):
+              logger.info(f'[FETCH_TEMPLATE] Returned as JSON string — converting to YAML | stack={stack_name}')
+              return _cfn_to_yaml(body)
+            logger.info(f'[FETCH_TEMPLATE] Returned as YAML string | stack={stack_name}')
+            return body
+
+
           def get_current_parameters(cf, stack_name):
             """Fetches current stack parameters as a dict."""
             response = cf.describe_stacks(StackName=stack_name)
@@ -586,13 +690,14 @@ Resources:
             return {p['ParameterKey']: p['ParameterValue'] for p in stack.get('Parameters', [])}
 
 
-          def update_stack(cf, stack_name, deploy_paid, extra_params=None, template_url=None):
+          def update_stack(cf, stack_name, deploy_paid, extra_params=None, template_url=None, preserve_yaml=False):
             """
             Updates a CloudFormation stack setting DeployPaidResources to the given value.
             All other parameters are preserved using UsePreviousValue=True.
             extra_params: optional dict of additional parameters to override.
-            template_url: if set, uses TemplateURL (S3) instead of UsePreviousTemplate=True —
-              bypasses the 51,200-byte TemplateBody API limit for large templates.
+            template_url: uses TemplateURL (S3) — bypasses 51,200-byte limit (network stack).
+            preserve_yaml: fetches current template and resubmits as YAML TemplateBody so CFN
+              does not normalise it to JSON (app stack).
             Non-blocking ? returns as soon as the update_stack API call succeeds.
             """
             if extra_params is None:
@@ -613,6 +718,14 @@ Resources:
               update_kwargs = dict(
                 StackName=stack_name,
                 TemplateURL=template_url,
+                Parameters=parameters,
+                Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
+              )
+            elif preserve_yaml:
+              template_body = _fetch_as_yaml(cf, stack_name)
+              update_kwargs = dict(
+                StackName=stack_name,
+                TemplateBody=template_body,
                 Parameters=parameters,
                 Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
               )
