@@ -25,6 +25,7 @@ Metadata:
           - NetworkStackName
           - AppStackName
           - SNSStackName
+          - NetworkTemplateUrl
       - Label:
           default: "3. DR Database Configuration"
         Parameters:
@@ -44,6 +45,8 @@ Metadata:
         default: DR Application Stack Name
       SNSStackName:
         default: SNS Stack Name
+      NetworkTemplateUrl:
+        default: Network Stack Template URL (S3)
       DBInstanceIdentifier:
         default: DB Instance Identifier (DR region ? for snapshot auto-discovery)
       DRDBSecretArn:
@@ -125,6 +128,14 @@ Parameters:
       Leave blank to require db_master_password explicitly in the event payload.
     Type: String
     Default: ''
+
+  NetworkTemplateUrl:
+    Description: |
+      S3 URL for the network stack template (common/network.yaml).
+      When set, the Lambda uses TemplateURL instead of UsePreviousTemplate=True for network stack updates,
+      bypassing the 51,200-byte TemplateBody API limit. Leave blank to use UsePreviousTemplate=True.
+    Type: String
+    Default: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml
 
 Resources:
 
@@ -307,6 +318,7 @@ Resources:
           DB_INSTANCE_IDENTIFIER: !Ref DBInstanceIdentifier
           DR_DB_SECRET_ARN: !Ref DRDBSecretArn
           SOURCE_REGION: !Ref SourceRegion
+          NETWORK_TEMPLATE_URL: !Ref NetworkTemplateUrl
           SNS_TOPIC_ARN:
             Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       Code:
@@ -421,8 +433,9 @@ Resources:
               logger.info(f'Using AMI: {instance_ami}')
 
             # Step 1: Network stack ? activate NAT Gateways, Jump Host, VPC Endpoints
-            logger.info(f'[FAILOVER 1/2] Updating network stack: {network_stack}')
-            update_stack(cf, network_stack, deploy_paid='true')
+            network_template_url = os.environ.get('NETWORK_TEMPLATE_URL', '')
+            logger.info(f'[FAILOVER 1/2] Updating network stack: {network_stack} | template_url={bool(network_template_url)}')
+            update_stack(cf, network_stack, deploy_paid='true', template_url=network_template_url or None)
             logger.info(f'[FAILOVER 1/2] Network stack update initiated.')
 
             # Step 2: App stack ? activate DB, Cache, LBs, App Servers
@@ -468,8 +481,9 @@ Resources:
             logger.info(f'[FAILBACK 1/2] App stack update initiated.')
 
             # Step 2: Network stack ? deactivate NAT Gateways, Jump Host, VPC Endpoints
-            logger.info(f'[FAILBACK 2/2] Updating network stack: {network_stack}')
-            update_stack(cf, network_stack, deploy_paid='false')
+            network_template_url = os.environ.get('NETWORK_TEMPLATE_URL', '')
+            logger.info(f'[FAILBACK 2/2] Updating network stack: {network_stack} | template_url={bool(network_template_url)}')
+            update_stack(cf, network_stack, deploy_paid='false', template_url=network_template_url or None)
             logger.info(f'[FAILBACK 2/2] Network stack update initiated.')
 
             summary = (
@@ -572,11 +586,13 @@ Resources:
             return {p['ParameterKey']: p['ParameterValue'] for p in stack.get('Parameters', [])}
 
 
-          def update_stack(cf, stack_name, deploy_paid, extra_params=None):
+          def update_stack(cf, stack_name, deploy_paid, extra_params=None, template_url=None):
             """
             Updates a CloudFormation stack setting DeployPaidResources to the given value.
             All other parameters are preserved using UsePreviousValue=True.
             extra_params: optional dict of additional parameters to override.
+            template_url: if set, uses TemplateURL (S3) instead of UsePreviousTemplate=True —
+              bypasses the 51,200-byte TemplateBody API limit for large templates.
             Non-blocking ? returns as soon as the update_stack API call succeeds.
             """
             if extra_params is None:
@@ -593,17 +609,23 @@ Resources:
               else:
                 parameters.append({'ParameterKey': key, 'UsePreviousValue': True})
 
-            try:
-              cf.update_stack(
+            if template_url:
+              update_kwargs = dict(
+                StackName=stack_name,
+                TemplateURL=template_url,
+                Parameters=parameters,
+                Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
+              )
+            else:
+              update_kwargs = dict(
                 StackName=stack_name,
                 UsePreviousTemplate=True,
                 Parameters=parameters,
-                Capabilities=[
-                  'CAPABILITY_IAM',
-                  'CAPABILITY_NAMED_IAM',
-                  'CAPABILITY_AUTO_EXPAND'
-                ]
+                Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
               )
+
+            try:
+              cf.update_stack(**update_kwargs)
             except ClientError as e:
               code = e.response['Error']['Code']
               msg  = e.response['Error']['Message']
