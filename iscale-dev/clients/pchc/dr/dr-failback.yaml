@@ -338,7 +338,7 @@ Resources:
               logger.info("[FETCH_TEMPLATE] Returned as YAML string | stack=%s", stack_name)
               return body
 
-          def _submit_deploy_paid_false(cfn, stack_name):
+          def _submit_deploy_paid_false(cfn, stack_name, preserve_format=True):
               params = []
               for p in _get_current_parameters(cfn, stack_name):
                   if p['ParameterKey'] == 'DeployPaidResources':
@@ -346,19 +346,18 @@ Resources:
                       params.append({'ParameterKey': 'DeployPaidResources', 'ParameterValue': 'false'})
                   else:
                       params.append({'ParameterKey': p['ParameterKey'], 'UsePreviousValue': True})
-              template_body = _fetch_as_yaml(cfn, stack_name)
-              if len(template_body.encode('utf-8')) > 51200:
-                  logger.info("[SET_DEPLOY_PAID_FALSE] Template >51200 bytes — using UsePreviousTemplate | stack=%s", stack_name)
+              if preserve_format:
+                  template_body = _fetch_as_yaml(cfn, stack_name)
                   update_kwargs = dict(
                       StackName=stack_name,
-                      UsePreviousTemplate=True,
+                      TemplateBody=template_body,
                       Parameters=params,
                       Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
                   )
               else:
                   update_kwargs = dict(
                       StackName=stack_name,
-                      TemplateBody=template_body,
+                      UsePreviousTemplate=True,
                       Parameters=params,
                       Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
                   )
@@ -429,9 +428,10 @@ Resources:
 
           def _handle_set_deploy_paid_false(event):
               app_name = _get_app_name(event)
-              logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s", app_name)
+              preserve_format = event.get('preserve_format', True)
+              logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s | preserve_format=%s", app_name, preserve_format)
               cfn = boto3.client('cloudformation')
-              result = _submit_deploy_paid_false(cfn, app_name)
+              result = _submit_deploy_paid_false(cfn, app_name, preserve_format=preserve_format)
               if result['submitted']:
                   return {'submitted': True, 'stack_name': app_name}
               return {'submitted': False, 'reason': result.get('reason', 'already_false'), 'stack_name': app_name}
@@ -1093,7 +1093,8 @@ Resources:
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "set_deploy_paid_false",
-                "app_name.$": "$.network_stack_name"
+                "app_name.$": "$.network_stack_name",
+                "preserve_format": false
               },
               "ResultPath": "$.fo_s4",
               "Next": "FailbackStep4Wait",

@@ -288,13 +288,7 @@ def _get_current_parameters(cfn, stack_name: str) -> list:
     return resp['Stacks'][0].get('Parameters', [])
 
 
-def _submit_deploy_paid_false(cfn, stack_name: str) -> dict:
-    """
-    Set DeployPaidResources=false on a single stack.
-    Fetches the current template and resubmits it as YAML with TemplateBody
-    instead of UsePreviousTemplate=True — this prevents CloudFormation from
-    normalising the stored template to JSON during the update.
-    """
+def _submit_deploy_paid_false(cfn, stack_name: str, preserve_format: bool = True) -> dict:
     params = []
     for p in _get_current_parameters(cfn, stack_name):
         if p['ParameterKey'] == 'DeployPaidResources':
@@ -303,23 +297,22 @@ def _submit_deploy_paid_false(cfn, stack_name: str) -> dict:
         else:
             params.append({'ParameterKey': p['ParameterKey'], 'UsePreviousValue': True})
 
-    template_body = _fetch_as_yaml(cfn, stack_name)
-
-    # CFN TemplateBody limit is 51,200 bytes. Fall back to UsePreviousTemplate=True
-    # for large templates — format may normalise to JSON, but that is acceptable when
-    # no subsequent template-reading step (comment/uncomment) follows on this stack.
-    if len(template_body.encode('utf-8')) > 51200:
-        logger.info("[SET_DEPLOY_PAID_FALSE] Template >51200 bytes — using UsePreviousTemplate | stack=%s", stack_name)
+    if preserve_format:
+        # Resubmit the template as YAML so CFN does not normalise it to JSON.
+        # Required when a subsequent comment/uncomment step reads the template.
+        template_body = _fetch_as_yaml(cfn, stack_name)
         update_kwargs = dict(
             StackName=stack_name,
-            UsePreviousTemplate=True,
+            TemplateBody=template_body,
             Parameters=params,
             Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
         )
     else:
+        # No subsequent step reads this template — UsePreviousTemplate is safe
+        # and avoids the 51,200-byte TemplateBody size limit entirely.
         update_kwargs = dict(
             StackName=stack_name,
-            TemplateBody=template_body,
+            UsePreviousTemplate=True,
             Parameters=params,
             Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
         )
@@ -442,10 +435,11 @@ def _handle_update_stack(event: dict) -> dict:
 
 def _handle_set_deploy_paid_false(event: dict) -> dict:
     app_name = _get_app_name(event)
-    logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s", app_name)
+    preserve_format = event.get('preserve_format', True)
+    logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s | preserve_format=%s", app_name, preserve_format)
 
     cfn = boto3.client('cloudformation')
-    result = _submit_deploy_paid_false(cfn, app_name)
+    result = _submit_deploy_paid_false(cfn, app_name, preserve_format=preserve_format)
 
     if result['submitted']:
         return {'submitted': True, 'stack_name': app_name}
