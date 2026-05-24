@@ -288,7 +288,7 @@ def _get_current_parameters(cfn, stack_name: str) -> list:
     return resp['Stacks'][0].get('Parameters', [])
 
 
-def _submit_deploy_paid_false(cfn, stack_name: str, preserve_format: bool = True) -> dict:
+def _submit_deploy_paid_false(cfn, stack_name: str, preserve_format: bool = True, template_url: str = None) -> dict:
     params = []
     for p in _get_current_parameters(cfn, stack_name):
         if p['ParameterKey'] == 'DeployPaidResources':
@@ -297,7 +297,15 @@ def _submit_deploy_paid_false(cfn, stack_name: str, preserve_format: bool = True
         else:
             params.append({'ParameterKey': p['ParameterKey'], 'UsePreviousValue': True})
 
-    if preserve_format:
+    if template_url:
+        # S3 URL — no size limit, CloudFormation fetches directly.
+        update_kwargs = dict(
+            StackName=stack_name,
+            TemplateURL=template_url,
+            Parameters=params,
+            Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
+        )
+    elif preserve_format:
         # Resubmit the template as YAML so CFN does not normalise it to JSON.
         # Required when a subsequent comment/uncomment step reads the template.
         template_body = _fetch_as_yaml(cfn, stack_name)
@@ -436,10 +444,12 @@ def _handle_update_stack(event: dict) -> dict:
 def _handle_set_deploy_paid_false(event: dict) -> dict:
     app_name = _get_app_name(event)
     preserve_format = event.get('preserve_format', True)
-    logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s | preserve_format=%s", app_name, preserve_format)
+    template_url = event.get('template_url')
+    logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s | preserve_format=%s | template_url=%s",
+                app_name, preserve_format, bool(template_url))
 
     cfn = boto3.client('cloudformation')
-    result = _submit_deploy_paid_false(cfn, app_name, preserve_format=preserve_format)
+    result = _submit_deploy_paid_false(cfn, app_name, preserve_format=preserve_format, template_url=template_url)
 
     if result['submitted']:
         return {'submitted': True, 'stack_name': app_name}

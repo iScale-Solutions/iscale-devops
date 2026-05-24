@@ -50,6 +50,11 @@ Parameters:
     Default: 90
     AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
 
+  NetworkTemplateUrl:
+    Description: S3 URL for the network stack template. Used in step 4 to bypass the 51,200-byte TemplateBody limit.
+    Type: String
+    Default: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml
+
 Resources:
 
 ####
@@ -338,7 +343,7 @@ Resources:
               logger.info("[FETCH_TEMPLATE] Returned as YAML string | stack=%s", stack_name)
               return body
 
-          def _submit_deploy_paid_false(cfn, stack_name, preserve_format=True):
+          def _submit_deploy_paid_false(cfn, stack_name, preserve_format=True, template_url=None):
               params = []
               for p in _get_current_parameters(cfn, stack_name):
                   if p['ParameterKey'] == 'DeployPaidResources':
@@ -346,7 +351,14 @@ Resources:
                       params.append({'ParameterKey': 'DeployPaidResources', 'ParameterValue': 'false'})
                   else:
                       params.append({'ParameterKey': p['ParameterKey'], 'UsePreviousValue': True})
-              if preserve_format:
+              if template_url:
+                  update_kwargs = dict(
+                      StackName=stack_name,
+                      TemplateURL=template_url,
+                      Parameters=params,
+                      Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
+                  )
+              elif preserve_format:
                   template_body = _fetch_as_yaml(cfn, stack_name)
                   update_kwargs = dict(
                       StackName=stack_name,
@@ -429,9 +441,11 @@ Resources:
           def _handle_set_deploy_paid_false(event):
               app_name = _get_app_name(event)
               preserve_format = event.get('preserve_format', True)
-              logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s | preserve_format=%s", app_name, preserve_format)
+              template_url = event.get('template_url')
+              logger.info("[SET_DEPLOY_PAID_FALSE] Start | stack=%s | preserve_format=%s | template_url=%s",
+                          app_name, preserve_format, bool(template_url))
               cfn = boto3.client('cloudformation')
-              result = _submit_deploy_paid_false(cfn, app_name, preserve_format=preserve_format)
+              result = _submit_deploy_paid_false(cfn, app_name, preserve_format=preserve_format, template_url=template_url)
               if result['submitted']:
                   return {'submitted': True, 'stack_name': app_name}
               return {'submitted': False, 'reason': result.get('reason', 'already_false'), 'stack_name': app_name}
@@ -1084,13 +1098,13 @@ Resources:
             },
 
             "FailbackStep4SetDeployPaidNetwork": {
-              "Comment": "FAILBACK STEP 4a — Set DeployPaidResources=false on the network stack (NAT GWs, Jump Host, VPC Endpoints down). App stack was already handled in Step 2.",
+              "Comment": "FAILBACK STEP 4a — Set DeployPaidResources=false on the network stack (NAT GWs, Jump Host, VPC Endpoints down). Uses TemplateURL from S3 to bypass the 51,200-byte TemplateBody limit.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "set_deploy_paid_false",
                 "app_name.$": "$.network_stack_name",
-                "preserve_format": false
+                "template_url": "${NetworkTemplateUrl}"
               },
               "ResultPath": "$.fo_s4",
               "Next": "FailbackStep4Wait",
