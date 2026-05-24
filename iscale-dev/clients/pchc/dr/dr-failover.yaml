@@ -1,14 +1,13 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: |
-  DR Failover & Failback Automation ? universal, one deployment per app.
-  Provisions a Lambda function and two EventBridge rules scoped to a specific app name:
-    - FailoverRequest  ? sets DeployPaidResources=true  (network first, then app)
-    - FailbackRequest  ? sets DeployPaidResources=false (app first, then network)
-  Failback requires confirm_failback=true in the event detail as a safety pin.
+  DR Failover Automation ? one deployment per app.
+  Provisions a Lambda function and one EventBridge rule scoped to a specific app name:
+    - FailoverRequest ? sets DeployPaidResources=true (network first, then app)
   At failover, auto-discovers the latest DR AMI replicated by EC2 Image Builder
   (pattern: {OrgName}_{AppName}_dr-image_*) and the latest RDS snapshot.
   Lambda is non-blocking ? fires CloudFormation update_stack calls and returns immediately.
   CloudFormation handles the actual provisioning asynchronously (DB restore: 20-60 min).
+  Failback is handled by dr-failback.yaml (Step Functions, ordered 4-step teardown).
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -69,7 +68,7 @@ Parameters:
     Description: |
       Short identifier for this application (e.g. pesonet20, mis, pddts).
       Used to scope both EventBridge trigger rules ? only events whose detail.app_name
-      matches this value will activate this stack's failover or failback.
+      matches this value will activate this stack's failover.
       Must be unique per deployment of this template. Use lowercase, hyphens allowed.
     Type: String
     MinLength: 2
@@ -86,8 +85,7 @@ Parameters:
     Description: |
       Name of the DR network CloudFormation stack to update.
       This stack must use common/network.yaml and have a DeployPaidResources parameter.
-      Failover sets DeployPaidResources=true  ? provisions NAT Gateways, Jump Host, VPC Endpoints.
-      Failback sets DeployPaidResources=false ? tears them down after the app stack is stopped.
+      Failover sets DeployPaidResources=true ? provisions NAT Gateways, Jump Host, VPC Endpoints.
     Type: String
     Default: pchc-productiondr-uw2-network
     MinLength: 1
@@ -104,7 +102,7 @@ Parameters:
   SNSStackName:
     Description: |
       Name of the SNS CloudFormation stack. Must export ${SNSStackName}-TopicArn.
-      Notifications are sent on failover/failback initiation, completion, and failure.
+      Notifications are sent on failover initiation, completion, and failure.
     Type: String
     Default: pchc-productiondr-uw2-sns
     MinLength: 1
@@ -115,7 +113,7 @@ Parameters:
       Cross-region snapshot copies appear as manual snapshots in the DR region.
       Leave blank to skip auto-discovery ? snapshot_identifier must then be provided explicitly
       in the EventBridge event detail or Lambda invocation payload.
-      Only used during failover (ignored during failback).
+      Only used during failover.
     Type: String
     Default: ''
 
@@ -301,10 +299,10 @@ Resources:
     Properties:
       FunctionName: !Sub '${AWS::StackName}-dr-failover'
       Description: !Sub |
-        DR failover/failback for ${AppName}.
-        FailoverRequest  ? DeployPaidResources=true  (activate DR).
-        FailbackRequest  ? DeployPaidResources=false (shut down DR ? requires confirm_failback=true).
-        Invoke via EventBridge or directly. Non-blocking.
+        DR failover for ${AppName}.
+        FailoverRequest ? sets DeployPaidResources=true (network first, then app stack).
+        Auto-discovers latest DR AMI and RDS snapshot. Non-blocking.
+        Failback is handled by dr-failback.yaml.
       Handler: index.lambda_handler
       Role: !GetAtt FailoverLambdaRole.Arn
       Runtime: python3.12
@@ -333,54 +331,34 @@ Resources:
 
           def lambda_handler(event, context):
             """
-            Handles both DR failover and failback by updating CloudFormation stacks.
+            Activates DR for this app by setting DeployPaidResources=true on both stacks.
 
             Invocation modes
             ----------------
-            EventBridge (recommended) ? detail-type drives the operation:
-
-              FailoverRequest:
+            EventBridge (recommended):
               {
                 "source": "pchc.dr.failover",
                 "detail-type": "FailoverRequest",
                 "detail": {
                   "app_name": "${AppName}",
-                  "snapshot_identifier": "<arn>",     # optional ? auto-discovered if blank
-                  "db_master_password": "<pw>",        # optional
-                  "network_stack_name": "<name>",      # optional override
-                  "app_stack_name": "<name>",          # optional override
-                  "db_instance_identifier": "<id>"     # optional override
+                  "snapshot_identifier": "<arn>",   # optional ? auto-discovered if blank
+                  "db_master_password": "<pw>",      # optional ? auto-fetched from Secrets Manager
+                  "network_stack_name": "<name>",    # optional override
+                  "app_stack_name": "<name>",        # optional override
+                  "db_instance_identifier": "<id>"   # optional override
                 }
               }
 
-              FailbackRequest  (confirm_failback required ? safety pin):
-              {
-                "source": "pchc.dr.failover",
-                "detail-type": "FailbackRequest",
-                "detail": {
-                  "app_name": "${AppName}",
-                  "confirm_failback": true             # REQUIRED ? omitting rejects the request
-                }
-              }
+            Direct Lambda invocation:
+              {"snapshot_identifier": "<arn-or-blank>", "db_master_password": "<pw-or-blank>"}
 
-            Direct Lambda invocation ? use "mode" field:
-              Failover: {"mode": "failover", "snapshot_identifier": "...", "db_master_password": "..."}
-              Failback: {"mode": "failback", "confirm_failback": true}
-              Default mode (no field): failover
-
-            Lambda is non-blocking. Returns as soon as all update_stack calls are accepted.
-            CloudFormation provisions/deprovisions asynchronously. EventBridge notifies on completion.
+            Non-blocking. Returns as soon as update_stack calls are accepted.
+            CloudFormation provisions asynchronously (DB restore: 20-60 min).
+            Failback is handled by dr-failback.yaml.
             """
 
             # Support both EventBridge (detail wrapper) and direct invocation (flat payload)
-            detail_type = event.get('detail-type', '')
             payload = event.get('detail', event)
-
-            # Determine operation mode
-            if detail_type == 'FailbackRequest' or payload.get('mode') == 'failback':
-              mode = 'failback'
-            else:
-              mode = 'failover'
 
             region = os.environ['AWS_REGION']
             network_stack = payload.get('network_stack_name', os.environ['NETWORK_STACK_NAME'])
@@ -391,14 +369,11 @@ Resources:
             cf = boto3.client('cloudformation', region_name=region)
 
             try:
-              if mode == 'failback':
-                handle_failback(cf, payload, app_name, network_stack, app_stack, sns_topic)
-              else:
-                handle_failover(cf, payload, app_name, network_stack, app_stack, sns_topic, region)
+              handle_failover(cf, payload, app_name, network_stack, app_stack, sns_topic, region)
             except Exception as e:
-              error_msg = f'DR {mode} FAILED [{app_name}]: {str(e)}'
+              error_msg = f'DR Failover FAILED [{app_name}]: {str(e)}'
               logger.exception(error_msg)
-              notify(sns_topic, f'DR {mode.capitalize()} FAILED [{app_name}]', error_msg)
+              notify(sns_topic, f'DR Failover FAILED [{app_name}]', error_msg)
               raise
 
 
@@ -459,43 +434,6 @@ Resources:
             )
             logger.info(summary)
             notify(sns_topic, f'DR Failover Initiated [{app_name}]', summary)
-            return {'statusCode': 200, 'body': summary}
-
-
-          def handle_failback(cf, payload, app_name, network_stack, app_stack, sns_topic):
-            """
-            Failback: sets DeployPaidResources=false on app stack then network stack.
-            Order: app first (DB, LBs, instances down) ? network (NAT GW down).
-            Requires confirm_failback=true in the payload as an explicit safety pin.
-            Run only AFTER DNS has been switched back to the primary region.
-            """
-            if not payload.get('confirm_failback'):
-              raise ValueError(
-                'Failback rejected: confirm_failback=true is required in the event detail. '
-                'Ensure DNS has been switched back to the primary region before proceeding.'
-              )
-
-            # Step 1: App stack ? deactivate DB, Cache, LBs, App Servers
-            logger.info(f'[FAILBACK 1/2] Updating app stack: {app_stack}')
-            update_stack(cf, app_stack, deploy_paid='false', preserve_yaml=True)
-            logger.info(f'[FAILBACK 1/2] App stack update initiated.')
-
-            # Step 2: Network stack ? deactivate NAT Gateways, Jump Host, VPC Endpoints
-            network_template_url = os.environ.get('NETWORK_TEMPLATE_URL', '')
-            logger.info(f'[FAILBACK 2/2] Updating network stack: {network_stack} | template_url={bool(network_template_url)}')
-            update_stack(cf, network_stack, deploy_paid='false', template_url=network_template_url or None)
-            logger.info(f'[FAILBACK 2/2] Network stack update initiated.')
-
-            summary = (
-              f'DR failback initiated for [{app_name}].\n'
-              f'App stack     : {app_stack}\n'
-              f'Network stack : {network_stack}\n\n'
-              f'CloudFormation is now deprovisioning DR resources (DB, Cache, LBs, NAT GWs). '
-              f'You will receive a separate notification when stacks complete. '
-              f'S3 buckets, snapshots, and AMIs are retained.'
-            )
-            logger.info(summary)
-            notify(sns_topic, f'DR Failback Initiated [{app_name}]', summary)
             return {'statusCode': 200, 'body': summary}
 
 
@@ -792,41 +730,7 @@ Resources:
       SourceArn: !GetAtt FailoverTriggerRule.Arn
 
 ####
-# EventBridge ? manual failback trigger scoped to this app
-####
-
-  # DR operator publishes a FailbackRequest event to shut down DR and return to primary.
-  # confirm_failback=true is enforced inside the Lambda as an additional safety pin.
-  # Only trigger AFTER DNS has been switched back to the primary region.
-  FailbackTriggerRule:
-    Type: AWS::Events::Rule
-    Properties:
-      Name: !Sub '${AWS::StackName}-failback-trigger'
-      Description: !Sub 'Manual DR failback trigger for ${AppName}. Publish FailbackRequest with detail.app_name=${AppName} and confirm_failback=true.'
-      EventBusName: default
-      EventPattern:
-        source:
-          - pchc.dr.failover
-        detail-type:
-          - FailbackRequest
-        detail:
-          app_name:
-            - !Ref AppName
-      State: ENABLED
-      Targets:
-        - Id: InvokeFailbackLambda
-          Arn: !GetAtt FailoverLambdaFunction.Arn
-
-  FailbackLambdaEventPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt FailoverLambdaFunction.Arn
-      Action: lambda:InvokeFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt FailbackTriggerRule.Arn
-
-####
-# EventBridge ? monitors CF stack events and notifies when failover/failback completes or fails
+# EventBridge ? monitors CF stack events and notifies when failover completes or fails
 ####
 
   StackEventRule:
@@ -883,13 +787,13 @@ Resources:
 Outputs:
 
   FailoverLambdaArn:
-    Description: ARN of the DR failover/failback Lambda function
+    Description: ARN of the DR failover Lambda function
     Value: !GetAtt FailoverLambdaFunction.Arn
     Export:
       Name: !Sub '${AWS::StackName}-FailoverLambdaArn'
 
   FailoverLambdaName:
-    Description: Name of the DR failover/failback Lambda
+    Description: Name of the DR failover Lambda
     Value: !Ref FailoverLambdaFunction
     Export:
       Name: !Sub '${AWS::StackName}-FailoverLambdaName'
@@ -909,22 +813,6 @@ Outputs:
           "Detail": "{\"app_name\":\"${AppName}\",\"snapshot_identifier\":\"<arn-or-blank>\",\"db_master_password\":\"<password-or-blank>\"}"
         }]'
 
-  HowToFailback:
-    Description: |
-      Trigger DR failback via EventBridge ? shuts down all DR paid resources.
-      confirm_failback=true is mandatory. The Lambda rejects the request without it.
-      Run this ONLY AFTER DNS has been switched back to the primary region and
-      the primary environment is confirmed stable.
-    Value: !Sub |
-      aws events put-events \
-        --region ${AWS::Region} \
-        --entries '[{
-          "Source": "pchc.dr.failover",
-          "DetailType": "FailbackRequest",
-          "EventBusName": "default",
-          "Detail": "{\"app_name\":\"${AppName}\",\"confirm_failback\":true}"
-        }]'
-
   HowToFailoverDirect:
     Description: Trigger DR failover by invoking Lambda directly (fallback).
     Value: !Sub |
@@ -934,11 +822,3 @@ Outputs:
         --payload '{"mode":"failover","snapshot_identifier":"<arn-or-blank>","db_master_password":"<password-or-blank>"}' \
         response.json
 
-  HowToFailbackDirect:
-    Description: Trigger DR failback by invoking Lambda directly (fallback). confirm_failback=true is mandatory.
-    Value: !Sub |
-      aws lambda invoke \
-        --function-name ${FailoverLambdaFunction} \
-        --region ${AWS::Region} \
-        --payload '{"mode":"failback","confirm_failback":true}' \
-        response.json
