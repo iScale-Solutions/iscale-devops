@@ -563,7 +563,6 @@ Resources:
 
   SidekiqServerStack:
     DependsOn:
-      - DBStack
       - SidekiqDeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -572,31 +571,32 @@ Resources:
         Name: !Join ['-', [!Ref Name, sidekiq]]
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
-        CacheEndpoint:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.CachePrimaryEndpoint
-        CachePort:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.ClusterPort
-        CacheSecurityGroupId:
-          Fn::GetAtt:
-            - CacheStack
-            - Outputs.SecurityGroupId
+        ASGDesiredSize: !If [IsDR, 0, 1]
+        CacheEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.CachePrimaryEndpoint]
+          - ''
+        CachePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.ClusterPort]
+          - 6379
+        CacheSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [CacheStack, Outputs.SecurityGroupId]
+          - ''
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
         InstancePort: 80
@@ -604,7 +604,10 @@ Resources:
         InstanceType: !Ref InstanceType
         # LoadBalancerHostName: No need of URL for sidekiq
         LoadBalancerPriority: 105
-        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        LoadBalancerStackName: !If 
+          - IsDeployPaidResources
+          - !Select [ 1, !Split [ '/', !Ref ELBStack]]
+          - ''
         NetworkStackName: !Ref NetworkStackName
         ExternalEFSID:
           Fn::GetAtt:
@@ -614,10 +617,10 @@ Resources:
           Fn::GetAtt:
             - ServerStack
             - Outputs.AppServerEFSSecurityGroup
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeSize: 20
