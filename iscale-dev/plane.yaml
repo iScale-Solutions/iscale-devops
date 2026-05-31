@@ -107,7 +107,7 @@ Parameters:
   EnvName:
     Description: Deployment environment
     Type: String
-    Default: Staging
+    Default: Development
     AllowedValues:
       - Production
       - Staging
@@ -159,12 +159,12 @@ Parameters:
   AmiId:
     Description: Amazon Linux 2023 AMI ID for the target region
     Type: AWS::EC2::Image::Id
-    Default: ami-0b6d6dacf350ebc82
+    Default: ami-029a761f237195c2c
 
   KeyName:
     Description: EC2 Key Pair name for emergency break-glass console access
-    Type: AWS::EC2::KeyPair::KeyName
-    Default: jana-key
+    Type: String
+    Default: ""
 
   InstanceSize:
     Description: EC2 instance type
@@ -220,6 +220,9 @@ Parameters:
     Description: EventBridge CRON expression to stop the EC2 instance
     Type: String
     Default: "cron(0 10 ? * MON-FRI *)"
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
 
 Mappings:
   Fn::Transform:
@@ -312,14 +315,14 @@ Resources:
   EC2InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub 'EC2 SG for ${Name} - ingress restricted to ALB SG on port 80'
+      GroupDescription: !Sub 'EC2 SG for ${Name} - ingress restricted to ALB SG on port 8080'
       VpcId:
         Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
       SecurityGroupIngress:
         - IpProtocol: tcp
           Description: HTTP from ALB security group only
-          FromPort: 80
-          ToPort: 80
+          FromPort: 8080
+          ToPort: 8080
           SourceSecurityGroupId: !Ref AlbSecurityGroupId
       SecurityGroupEgress:
         - IpProtocol: '-1'
@@ -337,14 +340,10 @@ Resources:
   PlaneEC2Instance:
     Type: AWS::EC2::Instance
     DependsOn: PlaneSecret
-    CreationPolicy:
-      ResourceSignal:
-        Timeout: PT20M
-        Count: 1
     Properties:
       InstanceType: !Ref InstanceSize
       ImageId: !Ref AmiId
-      KeyName: !Ref KeyName
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
       SubnetId:
         Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnetId1'
       IamInstanceProfile: !Ref EC2InstanceProfile
@@ -708,7 +707,7 @@ Resources:
       VpcId:
         Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
       Protocol: HTTP
-      Port: 80
+      Port: 8080
       TargetType: instance
       Targets:
         - Id: !Ref PlaneEC2Instance
