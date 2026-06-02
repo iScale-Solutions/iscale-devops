@@ -482,7 +482,39 @@ Resources:
               f'Ensure cross-region snapshot replication is enabled on the primary RDS instance, '
               f'or provide snapshot_identifier explicitly in the event payload.'
             )
+          
+          def find_latest_redshift_snapshot(region, cluster_identifier):
+            """
+            Auto-discovers the latest available Redshift snapshot in the DR region.
+            Cross-region snapshot copies appear as 'manual' type snapshots.
+            Falls back to 'automated' snapshots if no manual ones found.
+            Returns the snapshot identifier string (not ARN — Redshift restore uses identifier).
+            """
+            redshift = boto3.client('redshift', region_name=region)
 
+            for snapshot_type in ['manual', 'automated']:
+              response = redshift.describe_cluster_snapshots(
+                ClusterIdentifier=cluster_identifier,
+                SnapshotType=snapshot_type
+              )
+              snapshots = [s for s in response.get('Snapshots', [])
+                          if s.get('Status') == 'available']
+
+              if snapshots:
+                snapshots.sort(key=lambda x: x['SnapshotCreateTime'], reverse=True)
+                latest = snapshots[0]
+                logger.info(
+                  f'Found {snapshot_type} Redshift snapshot: {latest["SnapshotIdentifier"]} '
+                  f'created at {latest["SnapshotCreateTime"]}'
+                )
+                return latest['SnapshotIdentifier']
+
+            raise Exception(
+              f'No available Redshift snapshots found for cluster: {cluster_identifier}. '
+              f'Ensure cross-region snapshot copy is enabled on the live cluster (see '
+              f'redshift-cross-region-snapshot-copy.md), or provide redshift_snapshot_identifier '
+              f'explicitly in the event payload.'
+            )
 
           def fetch_db_master_password(region, secret_arn):
             """
