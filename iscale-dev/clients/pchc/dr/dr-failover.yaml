@@ -1,13 +1,15 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: |
-  DR Failover Automation ? one deployment per app.
-  Provisions a Lambda function and one EventBridge rule scoped to a specific app name:
-    - FailoverRequest ? sets DeployPaidResources=true (network first, then app)
-  At failover, auto-discovers the latest DR AMI replicated by EC2 Image Builder
-  (pattern: {OrgName}_{AppName}_dr-image_*) and the latest RDS snapshot.
-  Lambda is non-blocking ? fires CloudFormation update_stack calls and returns immediately.
-  CloudFormation handles the actual provisioning asynchronously (DB restore: 20-60 min).
-  Failback is handled by dr-failback.yaml (Step Functions, ordered 4-step teardown).
+  DR Failover Automation — one deployment per app.
+  Orchestrates failover via Step Functions with two paths:
+    PITR path  (UsePITR=true):  restore-db-instance-to-point-in-time using cross-region
+                                automated backups, write endpoint to Secrets Manager + SSM,
+                                then update app stack with IsPITRMode=true (DBStack suppressed).
+    Snapshot path (UsePITR=false): auto-discover latest snapshot, update app stack with
+                                   SnapshotIdentifier (existing behavior, kept as fallback).
+  Both paths update the network stack first (NAT GW, Jump Host) then the app stack.
+  EventBridge triggers the Step Functions state machine (not a Lambda directly).
+  Failback is handled by dr-failback.yaml.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -30,6 +32,12 @@ Metadata:
         Parameters:
           - DBInstanceIdentifier
           - DRDBSecretArn
+          - PITRTargetIdentifier
+          - RedshiftClusterIdentifier
+      - Label:
+          default: "4. SSM Configuration"
+        Parameters:
+          - PITREndpointSSMPath
 
     ParameterLabels:
       OrgName:
@@ -47,9 +55,15 @@ Metadata:
       NetworkTemplateUrl:
         default: Network Stack Template URL (S3)
       DBInstanceIdentifier:
-        default: DB Instance Identifier (DR region ? for snapshot auto-discovery)
+        default: Source DB Instance Identifier (DR region — for snapshot auto-discovery)
       DRDBSecretArn:
-        default: DR DB Secret ARN (Secrets Manager ? for auto-fetching DB master password)
+        default: DR DB Secret ARN (Secrets Manager — for auto-fetching DB master password)
+      PITRTargetIdentifier:
+        default: PITR Target DB Instance Identifier (name for the PITR-restored instance)
+      RedshiftClusterIdentifier:
+        default: Redshift Cluster Identifier (DR region — for snapshot auto-discovery)
+      PITREndpointSSMPath:
+        default: SSM Parameter Path for PITR DB Endpoint
 
 Parameters:
 
@@ -57,8 +71,6 @@ Parameters:
     Description: |
       Organization name prefix used to build the DR AMI search pattern.
       Must match the OrgName used in the EC2 Image Builder stack.
-      DR AMIs are discovered by the pattern: {OrgName}_{AppName}_dr-image_*
-      Example: pchc_pesonet20_dr-image_2025.11.2414480_2026-05-02T16-52-46.639Z
     Type: String
     Default: pchc
     AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
@@ -67,9 +79,8 @@ Parameters:
   AppName:
     Description: |
       Short identifier for this application (e.g. pesonet20, mis, pddts).
-      Used to scope both EventBridge trigger rules ? only events whose detail.app_name
-      matches this value will activate this stack's failover.
-      Must be unique per deployment of this template. Use lowercase, hyphens allowed.
+      Scopes the EventBridge rule — only FailoverRequest events with detail.app_name
+      matching this value trigger this stack's failover.
     Type: String
     MinLength: 2
     MaxLength: 20
@@ -77,71 +88,76 @@ Parameters:
     ConstraintDescription: Lowercase letters, numbers, and hyphens only.
 
   SourceRegion:
-    Description: AWS region where the primary/live environment runs (e.g. ap-southeast-1). Informational only.
+    Description: AWS region where the primary/live environment runs (e.g. us-west-2). Informational only.
     Type: String
-    Default: ap-southeast-1
+    Default: us-west-2
 
   NetworkStackName:
     Description: |
       Name of the DR network CloudFormation stack to update.
-      This stack must use common/network.yaml and have a DeployPaidResources parameter.
-      Failover sets DeployPaidResources=true ? provisions NAT Gateways, Jump Host, VPC Endpoints.
+      Failover sets DeployPaidResources=true — provisions NAT Gateways, Jump Host, VPC Endpoints.
     Type: String
-    Default: pchc-productiondr-uw2-network
+    Default: pchc-productiondr-ue2-network
     MinLength: 1
 
   AppStackName:
     Description: |
       Name of the DR application CloudFormation stack to update.
-      Must have DeployPaidResources, SnapshotIdentifier, and DBMasterUserPassword parameters.
-      All other parameters are preserved with UsePreviousValue=true on every update.
+      Must support DeployPaidResources, IsPITRMode, PITRDBEndpoint, and SnapshotIdentifier parameters.
     Type: String
-    Default: pchc-productiondr-uw2-pesonet20
+    Default: pchc-productiondr-ue2-pesonet20
     MinLength: 1
 
   SNSStackName:
     Description: |
       Name of the SNS CloudFormation stack. Must export ${SNSStackName}-TopicArn.
-      Notifications are sent on failover initiation, completion, and failure.
     Type: String
-    Default: pchc-productiondr-uw2-sns
+    Default: pchc-productiondr-ue2-sns
     MinLength: 1
 
   DBInstanceIdentifier:
     Description: |
-      RDS DB instance identifier in the DR region used to auto-discover the latest available snapshot.
-      Cross-region snapshot copies appear as manual snapshots in the DR region.
-      Leave blank to skip auto-discovery ? snapshot_identifier must then be provided explicitly
-      in the EventBridge event detail or Lambda invocation payload.
-      Only used during failover.
+      RDS DB instance identifier in the DR region. Used to auto-discover the latest snapshot
+      (snapshot path) and as the SourceDBInstanceIdentifier for PITR restore (PITR path).
+      Cross-region automated backups appear as automated snapshots in the DR region.
     Type: String
     Default: ''
 
   DRDBSecretArn:
     Description: |
       ARN of the Secrets Manager secret in the DR region containing DB credentials.
-      Use the DRDBSecretArn output of the app CloudFormation stack (e.g. pchc-productiondr-uw2-pesonet20).
-      At failover, the Lambda reads DB_ROOT_PASSWORD from this secret automatically ?
-      no need to provide db_master_password in the EventBridge event payload.
-      Leave blank to require db_master_password explicitly in the event payload.
+      At failover, the Lambda reads DB_ROOT_PASSWORD from this secret automatically.
+      In PITR mode, the Lambda also updates this secret with the new PITR DB endpoint.
     Type: String
     Default: ''
-  
+
+  PITRTargetIdentifier:
+    Description: |
+      Identifier for the PITR-restored RDS instance (e.g. pchc-prd-ue2-pesonet20-pitr).
+      The Step Functions machine creates this instance via restore-db-instance-to-point-in-time.
+      Must not already exist in the DR region. Used in PITR path only.
+    Type: String
+    Default: ''
+
+  PITREndpointSSMPath:
+    Description: |
+      SSM Parameter Store path where the PITR DB endpoint is written before the app stack update.
+      The app stack reads this path when IsPITRMode=true.
+      Example: /pchc/productiondr/pesonet20/pitr-db-endpoint
+    Type: String
+    Default: ''
+
   RedshiftClusterIdentifier:
     Description: |
-      Redshift cluster identifier in the DR region used to auto-discover the latest available snapshot.
-      Copied snapshots appear in the DR region after cross-region snapshot copy is enabled.
-      Leave blank to skip Redshift snapshot auto-discovery — RedshiftSnapshotIdentifier must then
-      be provided explicitly in the EventBridge event detail or Lambda invocation payload.
-      Only used during failover.
+      Redshift cluster identifier in the DR region for snapshot auto-discovery.
+      Leave blank if the app has no Redshift cluster.
     Type: String
     Default: ''
 
   NetworkTemplateUrl:
     Description: |
       S3 URL for the network stack template (common/network.yaml).
-      When set, the Lambda uses TemplateURL instead of UsePreviousTemplate=True for network stack updates,
-      bypassing the 51,200-byte TemplateBody API limit. Leave blank to use UsePreviousTemplate=True.
+      Used to bypass the 51,200-byte TemplateBody API limit for network stack updates.
     Type: String
     Default: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml
 
@@ -169,135 +185,61 @@ Resources:
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              - Sid: CloudFormationUpdate
+              - Sid: CloudFormation
                 Effect: Allow
                 Action:
                   - cloudformation:UpdateStack
                   - cloudformation:DescribeStacks
                   - cloudformation:GetTemplate
-                Resource:
-                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${NetworkStackName}/*'
-                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*'
-              - Sid: PassRoleForCloudFormation
-                Effect: Allow
-                Action: iam:PassRole
-                Resource: '*'
-              - Sid: CloudFormationFullAccess
-                Effect: Allow
-                Action:
                   - cloudformation:*
                 Resource: '*'
-              - Sid: EC2Provisioning
-                Effect: Allow
-                Action:
-                  - ec2:*
-                Resource: '*'
-              - Sid: RDSProvisioning
-                Effect: Allow
-                Action:
-                  - rds:*
-                Resource: '*'
-              - Sid: RedshiftProvisioning
-                Effect: Allow
-                Action:
-                  - redshift:*
-                Resource: '*'
-              - Sid: ELBProvisioning
-                Effect: Allow
-                Action:
-                  - elasticloadbalancing:*
-                Resource: '*'
-              - Sid: AutoScalingProvisioning
-                Effect: Allow
-                Action:
-                  - autoscaling:*
-                Resource: '*'
-              - Sid: EFSProvisioning
-                Effect: Allow
-                Action:
-                  - elasticfilesystem:*
-                Resource: '*'
-              - Sid: ElastiCacheProvisioning
-                Effect: Allow
-                Action:
-                  - elasticache:*
-                Resource: '*'
-              - Sid: IAMProvisioning
-                Effect: Allow
-                Action:
-                  - iam:*
-                Resource: '*'
-              - Sid: S3Provisioning
-                Effect: Allow
-                Action:
-                  - s3:*
-                Resource: '*'
-              - Sid: CodeDeployProvisioning
-                Effect: Allow
-                Action:
-                  - codedeploy:*
-                Resource: '*'
-              - Sid: CloudWatchProvisioning
-                Effect: Allow
-                Action:
-                  - cloudwatch:*
-                  - logs:*
-                Resource: '*'
-              - Sid: BackupProvisioning
-                Effect: Allow
-                Action:
-                  - backup:*
-                Resource: '*'
-              - Sid: KMSProvisioning
-                Effect: Allow
-                Action:
-                  - kms:*
-                Resource: '*'
-              - Sid: SecretsManagerProvisioning
-                Effect: Allow
-                Action:
-                  - secretsmanager:*
-                Resource: '*'
-              - Sid: SSMProvisioning
-                Effect: Allow
-                Action:
-                  - ssm:*
-                Resource: '*'
-              - Sid: LambdaProvisioning
-                Effect: Allow
-                Action:
-                  - lambda:*
-                Resource: '*'
-              - Sid: EventsProvisioning
-                Effect: Allow
-                Action:
-                  - events:*
-                Resource: '*'
-              - Sid: SNSProvisioning
-                Effect: Allow
-                Action:
-                  - sns:*
-                Resource: '*'
-              - Sid: Route53Provisioning
-                Effect: Allow
-                Action:
-                  - route53:*
-                Resource: '*'
-              - Sid: RDSSnapshotDiscovery
+              - Sid: RDS
                 Effect: Allow
                 Action:
                   - rds:DescribeDBSnapshots
                   - rds:DescribeDBInstances
+                  - rds:RestoreDBInstanceToPointInTime
+                  - rds:AddTagsToResource
+                  - rds:*
                 Resource: '*'
-              - Sid: EC2AMIDiscovery
+              - Sid: EC2
+                Effect: Allow
+                Action: ec2:*
+                Resource: '*'
+              - Sid: Redshift
+                Effect: Allow
+                Action: redshift:*
+                Resource: '*'
+              - Sid: SecretsManager
+                Effect: Allow
+                Action: secretsmanager:*
+                Resource: '*'
+              - Sid: SSM
+                Effect: Allow
+                Action: ssm:*
+                Resource: '*'
+              - Sid: IAM
                 Effect: Allow
                 Action:
-                  - ec2:DescribeImages
+                  - iam:PassRole
+                  - iam:*
                 Resource: '*'
-              - Sid: SecretsManagerRead
+              - Sid: OtherProvisioning
                 Effect: Allow
                 Action:
-                  - secretsmanager:GetSecretValue
+                  - elasticloadbalancing:*
+                  - autoscaling:*
+                  - elasticfilesystem:*
+                  - elasticache:*
+                  - s3:*
+                  - codedeploy:*
+                  - cloudwatch:*
+                  - logs:*
+                  - backup:*
+                  - kms:*
+                  - lambda:*
+                  - events:*
+                  - route53:*
                 Resource: '*'
               - Sid: SNSPublish
                 Effect: Allow
@@ -305,19 +247,86 @@ Resources:
                 Resource:
                   Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-sfn-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaAndLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt FailoverLambdaFunction.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-eventbridge-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartStateMachine
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Ref FailoverStateMachine
+
 ####
-# Lambda
+# CloudWatch Logs
+####
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}'
+      RetentionInDays: 90
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/states/${AWS::StackName}'
+      RetentionInDays: 90
+
+####
+# Lambda — worker, invoked by Step Functions for each action
 ####
 
   FailoverLambdaFunction:
     Type: AWS::Lambda::Function
+    DependsOn: LambdaLogGroup
     Properties:
-      FunctionName: !Sub '${AWS::StackName}-dr-failover'
+      FunctionName: !Sub '${AWS::StackName}-worker'
       Description: !Sub |
-        DR failover for ${AppName}.
-        FailoverRequest ? sets DeployPaidResources=true (network first, then app stack).
-        Auto-discovers latest DR AMI and RDS snapshot. Non-blocking.
-        Failback is handled by dr-failback.yaml.
+        DR failover worker for ${AppName}. Invoked by the Step Functions state machine.
+        Actions: discover | update_network_stack | pitr_restore | check_db_status |
+                 update_secrets | update_app_stack | check_stack_status | notify
       Handler: index.lambda_handler
       Role: !GetAtt FailoverLambdaRole.Arn
       Runtime: python3.12
@@ -330,6 +339,8 @@ Resources:
           APP_STACK_NAME: !Ref AppStackName
           DB_INSTANCE_IDENTIFIER: !Ref DBInstanceIdentifier
           DR_DB_SECRET_ARN: !Ref DRDBSecretArn
+          PITR_TARGET_IDENTIFIER: !Ref PITRTargetIdentifier
+          PITR_ENDPOINT_SSM_PATH: !Ref PITREndpointSSMPath
           REDSHIFT_CLUSTER_IDENTIFIER: !Ref RedshiftClusterIdentifier
           SOURCE_REGION: !Ref SourceRegion
           NETWORK_TEMPLATE_URL: !Ref NetworkTemplateUrl
@@ -340,240 +351,330 @@ Resources:
           import boto3
           import logging
           import os
+          import json
           from botocore.exceptions import ClientError
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
+          TERMINAL_STATES = {
+              'CREATE_COMPLETE', 'UPDATE_COMPLETE',
+              'UPDATE_ROLLBACK_COMPLETE', 'UPDATE_ROLLBACK_FAILED',
+              'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED',
+              'DELETE_COMPLETE', 'DELETE_FAILED', 'CREATE_FAILED',
+          }
+          ROLLBACK_STATES = {
+              'UPDATE_ROLLBACK_COMPLETE', 'UPDATE_ROLLBACK_FAILED',
+              'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED',
+              'DELETE_FAILED', 'CREATE_FAILED',
+          }
+
           def lambda_handler(event, context):
-            """
-            Activates DR for this app by setting DeployPaidResources=true on both stacks.
-
-            Invocation modes
-            ----------------
-            EventBridge (recommended):
-              {
-                "source": "pchc.dr.failover",
-                "detail-type": "FailoverRequest",
-                "detail": {
-                  "app_name": "${AppName}",
-                  "snapshot_identifier": "<arn>",   # optional ? auto-discovered if blank
-                  "db_master_password": "<pw>",      # optional ? auto-fetched from Secrets Manager
-                  "network_stack_name": "<name>",    # optional override
-                  "app_stack_name": "<name>",        # optional override
-                  "db_instance_identifier": "<id>"   # optional override
-                }
-              }
-
-            Direct Lambda invocation:
-              {"snapshot_identifier": "<arn-or-blank>", "db_master_password": "<pw-or-blank>"}
-
-            Non-blocking. Returns as soon as update_stack calls are accepted.
-            CloudFormation provisions asynchronously (DB restore: 20-60 min).
-            Failback is handled by dr-failback.yaml.
-            """
-
-            # Support both EventBridge (detail wrapper) and direct invocation (flat payload)
-            payload = event.get('detail', event)
-
+            action = event.get('action', '')
             region = os.environ['AWS_REGION']
-            network_stack = payload.get('network_stack_name', os.environ['NETWORK_STACK_NAME'])
-            app_stack = payload.get('app_stack_name', os.environ['APP_STACK_NAME'])
-            sns_topic = os.environ.get('SNS_TOPIC_ARN', '')
-            app_name = os.environ.get('APP_NAME', app_stack)
+            if action == 'discover':
+              return handle_discover(event, region)
+            if action == 'update_network_stack':
+              return handle_update_network_stack(event, region)
+            if action == 'pitr_restore':
+              return handle_pitr_restore(event, region)
+            if action == 'check_db_status':
+              return handle_check_db_status(event, region)
+            if action == 'update_secrets':
+              return handle_update_secrets(event, region)
+            if action == 'update_app_stack':
+              return handle_update_app_stack(event, region)
+            if action == 'check_stack_status':
+              return handle_check_stack_status(event, region)
+            if action == 'notify':
+              return handle_notify(event)
+            raise ValueError(f'Unknown action: {action!r}')
 
-            cf = boto3.client('cloudformation', region_name=region)
 
-            try:
-              handle_failover(cf, payload, app_name, network_stack, app_stack, sns_topic, region)
-            except Exception as e:
-              error_msg = f'DR Failover FAILED [{app_name}]: {str(e)}'
-              logger.exception(error_msg)
-              notify(sns_topic, f'DR Failover FAILED [{app_name}]', error_msg)
-              raise
+          # ── discover ──────────────────────────────────────────────────────────
 
-
-          def handle_failover(cf, payload, app_name, network_stack, app_stack, sns_topic, region):
+          def handle_discover(event, region):
             """
-            Failover: sets DeployPaidResources=true on network stack then app stack.
-            Order: network first (NAT GW up) ? app (DB, Cache, LBs, App Servers up).
+            Discovers AMI, snapshot (snapshot path), and DB master password.
+            Returns all values needed for subsequent steps.
             """
-            db_instance_id = payload.get('db_instance_identifier', os.environ.get('DB_INSTANCE_IDENTIFIER', ''))
-            snapshot_identifier = payload.get('snapshot_identifier', '')
-            db_master_password = payload.get('db_master_password', '')
-            org_name = os.environ.get('ORG_NAME', '')
-            dr_db_secret_arn = os.environ.get('DR_DB_SECRET_ARN', '')
-            redshift_cluster_id = payload.get('redshift_cluster_identifier', os.environ.get('REDSHIFT_CLUSTER_IDENTIFIER', ''))
-            redshift_snapshot = payload.get('redshift_snapshot_identifier', '')
+            use_pitr          = event.get('use_pitr', False)
+            db_instance_id    = event.get('db_instance_identifier', os.environ.get('DB_INSTANCE_IDENTIFIER', ''))
+            snapshot_id       = event.get('snapshot_identifier', '')
+            db_master_password = event.get('db_master_password', '')
+            org_name          = os.environ.get('ORG_NAME', '')
+            app_name          = os.environ.get('APP_NAME', '')
+            dr_db_secret_arn  = os.environ.get('DR_DB_SECRET_ARN', '')
+            redshift_cluster_id = event.get('redshift_cluster_identifier', os.environ.get('REDSHIFT_CLUSTER_IDENTIFIER', ''))
+            redshift_snapshot  = event.get('redshift_snapshot_identifier', '')
 
-            # Auto-fetch DB master password from DR Secrets Manager secret if not provided
             if not db_master_password and dr_db_secret_arn:
-              logger.info(f'Auto-fetching DB master password from secret: {dr_db_secret_arn}')
+              logger.info(f'Auto-fetching DB master password from: {dr_db_secret_arn}')
               db_master_password = fetch_db_master_password(region, dr_db_secret_arn)
-              logger.info('DB master password fetched from Secrets Manager.')
 
-            # Auto-discover latest snapshot if not provided
-            if not snapshot_identifier and db_instance_id:
-              logger.info(f'Auto-discovering latest snapshot for: {db_instance_id}')
-              snapshot_identifier = find_latest_snapshot(region, db_instance_id)
-              logger.info(f'Using snapshot: {snapshot_identifier}')
-
-            # Auto-discover latest DR AMI replicated by EC2 Image Builder
             instance_ami = ''
             if org_name:
-              logger.info(f'Auto-discovering latest DR AMI: {org_name}_{app_name}_dr-image_*')
+              logger.info(f'Discovering DR AMI: {org_name}_{app_name}_dr-image_*')
               instance_ami = find_latest_ami(region, org_name, app_name)
-              logger.info(f'Using AMI: {instance_ami}')
-            
-            # Auto-discover latest Redshift snapshot if not provided
-            if not redshift_snapshot and redshift_cluster_id:
-              logger.info(f'Auto-discovering latest Redshift snapshot for: {redshift_cluster_id}')
-              redshift_snapshot = find_latest_redshift_snapshot(region, redshift_cluster_id)
-              logger.info(f'Using Redshift snapshot: {redshift_snapshot}')
+              logger.info(f'AMI: {instance_ami}')
 
-            # Step 1: Network stack ? activate NAT Gateways, Jump Host, VPC Endpoints
-            network_template_url = os.environ.get('NETWORK_TEMPLATE_URL', '')
-            logger.info(f'[FAILOVER 1/2] Updating network stack: {network_stack} | template_url={bool(network_template_url)}')
-            update_stack(cf, network_stack, deploy_paid='true', template_url=network_template_url or None)
-            logger.info(f'[FAILOVER 1/2] Network stack update initiated.')
+            if not use_pitr:
+              if not snapshot_id and db_instance_id:
+                logger.info(f'Discovering latest snapshot for: {db_instance_id}')
+                snapshot_id = find_latest_snapshot(region, db_instance_id)
+                logger.info(f'Snapshot: {snapshot_id}')
+              if not redshift_snapshot and redshift_cluster_id:
+                logger.info(f'Discovering latest Redshift snapshot for: {redshift_cluster_id}')
+                redshift_snapshot = find_latest_redshift_snapshot(region, redshift_cluster_id)
+                logger.info(f'Redshift snapshot: {redshift_snapshot}')
 
-            # Step 2: App stack ? activate DB, Cache, LBs, App Servers
-            logger.info(f'[FAILOVER 2/2] Updating app stack: {app_stack}')
-            update_stack(cf, app_stack, deploy_paid='true', extra_params={
-              'SnapshotIdentifier': snapshot_identifier,
-              'DBMasterUserPassword': db_master_password,
-              'InstanceAMI': instance_ami,
-              'RedshiftSnapshotIdentifier': redshift_snapshot
-            }, preserve_yaml=True)
-            logger.info(f'[FAILOVER 2/2] App stack update initiated.')
-
-            summary = (
-              f'DR failover initiated for [{app_name}].\n'
-              f'Network stack : {network_stack}\n'
-              f'App stack     : {app_stack}\n'
-              f'Snapshot      : {snapshot_identifier or "(none ? fresh DB)"}\n'
-              f'Redshift Snapshot  : {redshift_snapshot or "(none — no Redshift or UsePreviousValue)"}\n'
-              f'AMI           : {instance_ami or "(UsePreviousValue)"}\n\n'
-              f'CloudFormation is now provisioning resources. '
-              f'DB restore from snapshot takes 20-60 minutes. '
-              f'You will receive a separate notification when stacks complete.'
-            )
-            logger.info(summary)
-            notify(sns_topic, f'DR Failover Initiated [{app_name}]', summary)
-            return {'statusCode': 200, 'body': summary}
+            return {
+              'use_pitr':           use_pitr,
+              'instance_ami':       instance_ami,
+              'snapshot_identifier': snapshot_id,
+              'db_master_password': db_master_password,
+              'redshift_snapshot_identifier': redshift_snapshot,
+              'db_instance_identifier': db_instance_id,
+            }
 
 
-          def find_latest_snapshot(region, db_instance_identifier):
+          # ── update_network_stack ──────────────────────────────────────────────
+
+          def handle_update_network_stack(event, region):
+            cf = boto3.client('cloudformation', region_name=region)
+            stack = os.environ['NETWORK_STACK_NAME']
+            template_url = os.environ.get('NETWORK_TEMPLATE_URL', '')
+            logger.info(f'Updating network stack: {stack}')
+            update_stack(cf, stack, deploy_paid='true', template_url=template_url or None)
+            return {'network_stack_name': stack, 'submitted': True}
+
+
+          # ── pitr_restore ──────────────────────────────────────────────────────
+
+          def handle_pitr_restore(event, region):
             """
-            Auto-discovers the latest available RDS snapshot in the DR region.
-            Cross-region snapshot copies appear as 'manual' type snapshots.
-            Falls back to 'automated' snapshots if no manual ones found.
+            Calls restore-db-instance-to-point-in-time using the cross-region automated
+            backup. UseLatestRestorableTime=True gives ~5 min RPO.
+            Returns the target instance identifier immediately — the state machine polls
+            check_db_status until the instance is available.
             """
             rds = boto3.client('rds', region_name=region)
+            source_id  = os.environ.get('DB_INSTANCE_IDENTIFIER', '')
+            target_id  = os.environ.get('PITR_TARGET_IDENTIFIER', '')
+            if not source_id or not target_id:
+              raise ValueError('DB_INSTANCE_IDENTIFIER and PITR_TARGET_IDENTIFIER must be set for PITR restore.')
 
+            # Subnet group and SG are pre-deployed by the app stack (DBStandbySubnetGroup / DBStandbySecurityGroup).
+            # Their names/IDs are passed in the event from the state machine input.
+            subnet_group = event.get('pitr_subnet_group', '')
+            sg_id        = event.get('pitr_security_group_id', '')
+
+            kwargs = dict(
+              SourceDBInstanceIdentifier=source_id,
+              TargetDBInstanceIdentifier=target_id,
+              UseLatestRestorableTime=True,
+              MultiAZ=False,
+              PubliclyAccessible=False,
+              AutoMinorVersionUpgrade=True,
+              Tags=[
+                {'Key': 'Environment', 'Value': 'DR'},
+                {'Key': 'ManagedBy',   'Value': 'dr-failover-sfn'},
+              ],
+            )
+            if subnet_group:
+              kwargs['DBSubnetGroupName'] = subnet_group
+            if sg_id:
+              kwargs['VpcSecurityGroupIds'] = [sg_id]
+
+            logger.info(f'Initiating PITR restore: {source_id} → {target_id}')
+            try:
+              rds.restore_db_instance_to_point_in_time(**kwargs)
+            except ClientError as e:
+              if 'already exists' in str(e):
+                logger.warning(f'Instance {target_id} already exists — assuming in-progress restore.')
+              else:
+                raise
+            return {'pitr_target_identifier': target_id}
+
+
+          # ── check_db_status ──────────────────────────────────────────────────
+
+          def handle_check_db_status(event, region):
+            rds = boto3.client('rds', region_name=region)
+            target_id = event.get('pitr_target_identifier', os.environ.get('PITR_TARGET_IDENTIFIER', ''))
+            resp = rds.describe_db_instances(DBInstanceIdentifier=target_id)
+            instance = resp['DBInstances'][0]
+            status   = instance['DBInstanceStatus']
+            endpoint = instance.get('Endpoint', {}).get('Address', '')
+            port     = instance.get('Endpoint', {}).get('Port', 3306)
+            available = status == 'available'
+            logger.info(f'DB {target_id} status={status} endpoint={endpoint}')
+            return {
+              'pitr_target_identifier': target_id,
+              'db_status':   status,
+              'db_available': available,
+              'db_endpoint':  endpoint,
+              'db_port':      port,
+            }
+
+
+          # ── update_secrets ───────────────────────────────────────────────────
+
+          def handle_update_secrets(event, region):
+            """
+            Writes the PITR DB endpoint to:
+              1. Secrets Manager (DRDBSecretArn) — DB_HOST field
+              2. SSM Parameter Store (PITREndpointSSMPath) — read by app stack via {{resolve:ssm:...}}
+            Must be called after check_db_status returns db_available=true.
+            """
+            db_endpoint = event.get('db_endpoint', '')
+            if not db_endpoint:
+              raise ValueError('db_endpoint missing — check_db_status must succeed before update_secrets.')
+
+            dr_secret_arn = os.environ.get('DR_DB_SECRET_ARN', '')
+            ssm_path      = os.environ.get('PITR_ENDPOINT_SSM_PATH', '')
+
+            if dr_secret_arn:
+              sm = boto3.client('secretsmanager', region_name=region)
+              resp   = sm.get_secret_value(SecretId=dr_secret_arn)
+              secret = json.loads(resp['SecretString'])
+              secret['DB_HOST'] = db_endpoint
+              sm.put_secret_value(SecretId=dr_secret_arn, SecretString=json.dumps(secret))
+              logger.info(f'Updated Secrets Manager {dr_secret_arn} with endpoint {db_endpoint}')
+
+            if ssm_path:
+              ssm = boto3.client('ssm', region_name=region)
+              ssm.put_parameter(Name=ssm_path, Value=db_endpoint, Type='String', Overwrite=True)
+              logger.info(f'Updated SSM {ssm_path} with endpoint {db_endpoint}')
+
+            return {'secrets_updated': True, 'db_endpoint': db_endpoint}
+
+
+          # ── update_app_stack ─────────────────────────────────────────────────
+
+          def handle_update_app_stack(event, region):
+            cf = boto3.client('cloudformation', region_name=region)
+            app_stack   = os.environ['APP_STACK_NAME']
+            use_pitr    = event.get('use_pitr', False)
+            instance_ami = event.get('instance_ami', '')
+            db_endpoint  = event.get('db_endpoint', '')
+            snapshot_id  = event.get('snapshot_identifier', '')
+            db_password  = event.get('db_master_password', '')
+            redshift_snap = event.get('redshift_snapshot_identifier', '')
+
+            if use_pitr:
+              extra = {
+                'DeployPaidResources': 'true',
+                'IsPITRMode': 'true',
+                'PITRDBEndpoint': db_endpoint,
+              }
+              if instance_ami:
+                extra['InstanceAMI'] = instance_ami
+              logger.info(f'Updating app stack (PITR mode): {app_stack}')
+            else:
+              extra = {
+                'DeployPaidResources': 'true',
+                'IsPITRMode': 'false',
+                'PITRDBEndpoint': '',
+              }
+              if snapshot_id:
+                extra['SnapshotIdentifier'] = snapshot_id
+              if db_password:
+                extra['DBMasterUserPassword'] = db_password
+              if instance_ami:
+                extra['InstanceAMI'] = instance_ami
+              if redshift_snap:
+                extra['RedshiftSnapshotIdentifier'] = redshift_snap
+              logger.info(f'Updating app stack (snapshot mode): {app_stack}')
+
+            update_stack(cf, app_stack, deploy_paid='true', extra_params=extra, preserve_yaml=True)
+            return {'app_stack_name': app_stack, 'submitted': True}
+
+
+          # ── check_stack_status ───────────────────────────────────────────────
+
+          def handle_check_stack_status(event, region):
+            cf = boto3.client('cloudformation', region_name=region)
+            stack_name = event.get('stack_name', '')
+            resp   = cf.describe_stacks(StackName=stack_name)
+            status = resp['Stacks'][0]['StackStatus']
+            complete = status in TERMINAL_STATES
+            rollback = status in ROLLBACK_STATES
+            logger.info(f'Stack {stack_name} status={status}')
+            return {
+              'stack_name':       stack_name,
+              'stack_status':     status,
+              'stack_complete':   complete,
+              'stack_rollback':   rollback,
+            }
+
+
+          # ── notify ───────────────────────────────────────────────────────────
+
+          def handle_notify(event):
+            topic = os.environ.get('SNS_TOPIC_ARN', '')
+            app   = os.environ.get('APP_NAME', '')
+            msg   = event.get('message', f'DR Failover complete for [{app}].')
+            subject = event.get('subject', f'DR Failover Complete [{app}]')
+            notify(topic, subject, msg)
+            return {'notified': True}
+
+
+          # ── helpers ──────────────────────────────────────────────────────────
+
+          def find_latest_snapshot(region, db_instance_identifier):
+            rds = boto3.client('rds', region_name=region)
             for snapshot_type in ['manual', 'automated']:
               response = rds.describe_db_snapshots(
                 DBInstanceIdentifier=db_instance_identifier,
                 SnapshotType=snapshot_type
               )
               snapshots = [s for s in response.get('DBSnapshots', []) if s.get('Status') == 'available']
-
               if snapshots:
                 snapshots.sort(key=lambda x: x['SnapshotCreateTime'], reverse=True)
-                latest = snapshots[0]
-                logger.info(
-                  f'Found {snapshot_type} snapshot: {latest["DBSnapshotArn"]} '
-                  f'created at {latest["SnapshotCreateTime"]}'
-                )
-                return latest['DBSnapshotArn']
+                return snapshots[0]['DBSnapshotArn']
+            raise Exception(f'No available snapshots found for: {db_instance_identifier}')
 
-            raise Exception(
-              f'No available snapshots found for DB instance: {db_instance_identifier}. '
-              f'Ensure cross-region snapshot replication is enabled on the primary RDS instance, '
-              f'or provide snapshot_identifier explicitly in the event payload.'
-            )
-          
           def find_latest_redshift_snapshot(region, cluster_identifier):
-            """
-            Auto-discovers the latest available Redshift snapshot in the DR region.
-            Cross-region snapshot copies appear as 'manual' type snapshots.
-            Falls back to 'automated' snapshots if no manual ones found.
-            Returns the snapshot identifier string (not ARN — Redshift restore uses identifier).
-            """
             redshift = boto3.client('redshift', region_name=region)
-
             for snapshot_type in ['manual', 'automated']:
               response = redshift.describe_cluster_snapshots(
                 ClusterIdentifier=cluster_identifier,
                 SnapshotType=snapshot_type
               )
-              snapshots = [s for s in response.get('Snapshots', [])
-                          if s.get('Status') == 'available']
-
+              snapshots = [s for s in response.get('Snapshots', []) if s.get('Status') == 'available']
               if snapshots:
                 snapshots.sort(key=lambda x: x['SnapshotCreateTime'], reverse=True)
-                latest = snapshots[0]
-                logger.info(
-                  f'Found {snapshot_type} Redshift snapshot: {latest["SnapshotIdentifier"]} '
-                  f'created at {latest["SnapshotCreateTime"]}'
-                )
-                return latest['SnapshotIdentifier']
-
-            raise Exception(
-              f'No available Redshift snapshots found for cluster: {cluster_identifier}. '
-              f'Ensure cross-region snapshot copy is enabled on the live cluster (see '
-              f'redshift-cross-region-snapshot-copy.md), or provide redshift_snapshot_identifier '
-              f'explicitly in the event payload.'
-            )
+                return snapshots[0]['SnapshotIdentifier']
+            raise Exception(f'No available Redshift snapshots found for: {cluster_identifier}')
 
           def fetch_db_master_password(region, secret_arn):
-            """
-            Reads DB_ROOT_PASSWORD from the DR Secrets Manager secret.
-            The secret is synced from the live region by the secrets-sync Lambda,
-            so the value reflects the current live DB master password.
-            """
-            import json
             sm = boto3.client('secretsmanager', region_name=region)
-            response = sm.get_secret_value(SecretId=secret_arn)
-            secret = json.loads(response['SecretString'])
-            password = secret.get('DB_ROOT_PASSWORD', '')
-            if not password:
-              raise Exception(
-                f'DB_ROOT_PASSWORD not found in secret: {secret_arn}. '
-                f'Ensure the secrets-sync Lambda has populated this secret from the live region.'
-              )
-            return password
-
+            resp   = sm.get_secret_value(SecretId=secret_arn)
+            secret = json.loads(resp['SecretString'])
+            pw = secret.get('DB_ROOT_PASSWORD', '')
+            if not pw:
+              raise Exception(f'DB_ROOT_PASSWORD not found in secret: {secret_arn}')
+            return pw
 
           def find_latest_ami(region, org_name, app_name):
-            """
-            Auto-discovers the latest available DR AMI in this region.
-            AMIs are matched by the EC2 Image Builder DR naming pattern:
-              {OrgName}_{AppName}_dr-image_{RecipeVersion}_{buildDate}
-            The most recently created available AMI is returned.
-            """
             ec2 = boto3.client('ec2', region_name=region)
             response = ec2.describe_images(
               Owners=['self'],
               Filters=[
-                {'Name': 'name', 'Values': [f'{org_name}_{app_name}_dr-image_*']},
+                {'Name': 'name',  'Values': [f'{org_name}_{app_name}_dr-image_*']},
                 {'Name': 'state', 'Values': ['available']}
               ]
             )
             images = response.get('Images', [])
             if not images:
-              raise Exception(
-                f'No available DR AMIs found matching: {org_name}_{app_name}_dr-image_*. '
-                f'Ensure EC2 Image Builder has replicated at least one AMI to this region.'
-              )
+              raise Exception(f'No available DR AMIs found matching: {org_name}_{app_name}_dr-image_*')
             images.sort(key=lambda x: x['CreationDate'], reverse=True)
-            latest = images[0]
-            logger.info(
-              f'Found DR AMI: {latest["ImageId"]} ({latest["Name"]}) '
-              f'created at {latest["CreationDate"]}'
-            )
-            return latest['ImageId']
+            return images[0]['ImageId']
 
+          def get_current_parameters(cf, stack_name):
+            response = cf.describe_stacks(StackName=stack_name)
+            return {p['ParameterKey']: p['ParameterValue'] for p in response['Stacks'][0].get('Parameters', [])}
 
           def _cfn_to_yaml(obj, _depth=0):
             import json as _j
@@ -665,106 +766,306 @@ Resources:
               return '\n'.join(parts)
             return _node(obj, _depth)
 
-
           def _fetch_as_yaml(cf, stack_name):
             resp = cf.get_template(StackName=stack_name, TemplateStage='Original')
             body = resp['TemplateBody']
             if isinstance(body, dict):
-              logger.info(f'[FETCH_TEMPLATE] Returned as dict — converting to YAML | stack={stack_name}')
               return _cfn_to_yaml(body)
             if body.lstrip().startswith('{'):
-              logger.info(f'[FETCH_TEMPLATE] Returned as JSON string — converting to YAML | stack={stack_name}')
               return _cfn_to_yaml(body)
-            logger.info(f'[FETCH_TEMPLATE] Returned as YAML string | stack={stack_name}')
             return body
 
-
-          def get_current_parameters(cf, stack_name):
-            """Fetches current stack parameters as a dict."""
-            response = cf.describe_stacks(StackName=stack_name)
-            stack = response['Stacks'][0]
-            return {p['ParameterKey']: p['ParameterValue'] for p in stack.get('Parameters', [])}
-
-
           def update_stack(cf, stack_name, deploy_paid, extra_params=None, template_url=None, preserve_yaml=False):
-            """
-            Updates a CloudFormation stack setting DeployPaidResources to the given value.
-            All other parameters are preserved using UsePreviousValue=True.
-            extra_params: optional dict of additional parameters to override.
-            template_url: uses TemplateURL (S3) — bypasses 51,200-byte limit (network stack).
-            preserve_yaml: fetches current template and resubmits as YAML TemplateBody so CFN
-              does not normalise it to JSON (app stack).
-            Non-blocking ? returns as soon as the update_stack API call succeeds.
-            """
             if extra_params is None:
               extra_params = {}
-
             current_params = get_current_parameters(cf, stack_name)
-
             parameters = []
             for key in current_params:
-              if key == 'DeployPaidResources':
-                parameters.append({'ParameterKey': key, 'ParameterValue': deploy_paid})
-              elif key in extra_params and extra_params[key]:
-                parameters.append({'ParameterKey': key, 'ParameterValue': extra_params[key]})
+              if key in extra_params:
+                parameters.append({'ParameterKey': key, 'ParameterValue': str(extra_params[key])})
               else:
                 parameters.append({'ParameterKey': key, 'UsePreviousValue': True})
+            # Add new parameters that don't exist yet in the current stack
+            for key, val in extra_params.items():
+              if key not in current_params:
+                parameters.append({'ParameterKey': key, 'ParameterValue': str(val)})
 
             if template_url:
-              update_kwargs = dict(
-                StackName=stack_name,
-                TemplateURL=template_url,
-                Parameters=parameters,
-                Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
-              )
+              kwargs = dict(StackName=stack_name, TemplateURL=template_url,
+                            Parameters=parameters,
+                            Capabilities=['CAPABILITY_IAM','CAPABILITY_NAMED_IAM','CAPABILITY_AUTO_EXPAND'])
             elif preserve_yaml:
-              template_body = _fetch_as_yaml(cf, stack_name)
-              update_kwargs = dict(
-                StackName=stack_name,
-                TemplateBody=template_body,
-                Parameters=parameters,
-                Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
-              )
+              body = _fetch_as_yaml(cf, stack_name)
+              kwargs = dict(StackName=stack_name, TemplateBody=body,
+                            Parameters=parameters,
+                            Capabilities=['CAPABILITY_IAM','CAPABILITY_NAMED_IAM','CAPABILITY_AUTO_EXPAND'])
             else:
-              update_kwargs = dict(
-                StackName=stack_name,
-                UsePreviousTemplate=True,
-                Parameters=parameters,
-                Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
-              )
-
+              kwargs = dict(StackName=stack_name, UsePreviousTemplate=True,
+                            Parameters=parameters,
+                            Capabilities=['CAPABILITY_IAM','CAPABILITY_NAMED_IAM','CAPABILITY_AUTO_EXPAND'])
             try:
-              cf.update_stack(**update_kwargs)
+              cf.update_stack(**kwargs)
             except ClientError as e:
               code = e.response['Error']['Code']
               msg  = e.response['Error']['Message']
               if code == 'ValidationError' and 'No updates are to be performed' in msg:
-                logger.info(f'[UPDATE_STACK] No changes needed — stack already in desired state | stack={stack_name}')
+                logger.info(f'No changes needed for stack: {stack_name}')
                 return
               raise
 
-
           def notify(sns_topic_arn, subject, message):
-            """Publishes a notification to SNS. Silently skips if no topic configured."""
             if not sns_topic_arn:
               return
             try:
-              sns = boto3.client('sns')
-              sns.publish(TopicArn=sns_topic_arn, Subject=subject, Message=message)
+              boto3.client('sns').publish(TopicArn=sns_topic_arn, Subject=subject, Message=message)
             except Exception:
               logger.warning('Failed to publish SNS notification', exc_info=True)
 
 ####
-# EventBridge ? manual failover trigger scoped to this app
+# Step Functions — STANDARD state machine (long-running, durable)
 ####
 
-  # DR operator publishes a FailoverRequest event to activate the DR environment.
-  # Rule is scoped to detail.app_name so each app deployment only responds to its own events.
+  FailoverStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: StateMachineLogGroup
+    Properties:
+      StateMachineName: !Sub '${AWS::StackName}'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "DR Failover — PITR path (use_pitr=true) or snapshot path (use_pitr=false).",
+          "StartAt": "Discover",
+          "States": {
+
+            "Discover": {
+              "Comment": "Resolve AMI, snapshot (snapshot path), and DB master password.",
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "discover",
+                "use_pitr.$": "$.use_pitr",
+                "snapshot_identifier.$": "$.snapshot_identifier",
+                "db_master_password.$": "$.db_master_password",
+                "db_instance_identifier.$": "$.db_instance_identifier",
+                "redshift_cluster_identifier.$": "$.redshift_cluster_identifier",
+                "redshift_snapshot_identifier.$": "$.redshift_snapshot_identifier"
+              },
+              "ResultPath": "$.discovered",
+              "Next": "UpdateNetworkStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "UpdateNetworkStack": {
+              "Comment": "Activate NAT GW, Jump Host, VPC Endpoints on the network stack.",
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {"action": "update_network_stack"},
+              "ResultPath": "$.network_update",
+              "Next": "WaitNetworkStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitNetworkStack": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckNetworkStack"
+            },
+
+            "CheckNetworkStack": {
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_stack_status",
+                "stack_name": "${NetworkStackName}"
+              },
+              "ResultPath": "$.network_status",
+              "Next": "NetworkStackDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "NetworkStackDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.network_status.stack_rollback", "BooleanEquals": true, "Next": "FailoverFailed"},
+                {"Variable": "$.network_status.stack_complete", "BooleanEquals": true, "Next": "RouteByMode"}
+              ],
+              "Default": "WaitNetworkStack"
+            },
+
+            "RouteByMode": {
+              "Comment": "Branch to PITR path or snapshot path based on use_pitr flag.",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.use_pitr", "BooleanEquals": true, "Next": "PITRRestore"}
+              ],
+              "Default": "UpdateAppStackSnapshot"
+            },
+
+            "PITRRestore": {
+              "Comment": "Call restore-db-instance-to-point-in-time (UseLatestRestorableTime=true).",
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "pitr_restore",
+                "pitr_subnet_group.$": "$.pitr_subnet_group",
+                "pitr_security_group_id.$": "$.pitr_security_group_id"
+              },
+              "ResultPath": "$.pitr_restore",
+              "Next": "WaitPITR",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 2, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitPITR": {
+              "Comment": "Initial wait — RDS takes 1-2 min before the instance appears in describe.",
+              "Type": "Wait",
+              "Seconds": 90,
+              "Next": "CheckPITRStatus"
+            },
+
+            "CheckPITRStatus": {
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_db_status",
+                "pitr_target_identifier.$": "$.pitr_restore.pitr_target_identifier"
+              },
+              "ResultPath": "$.pitr_status",
+              "Next": "PITRAvailable",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 30, "MaxAttempts": 5, "BackoffRate": 1.5}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "PITRAvailable": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.pitr_status.db_available", "BooleanEquals": true, "Next": "UpdateSecrets"}
+              ],
+              "Default": "WaitPITR"
+            },
+
+            "UpdateSecrets": {
+              "Comment": "Write PITR endpoint to Secrets Manager and SSM before app stack update.",
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "update_secrets",
+                "db_endpoint.$": "$.pitr_status.db_endpoint"
+              },
+              "ResultPath": "$.secrets_update",
+              "Next": "UpdateAppStackPITR",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "UpdateAppStackPITR": {
+              "Comment": "Update app stack with IsPITRMode=true. DBStack is suppressed — app uses PITR instance.",
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "update_app_stack",
+                "use_pitr": true,
+                "db_endpoint.$": "$.pitr_status.db_endpoint",
+                "instance_ami.$": "$.discovered.instance_ami"
+              },
+              "ResultPath": "$.app_update",
+              "Next": "WaitAppStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "UpdateAppStackSnapshot": {
+              "Comment": "Snapshot path — update app stack with SnapshotIdentifier (existing behavior).",
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "update_app_stack",
+                "use_pitr": false,
+                "snapshot_identifier.$": "$.discovered.snapshot_identifier",
+                "db_master_password.$": "$.discovered.db_master_password",
+                "instance_ami.$": "$.discovered.instance_ami",
+                "redshift_snapshot_identifier.$": "$.discovered.redshift_snapshot_identifier"
+              },
+              "ResultPath": "$.app_update",
+              "Next": "WaitAppStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitAppStack": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckAppStack"
+            },
+
+            "CheckAppStack": {
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_stack_status",
+                "stack_name": "${AppStackName}"
+              },
+              "ResultPath": "$.app_status",
+              "Next": "AppStackDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "AppStackDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.app_status.stack_rollback", "BooleanEquals": true, "Next": "FailoverFailed"},
+                {"Variable": "$.app_status.stack_complete", "BooleanEquals": true, "Next": "NotifyComplete"}
+              ],
+              "Default": "WaitAppStack"
+            },
+
+            "NotifyComplete": {
+              "Type": "Task",
+              "Resource": "${FailoverLambdaFunction.Arn}",
+              "Parameters": {
+                "action": "notify",
+                "subject": "DR Failover Complete [${AppName}]",
+                "message": "DR failover completed successfully for ${AppName}. Network stack, PITR/snapshot restore, and app stack are all UPDATE_COMPLETE."
+              },
+              "ResultPath": "$.notify",
+              "Next": "Complete",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 1}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Complete", "ResultPath": "$.notify_error"}]
+            },
+
+            "Complete": {
+              "Type": "Succeed"
+            },
+
+            "FailoverFailed": {
+              "Type": "Fail",
+              "Error": "FailoverFailed",
+              "Cause": "DR failover aborted — a step failed after retries. Check CloudWatch Logs and the Step Functions execution history for details."
+            }
+
+          }
+        }
+
+####
+# EventBridge — triggers the state machine (scoped to this app)
+####
+
   FailoverTriggerRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub '${AWS::StackName}-failover-trigger'
-      Description: !Sub 'Manual DR failover trigger for ${AppName}. Publish FailoverRequest with detail.app_name=${AppName}.'
+      Description: !Sub 'DR failover trigger for ${AppName}. Publish FailoverRequest with detail.app_name=${AppName}.'
       EventBusName: default
       EventPattern:
         source:
@@ -776,19 +1077,34 @@ Resources:
             - !Ref AppName
       State: ENABLED
       Targets:
-        - Id: InvokeFailoverLambda
-          Arn: !GetAtt FailoverLambdaFunction.Arn
-
-  FailoverLambdaEventPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt FailoverLambdaFunction.Arn
-      Action: lambda:InvokeFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt FailoverTriggerRule.Arn
+        - Id: StartFailoverStateMachine
+          Arn: !Ref FailoverStateMachine
+          RoleArn: !GetAtt EventBridgeRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              use_pitr:                    '$.detail.use_pitr'
+              snapshot_identifier:         '$.detail.snapshot_identifier'
+              db_master_password:          '$.detail.db_master_password'
+              db_instance_identifier:      '$.detail.db_instance_identifier'
+              redshift_cluster_identifier: '$.detail.redshift_cluster_identifier'
+              redshift_snapshot_identifier:'$.detail.redshift_snapshot_identifier'
+              pitr_subnet_group:           '$.detail.pitr_subnet_group'
+              pitr_security_group_id:      '$.detail.pitr_security_group_id'
+            InputTemplate: !Sub |
+              {
+                "app_name": "${AppName}",
+                "use_pitr": <use_pitr>,
+                "snapshot_identifier": "<snapshot_identifier>",
+                "db_master_password": "<db_master_password>",
+                "db_instance_identifier": "<db_instance_identifier>",
+                "redshift_cluster_identifier": "<redshift_cluster_identifier>",
+                "redshift_snapshot_identifier": "<redshift_snapshot_identifier>",
+                "pitr_subnet_group": "<pitr_subnet_group>",
+                "pitr_security_group_id": "<pitr_security_group_id>"
+              }
 
 ####
-# EventBridge ? monitors CF stack events and notifies when failover completes or fails
+# EventBridge — stack completion notifications
 ####
 
   StackEventRule:
@@ -818,11 +1134,11 @@ Resources:
             Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
           InputTransformer:
             InputPathsMap:
-              stack: '$.detail.stack-id'
+              stack:  '$.detail.stack-id'
               status: '$.detail.status-details.status'
-              time: '$.time'
+              time:   '$.time'
             InputTemplate: !Sub |
-              "DR Stack Update ? ${AppName}"
+              "DR Stack Update — ${AppName}"
               "Stack  : <stack>"
               "Status : <status>"
               "Time   : <time>"
@@ -844,23 +1160,30 @@ Resources:
 
 Outputs:
 
-  FailoverLambdaArn:
-    Description: ARN of the DR failover Lambda function
+  StateMachineArn:
+    Description: ARN of the DR Failover State Machine
+    Value: !Ref FailoverStateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineArn'
+
+  StateMachineName:
+    Description: Name of the DR Failover State Machine
+    Value: !GetAtt FailoverStateMachine.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineName'
+
+  WorkerLambdaArn:
+    Description: ARN of the DR Failover worker Lambda
     Value: !GetAtt FailoverLambdaFunction.Arn
     Export:
-      Name: !Sub '${AWS::StackName}-FailoverLambdaArn'
+      Name: !Sub '${AWS::StackName}-WorkerLambdaArn'
 
-  FailoverLambdaName:
-    Description: Name of the DR failover Lambda
-    Value: !Ref FailoverLambdaFunction
-    Export:
-      Name: !Sub '${AWS::StackName}-FailoverLambdaName'
-
-  HowToFailover:
+  HowToFailoverPITR:
     Description: |
-      Trigger DR failover via EventBridge (recommended).
-      Omit snapshot_identifier to use auto-discovery (requires DBInstanceIdentifier to be set).
-      Run this when disaster is declared and DNS has been switched to the DR region.
+      Trigger DR failover via EventBridge using PITR (recommended — ~5 min RPO).
+      pitr_subnet_group and pitr_security_group_id are the DBStandbySubnetGroup and
+      DBStandbySecurityGroupId outputs from the app stack (pesonet20.yaml).
+      The state machine handles all steps: network stack → PITR restore → secrets → app stack.
     Value: !Sub |
       aws events put-events \
         --region ${AWS::Region} \
@@ -868,15 +1191,19 @@ Outputs:
           "Source": "pchc.dr.failover",
           "DetailType": "FailoverRequest",
           "EventBusName": "default",
-          "Detail": "{\"app_name\":\"${AppName}\",\"snapshot_identifier\":\"<arn-or-blank>\",\"db_master_password\":\"<password-or-blank>\"}"
+          "Detail": "{\"app_name\":\"${AppName}\",\"use_pitr\":true,\"pitr_subnet_group\":\"<DBStandbySubnetGroup-output>\",\"pitr_security_group_id\":\"<DBStandbySecurityGroupId-output>\",\"db_instance_identifier\":\"\",\"snapshot_identifier\":\"\",\"db_master_password\":\"\",\"redshift_cluster_identifier\":\"\",\"redshift_snapshot_identifier\":\"\"}"
         }]'
 
-  HowToFailoverDirect:
-    Description: Trigger DR failover by invoking Lambda directly (fallback).
+  HowToFailoverSnapshot:
+    Description: |
+      Trigger DR failover via EventBridge using snapshot restore (fallback — ~24h RPO).
+      Leave snapshot_identifier blank for auto-discovery from DBInstanceIdentifier.
     Value: !Sub |
-      aws lambda invoke \
-        --function-name ${FailoverLambdaFunction} \
+      aws events put-events \
         --region ${AWS::Region} \
-        --payload '{"mode":"failover","snapshot_identifier":"<arn-or-blank>","db_master_password":"<password-or-blank>"}' \
-        response.json
-
+        --entries '[{
+          "Source": "pchc.dr.failover",
+          "DetailType": "FailoverRequest",
+          "EventBusName": "default",
+          "Detail": "{\"app_name\":\"${AppName}\",\"use_pitr\":false,\"snapshot_identifier\":\"\",\"db_master_password\":\"\",\"db_instance_identifier\":\"\",\"redshift_cluster_identifier\":\"\",\"redshift_snapshot_identifier\":\"\",\"pitr_subnet_group\":\"\",\"pitr_security_group_id\":\"\"}"
+        }]'

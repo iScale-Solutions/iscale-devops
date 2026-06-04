@@ -41,6 +41,8 @@ Metadata:
           - EnableCrossRegionBackupReplication
           - SourceDbInstanceArn
           - BackupReplicationRetentionPeriod
+          - IsPITRMode
+          - PITRDBEndpoint
 
     ParameterLabels:
       Name:
@@ -81,6 +83,10 @@ Metadata:
         default: Source DB Instance ARN (live region — required when replication is enabled)
       BackupReplicationRetentionPeriod:
         default: Backup Retention Period in DR region (days)
+      IsPITRMode:
+        default: PITR Mode (true = DB restored externally via PITR, DBStack suppressed)
+      PITRDBEndpoint:
+        default: PITR DB Endpoint (written by dr-failover Step Functions before stack update)
 
 Parameters:
   Name:
@@ -207,6 +213,24 @@ Parameters:
     Default: 7
     MinValue: 1
     MaxValue: 35
+  IsPITRMode:
+    Description: |
+      Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
+      When true, DBStack is suppressed (DB was restored externally via PITR) and all DB references
+      resolve from PITRDBEndpoint and the pre-deployed DBStandbySecurityGroup instead of DBStack outputs.
+      Default false — live stacks and snapshot-based failover are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  PITRDBEndpoint:
+    Description: |
+      Endpoint of the PITR-restored RDS instance. Written to SSM and Secrets Manager by the
+      dr-failover Step Functions machine before the app stack update. Only used when IsPITRMode=true.
+      Leave blank for all other deployments — existing stacks are unaffected.
+    Type: String
+    Default: ''
 
 Mappings:
   Fn::Transform:
@@ -232,6 +256,11 @@ Conditions:
   # TO ACTIVATE FAILOVER: update the stack with DeployPaidResources=true and provide
   # SnapshotIdentifier (cross-region snapshot ARN) and DBMasterUserPassword to restore the DB.
   IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsPITRMode: !Equals [!Ref IsPITRMode, 'true']
+  # DBStack and its dependents are suppressed when PITR mode is active — DB was restored externally.
+  IsDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsDeployPaidResources
+    - !Not [{Condition: IsPITRMode}]
   IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
   IsDRAndEnableCrossRegionBackupReplication: !And
     - Condition: IsDR
@@ -239,12 +268,21 @@ Conditions:
   IsNotProdAndDeployPaidResources: !And
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
+  IsNotProdAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResourcesAndNotPITR
   IsProdOrProductionDRAndDeployPaidResources: !And
     - Condition: IsProdOrProductionDR
     - Condition: IsDeployPaidResources
+  IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
   IsDashboardDeployed: !And
     - Condition: IsProdOrProductionDR
     - Condition: IsDeployPaidResources
+  IsDashboardDeployedAndNotPITR: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
 
 Resources:
 
@@ -255,8 +293,9 @@ Resources:
 # Database
 
   DBStack:
-    # Set IsDeployPaidResources=false (i.e. DR env) to suppress. See conditions for failover instructions.
-    Condition: IsDeployPaidResources
+    # Suppressed when IsPITRMode=true — DB was restored externally via PITR by dr-failover Step Functions.
+    # Also suppressed when DeployPaidResources=false (DR standby). See conditions for failover instructions.
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -286,7 +325,7 @@ Resources:
   DBSchedulerStack:
     DependsOn:
       - DBStack
-    Condition: IsNotProdAndDeployPaidResources
+    Condition: IsNotProdAndDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -387,18 +426,18 @@ Resources:
     Properties:
       Description: Allow connection from jump host
       IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.SecurityGroupId
-      FromPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      ToPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
+      GroupId: !If
+        - IsPITRMode
+        - !GetAtt DBStandbySecurityGroup.GroupId
+        - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+      FromPort: !If
+        - IsPITRMode
+        - 3306
+        - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+      ToPort: !If
+        - IsPITRMode
+        - 3306
+        - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
       SourceSecurityGroupId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
@@ -480,15 +519,15 @@ Resources:
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
           - ''
         DatabasePort: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
           - 3306
         DatabaseSecurityGroupId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
           - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
@@ -503,7 +542,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
           - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
@@ -595,15 +634,15 @@ Resources:
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
           - ''
         DatabasePort: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
           - 3306
         DatabaseSecurityGroupId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
           - ''
         ExternalEFSID:
           Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFS]
@@ -623,7 +662,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
           - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
@@ -728,15 +767,15 @@ Resources:
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
           - ''
         DatabasePort: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
           - 3306
         DatabaseSecurityGroupId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
           - ''
         ExternalEFSID:
           Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFS]
@@ -756,7 +795,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
           - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
@@ -846,15 +885,15 @@ Resources:
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
           - ''
         DatabasePort: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
           - 3306
         DatabaseSecurityGroupId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
           - ''
         ExternalEFSID:
           Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFS]
@@ -873,7 +912,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
           - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
@@ -909,7 +948,7 @@ Resources:
     DependsOn:
       - DBStack
       - TreasuryServerStack
-    Condition: IsProdOrProductionDRAndDeployPaidResources
+    Condition: IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -928,7 +967,7 @@ Resources:
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
 
   Dashboard:
-    Condition: IsDashboardDeployed
+    Condition: IsDashboardDeployedAndNotPITR
     Type: AWS::CloudWatch::Dashboard
     Properties:
         DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
