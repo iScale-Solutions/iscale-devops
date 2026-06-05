@@ -106,8 +106,9 @@ def handle_pitr_restore(event, region):
     """
     Calls restore-db-instance-to-point-in-time using the cross-region automated
     backup. UseLatestRestorableTime=True gives ~5 min RPO.
-    Returns the target instance identifier immediately — the state machine polls
-    check_db_status until the instance is available.
+    For cross-region PITR, uses SourceDBInstanceAutomatedBackupsArn — the ARN of
+    the replicated automated backup in the DR region — NOT SourceDBInstanceIdentifier,
+    which only works for same-region restores.
     """
     rds       = boto3.client('rds', region_name=region)
     source_id = os.environ.get('DB_INSTANCE_IDENTIFIER', '')
@@ -118,8 +119,11 @@ def handle_pitr_restore(event, region):
     subnet_group = event.get('pitr_subnet_group', '')
     sg_id        = event.get('pitr_security_group_id', '')
 
+    backup_arn = find_automated_backup_arn(rds, source_id)
+    logger.info(f'Using automated backup ARN: {backup_arn}')
+
     kwargs = dict(
-        SourceDBInstanceIdentifier=source_id,
+        SourceDBInstanceAutomatedBackupsArn=backup_arn,
         TargetDBInstanceIdentifier=target_id,
         UseLatestRestorableTime=True,
         MultiAZ=False,
@@ -270,6 +274,31 @@ def handle_notify(event):
 
 
 # ── helpers ──────────────────────────────────────────────────────────
+
+def find_automated_backup_arn(rds, db_instance_identifier):
+    """
+    Finds the replicated automated backup ARN in the DR region.
+    Required for cross-region restore-db-instance-to-point-in-time calls.
+    """
+    resp    = rds.describe_db_instance_automated_backups(
+        DBInstanceIdentifier=db_instance_identifier
+    )
+    backups = resp.get('DBInstanceAutomatedBackups', [])
+    if not backups:
+        raise Exception(
+            f'No automated backups found for {db_instance_identifier} in this region. '
+            f'Ensure EnableCrossRegionBackupReplication=true is set in the app stack '
+            f'and the replication has had time to complete at least one backup cycle.'
+        )
+    available = [b for b in backups if b.get('Status') in ('replicating', 'retained')]
+    if not available:
+        statuses = [b.get('Status') for b in backups]
+        raise Exception(
+            f'No replicating/retained automated backup for {db_instance_identifier}. '
+            f'Found statuses: {statuses}. Backup replication may still be initialising.'
+        )
+    return available[0]['DBInstanceAutomatedBackupsArn']
+
 
 def find_latest_snapshot(region, db_instance_identifier):
     rds = boto3.client('rds', region_name=region)

@@ -1,40 +1,18 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: |
-  DR Failover Engine — deploy ONCE, app-agnostic.
-  All app-specific config (stack names, DB identifiers, PITR params) is passed
-  in the state machine input at invocation time — not baked into this template.
-  Per-app EventBridge trigger rules live in a separate dr-trigger-<app>.yaml that
-  imports StateMachineArn from this stack.
-
-  State machine input payload:
-    {
-      "app_name":                  "pesonet20",
-      "org_name":                  "pchc",
-      "use_pitr":                  true,
-      "network_stack_name":        "pchc-productiondr-ue2-pesonet20-network",
-      "app_stack_name":            "pchc-productiondr-ue2-pesonet20",
-      "network_template_url":      "https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml",
-      "db_instance_identifier":    "pchc-prd-uw2-pesonet20db",
-      "dr_db_secret_arn":          "arn:aws:secretsmanager:...",
-      "pitr_target_identifier":    "pchc-prd-ue2-pesonet20-pitr",
-      "pitr_endpoint_ssm_path":    "/pchc/productiondr/pesonet20/pitr-db-endpoint",
-      "pitr_subnet_group":         "pchc-prddr-ue2-pesonet20-db-standby",
-      "pitr_security_group_id":    "sg-xxxxxxxx",
-      "redshift_cluster_identifier":    "",
-      "redshift_snapshot_identifier":   "",
-      "snapshot_identifier":       "",
-      "db_master_password":        "",
-      "sns_topic_arn":             "arn:aws:sns:..."
-    }
-
-  Lambda actions (invoked by Step Functions):
-    discover            | find latest DR AMI + snapshot/password
-    pitr_restore        | restore-db-instance-to-point-in-time
-    check_db_status     | poll RDS instance until available
-    update_secrets      | write PITR endpoint to Secrets Manager + SSM
-    update_stack        | CloudFormation update_stack (network or app)
-    check_stack_status  | poll CloudFormation stack until terminal state
-    notify              | publish to SNS
+# Input payload keys: app_name, org_name, use_pitr, network_stack_name,
+#   app_stack_name, network_template_url, db_instance_identifier, dr_db_secret_arn,
+#   pitr_target_identifier, pitr_endpoint_ssm_path, pitr_subnet_group,
+#   pitr_security_group_id, redshift_cluster_identifier,
+#   redshift_snapshot_identifier, snapshot_identifier, db_master_password,
+#   sns_topic_arn
+# Lambda actions: discover | pitr_restore | check_db_status | update_secrets |
+#   update_stack | check_stack_status | notify
+# Per-app EventBridge triggers: dr-trigger-<app>.yaml imports StateMachineArn.
+Description: >-
+  DR Failover Engine — deploy once, app-agnostic. All app-specific config is
+  passed via state machine input at invocation time, not baked into this template.
+  Per-app EventBridge trigger rules live in dr-trigger-<app>.yaml and import
+  StateMachineArn from this stack.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -252,7 +230,32 @@ Resources:
 
           # ── pitr_restore ──────────────────────────────────────────────────────
 
+          def _find_automated_backup_arn(rds, db_instance_identifier):
+              resp    = rds.describe_db_instance_automated_backups(
+                  DBInstanceIdentifier=db_instance_identifier
+              )
+              backups = resp.get('DBInstanceAutomatedBackups', [])
+              if not backups:
+                  raise Exception(
+                      f'No automated backups found for {db_instance_identifier} in this region. '
+                      f'Ensure EnableCrossRegionBackupReplication=true is set in the app stack '
+                      f'and replication has completed at least one backup cycle.'
+                  )
+              available = [b for b in backups if b.get('Status') in ('replicating', 'retained')]
+              if not available:
+                  statuses = [b.get('Status') for b in backups]
+                  raise Exception(
+                      f'No replicating/retained automated backup for {db_instance_identifier}. '
+                      f'Found statuses: {statuses}. Backup replication may still be initialising.'
+                  )
+              return available[0]['DBInstanceAutomatedBackupsArn']
+
           def _pitr_restore(event):
+              """
+              Cross-region PITR restore using SourceDBInstanceAutomatedBackupsArn.
+              SourceDBInstanceIdentifier only works for same-region restores — for
+              cross-region we must supply the replicated backup ARN in the DR region.
+              """
               region    = os.environ['AWS_REGION']
               source_id = event.get('db_instance_identifier', '')
               target_id = event.get('pitr_target_identifier', '')
@@ -262,9 +265,12 @@ Resources:
               if not source_id or not target_id:
                   raise ValueError('db_instance_identifier and pitr_target_identifier are required for PITR restore.')
 
-              rds = boto3.client('rds', region_name=region)
+              rds        = boto3.client('rds', region_name=region)
+              backup_arn = _find_automated_backup_arn(rds, source_id)
+              logger.info(f'Using automated backup ARN: {backup_arn}')
+
               kwargs = dict(
-                  SourceDBInstanceIdentifier=source_id,
+                  SourceDBInstanceAutomatedBackupsArn=backup_arn,
                   TargetDBInstanceIdentifier=target_id,
                   UseLatestRestorableTime=True,
                   MultiAZ=False,

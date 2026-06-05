@@ -472,26 +472,47 @@ Resources:
 
           # ── pitr_restore ──────────────────────────────────────────────────────
 
+          def find_automated_backup_arn(rds, db_instance_identifier):
+            resp    = rds.describe_db_instance_automated_backups(
+              DBInstanceIdentifier=db_instance_identifier
+            )
+            backups = resp.get('DBInstanceAutomatedBackups', [])
+            if not backups:
+              raise Exception(
+                f'No automated backups found for {db_instance_identifier} in this region. '
+                f'Ensure EnableCrossRegionBackupReplication=true is set in the app stack '
+                f'and replication has completed at least one backup cycle.'
+              )
+            available = [b for b in backups if b.get('Status') in ('replicating', 'retained')]
+            if not available:
+              statuses = [b.get('Status') for b in backups]
+              raise Exception(
+                f'No replicating/retained automated backup for {db_instance_identifier}. '
+                f'Found statuses: {statuses}. Backup replication may still be initialising.'
+              )
+            return available[0]['DBInstanceAutomatedBackupsArn']
+
           def handle_pitr_restore(event, region):
             """
-            Calls restore-db-instance-to-point-in-time using the cross-region automated
-            backup. UseLatestRestorableTime=True gives ~5 min RPO.
-            Returns the target instance identifier immediately — the state machine polls
-            check_db_status until the instance is available.
+            Cross-region PITR restore using SourceDBInstanceAutomatedBackupsArn.
+            SourceDBInstanceIdentifier only works for same-region restores — for
+            cross-region we must supply the replicated backup ARN in the DR region.
+            UseLatestRestorableTime=True gives ~5 min RPO.
             """
-            rds = boto3.client('rds', region_name=region)
-            source_id  = os.environ.get('DB_INSTANCE_IDENTIFIER', '')
-            target_id  = os.environ.get('PITR_TARGET_IDENTIFIER', '')
+            rds       = boto3.client('rds', region_name=region)
+            source_id = os.environ.get('DB_INSTANCE_IDENTIFIER', '')
+            target_id = os.environ.get('PITR_TARGET_IDENTIFIER', '')
             if not source_id or not target_id:
               raise ValueError('DB_INSTANCE_IDENTIFIER and PITR_TARGET_IDENTIFIER must be set for PITR restore.')
 
-            # Subnet group and SG are pre-deployed by the app stack (DBStandbySubnetGroup / DBStandbySecurityGroup).
-            # Their names/IDs are passed in the event from the state machine input.
             subnet_group = event.get('pitr_subnet_group', '')
             sg_id        = event.get('pitr_security_group_id', '')
 
+            backup_arn = find_automated_backup_arn(rds, source_id)
+            logger.info(f'Using automated backup ARN: {backup_arn}')
+
             kwargs = dict(
-              SourceDBInstanceIdentifier=source_id,
+              SourceDBInstanceAutomatedBackupsArn=backup_arn,
               TargetDBInstanceIdentifier=target_id,
               UseLatestRestorableTime=True,
               MultiAZ=False,
