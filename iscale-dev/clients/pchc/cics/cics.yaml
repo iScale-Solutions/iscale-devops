@@ -110,6 +110,10 @@ Parameters:
       - Staging
       - Development
       - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
   ADPassword:
     Description: Active Directory admin password
     Type: String
@@ -204,6 +208,12 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsDR: !Or
+    - !Equals [!Ref EnvName, ProductionDR]
+    - !Equals [!Ref EnvName, StagingDR]
+    - !Equals [!Ref EnvName, DevelopmentDR]
+    - !Equals [!Ref EnvName, TestDR]
+  IsNotDr: !Not [Condition: IsDR]
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
   IsDisasterRecoveryRegion: !Equals [!Ref DisasterRecoveryRegion, 'true'] # if this is a DR region
   IsMainRegion: !Equals [!Ref DisasterRecoveryRegion, 'false'] # if this is the main region
@@ -232,12 +242,9 @@ Resources:
         CustomSubnet1: 
           Fn::ImportValue:
             !Sub '${NetworkStackName}-PublicSubnetId1'
-        CustomSubnet2: !If
-          - IsDisasterRecoveryRegion
-          - Fn::ImportValue:
-              !Sub '${NetworkStackName}-PublicSubnetId2'
-          - Fn::ImportValue:
-              !Sub '${NetworkStackName}-PublicSubnetId3'
+        CustomSubnet2:
+          Fn::ImportValue:
+            !Sub '${NetworkStackName}-PublicSubnetId3'
 
 ####
 # SFTP Section
@@ -246,15 +253,17 @@ Resources:
   FTPStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/sftp.yaml
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/transfer-family.yaml
       Parameters:
         Name: !Ref Name
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         HostedZoneName: !Ref ClientDomainName
-        Hostname: !If [IsDisasterRecoveryRegion, sftp-cics2, sftp-cics]
+        Hostname: sftp-cics
         UseDefaultSecGroup: FALSE
+        EndpointType: VPC_INTERNET
+        DeployPaidResources: false
   
   AllowSFTP1:
     DependsOn:
@@ -630,6 +639,7 @@ Resources:
 ###
 
   CICSAPPSVR2Instance:
+    Condition: IsNotDr
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref SIOSInstanceAMI
@@ -657,12 +667,9 @@ Resources:
           GroupSet:
             - !Ref CICSAPPSVRSecurityGroup
           SecondaryPrivateIpAddressCount: 2
-          SubnetId: !If
-            - IsDisasterRecoveryRegion
-            - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId2'
-            - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId3'
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId2'
       SsmAssociations:
         - DocumentName: !Ref EC2JoinADSSMDocument
           AssociationParameters:
@@ -679,7 +686,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR2]]
 
   HighCPUCICSAPPSVR2Alarm:
-    Condition: IsProd
+    Condition: IsProdAndMainRegion
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR2, high, cpu]]
@@ -818,6 +825,7 @@ Resources:
 ###
 
   GLBLSCPSVR2Instance:
+    Condition: IsNotDr
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -856,7 +864,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR2]]
 
   HighCPUGLBLSCPSVR2Alarm:
-    Condition: IsProd
+    Condition: IsProdAndMainRegion
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR2, high, cpu]]
@@ -995,6 +1003,7 @@ Resources:
 ###
 
   IWEBAPPSVR2Instance:
+    Condition: IsNotDr
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -1033,7 +1042,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR2]]
 
   HighCPUIWEBAPPSVR2Alarm:
-    Condition: IsProd
+    Condition: IsProdAndMainRegion
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR2, high, cpu]]
@@ -1306,6 +1315,7 @@ Resources:
 ###
 
   CICSFEAPPSVRInstance2:
+    Condition: IsNotDr
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !If [IsTest, !Ref FEInstanceAMI, !Ref SIOSInstanceAMI]
@@ -1344,7 +1354,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSFEAPPSVR2]]
 
   HighCPUCICSFEAPPSVR2Alarm:
-    Condition: IsProd
+    Condition: IsProdAndMainRegion
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSFEAPPSVR2, high, cpu]]
@@ -1490,6 +1500,7 @@ Resources:
 ###
 
   IWEBFEAPPSVRInstance2:
+    Condition: IsNotDr
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref FEInstanceAMI
@@ -1535,7 +1546,7 @@ Resources:
       Device: xvdf
 
   HighCPUIWEBFEAPPSVR2Alarm:
-    Condition: IsProd
+    Condition: IsProdAndMainRegion
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR2, high, cpu]]
@@ -1840,7 +1851,7 @@ Resources:
 ###
 
   BKUPSVREC2Role:
-#    Condition: IsProd
+    Condition: IsProd
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -1858,14 +1869,14 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
   BKUPSVRInstanceProfile:
-#    Condition: IsProd
+    Condition: IsProd
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
         - !Ref BKUPSVREC2Role
 
   BKUPSVRInstance:
-#    Condition: IsProd
+    Condition: IsProd
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -1915,7 +1926,7 @@ Resources:
           Description: Allow all traffic on on all ports from inside VPC
 
   HighCPUBKUPSVRAlarm:
-#    Condition: IsProd
+    Condition: IsProd
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BKUPSVR, high, cpu]]
@@ -2037,7 +2048,7 @@ Resources:
                   - !Join ['', [!GetAtt ArchiveS3Bucket.Arn, '/*']]
 
   SQLServerOptionGroup:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     Type: AWS::RDS::OptionGroup
     Properties:
       EngineName: sqlserver-se
@@ -2053,7 +2064,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
   
   SQLServerOptionGroup2:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     Type: AWS::RDS::OptionGroup
     Properties:
       EngineName: sqlserver-ee
@@ -2069,7 +2080,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
   DBStack: # some settings were manually updated in Console since we cannot update the whole template yet (outdated AMIs of windows EC2, need to be replaced for this stack to update)
-    Condition: IsMainRegion
+    # Condition: IsMainRegion 
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -2098,7 +2109,7 @@ Resources:
         StorageEncrypted: true
 
   DBStack2:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -2158,7 +2169,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cics2-db, Security, Group]]
 
   AllowCICSAPPSVRIntoDB:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     DependsOn:
       - DBStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -2171,7 +2182,7 @@ Resources:
       SourceSecurityGroupId: !Ref CICSAPPSVRSecurityGroup
 
   AllowGLBLSCPSVRIntoDB:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     DependsOn:
       - DBStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -2184,7 +2195,7 @@ Resources:
       SourceSecurityGroupId: !Ref GLBLSCPSVRSecurityGroup
   
   AllowBKUPSVRIntoDB:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     DependsOn:
       - DBStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -2199,7 +2210,7 @@ Resources:
 # Secgroup for CICS2 DB (SQL Enterprise)
 
   AllowCICSAPPSVRIntoDB2:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     DependsOn:
       - DBStack2
     Type: AWS::EC2::SecurityGroupIngress
@@ -2212,7 +2223,7 @@ Resources:
       SourceSecurityGroupId: !Ref CICSAPPSVRSecurityGroup
 
   AllowGLBLSCPSVRIntoDB2:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     DependsOn:
       - DBStack2
     Type: AWS::EC2::SecurityGroupIngress
@@ -2225,7 +2236,7 @@ Resources:
       SourceSecurityGroupId: !Ref GLBLSCPSVRSecurityGroup
   
   AllowBKUPSVRIntoDB2:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     DependsOn:
       - DBStack2
     Type: AWS::EC2::SecurityGroupIngress
@@ -2273,7 +2284,7 @@ Resources:
       SourceSecurityGroupId: !Ref BKUPSVRSecurityGroup
 
   CICSListenerRule:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       Actions:
@@ -2364,7 +2375,7 @@ Resources:
 ##
 
   DBFEStack:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -2393,7 +2404,7 @@ Resources:
         StorageEncrypted: true
 
   AllowCICSFEAPPSVRIntoDB:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     DependsOn:
       - DBFEStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -2480,7 +2491,7 @@ Resources:
 ###
 
   ALBDNSRecord:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     Type: AWS::Route53::RecordSetGroup
     Properties:
       HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']] 
@@ -2499,7 +2510,7 @@ Resources:
                 - Outputs.DNSName
 
   BackupStack:
-    Condition: IsProdAndMainRegion
+    # Condition: IsProdAndMainRegion
     DependsOn:
       - DBStack
     Type: AWS::CloudFormation::Stack
@@ -2549,7 +2560,7 @@ Resources:
 ###
 
   Dashboard:
-    Condition: IsProdAndMainRegion
+    # Condition: IsProdAndMainRegion
     Type: AWS::CloudWatch::Dashboard
     Properties:
       DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -2827,21 +2838,21 @@ Outputs:
 #Required for VPC Peering connections
 
   DBPort:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     Description: DB Server Security Group
     Value: !GetAtt [DBStack, Outputs.DBInstancePort]
     Export:
       Name: !Sub '${AWS::StackName}-DBPort'
 
   DBSecurityGroup:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     Description: DB Server Security Group
     Value: !GetAtt [DBStack, Outputs.SecurityGroupId]
     Export:
       Name: !Sub '${AWS::StackName}-DBSecurityGroup'
   
   DBSecurityGroup2:
-    Condition: IsMainRegion
+    # Condition: IsMainRegion
     Description: CICS DB2 Server Security Group
     Value: !GetAtt [DBStack2, Outputs.SecurityGroupId]
     Export:
