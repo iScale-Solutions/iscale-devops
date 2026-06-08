@@ -83,8 +83,10 @@ def _discover(event):
 def _pitr_restore(event):
     """
     Calls restore-db-instance-to-point-in-time (UseLatestRestorableTime=True).
-    All config from event payload. Returns target identifier — state machine
-    polls check_db_status until available.
+    For cross-region PITR, uses SourceDBInstanceAutomatedBackupsArn — the ARN of the
+    replicated automated backup in the DR region — NOT SourceDBInstanceIdentifier,
+    which only works for same-region restores.
+    Auto-discovers the backup ARN from describe_db_instance_automated_backups.
     """
     region     = os.environ['AWS_REGION']
     source_id  = event.get('db_instance_identifier', '')
@@ -95,9 +97,12 @@ def _pitr_restore(event):
     if not source_id or not target_id:
         raise ValueError('db_instance_identifier and pitr_target_identifier are required for PITR restore.')
 
-    rds    = boto3.client('rds', region_name=region)
+    rds        = boto3.client('rds', region_name=region)
+    backup_arn = _find_automated_backup_arn(rds, source_id)
+    logger.info(f'Using automated backup ARN: {backup_arn}')
+
     kwargs = dict(
-        SourceDBInstanceIdentifier=source_id,
+        SourceDBInstanceAutomatedBackupsArn=backup_arn,
         TargetDBInstanceIdentifier=target_id,
         UseLatestRestorableTime=True,
         MultiAZ=False,
@@ -244,6 +249,33 @@ def _fetch_db_password(region, secret_arn):
     if not pw:
         raise Exception(f'DB_ROOT_PASSWORD not in secret: {secret_arn}')
     return pw
+
+
+def _find_automated_backup_arn(rds, db_instance_identifier):
+    """
+    Finds the replicated automated backup ARN in the DR region.
+    Cross-region automated backup replication creates a backup entry with
+    status 'replicating' in the DR region — this ARN is required for
+    cross-region restore-db-instance-to-point-in-time calls.
+    """
+    resp    = rds.describe_db_instance_automated_backups(
+        DBInstanceIdentifier=db_instance_identifier
+    )
+    backups = resp.get('DBInstanceAutomatedBackups', [])
+    if not backups:
+        raise Exception(
+            f'No automated backups found for {db_instance_identifier} in this region. '
+            f'Ensure EnableCrossRegionBackupReplication=true is set in the app stack '
+            f'and the replication has had time to complete at least one backup cycle.'
+        )
+    available = [b for b in backups if b.get('Status') in ('replicating', 'retained')]
+    if not available:
+        statuses = [b.get('Status') for b in backups]
+        raise Exception(
+            f'No replicating/retained automated backup for {db_instance_identifier}. '
+            f'Found statuses: {statuses}. Backup replication may still be initialising.'
+        )
+    return available[0]['DBInstanceAutomatedBackupsArn']
 
 
 def _find_latest_snapshot(region, db_id):
