@@ -1,0 +1,252 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  EFS cross-region backup plan for PCHC DR.
+  Hourly and daily incremental backups of all production EFS file systems
+  in live region, replicated to DR region. Discovery is tag-based
+  (Environment=Production on EFS resources) — no changes needed when apps
+  are added or removed.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - SNSStackName
+      - Label:
+          default: DR Configuration
+        Parameters:
+          - DRRegion
+          - DRVaultName
+          - BackupTagKey
+          - BackupTagValue
+          - HourlyRetentionDays
+          - DailyRetentionDays
+
+    ParameterLabels:
+      Name:
+        default: Stack / Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      DRRegion:
+        default: DR Region
+      DRVaultName:
+        default: DR Backup Vault Name
+      BackupTagKey:
+        default: Backup Tag Key
+      BackupTagValue:
+        default: Backup Tag Value
+      HourlyRetentionDays:
+        default: Hourly Backup Retention (days)
+      DailyRetentionDays:
+        default: Daily Backup Retention (days)
+
+Parameters:
+
+  Name:
+    Description: Unique identifier used in resource names.
+    Type: String
+    Default: dr-efs-backup
+
+  OrgName:
+    Description: Organization name prefix.
+    Type: String
+    Default: pchc
+
+  EnvName:
+    Description: Environment name.
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+
+  SNSStackName:
+    Description: Name of the SNS stack to import the topic ARN from. Leave blank to
+      disable alarm notifications.
+    Type: String
+    Default: pchc-prd-ase1-sns
+
+  DRRegion:
+    Description: AWS region to copy backups to.
+    Type: String
+    Default: us-east-2
+
+  DRVaultName:
+    Description: Name of the destination backup vault in the DR region.
+    Type: String
+    Default: Default
+
+  BackupTagKey:
+    Description: Tag key used to discover EFS file systems for backup.
+    Type: String
+    Default: Environment
+
+  BackupTagValue:
+    Description: Tag value used to discover EFS file systems for backup.
+    Type: String
+    Default: Production
+
+  HourlyRetentionDays:
+    Description: Number of days to retain hourly backup recovery points.
+    Type: Number
+    Default: 14
+
+  DailyRetentionDays:
+    Description: Number of days to retain daily backup recovery points.
+    Type: Number
+    Default: 14
+
+Conditions:
+  HasSNS: !Not
+    - !Equals
+      - !Ref SNSStackName
+      - ''
+
+Resources:
+
+####
+# Backup Vault
+####
+
+  SourceBackupVault:
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    Properties:
+      BackupVaultName: !Sub ${AWS::StackName}-vault
+      BackupVaultTags:
+        Name: !Sub ${AWS::StackName}-vault
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+####
+# Backup Plan
+####
+
+  BackupPlan:
+    Type: AWS::Backup::BackupPlan
+    DependsOn: SourceBackupVault
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub ${AWS::StackName}-plan
+        BackupPlanRule:
+          - RuleName: HourlyBackup
+            TargetBackupVault: !Ref SourceBackupVault
+            ScheduleExpression: cron(0 * ? * * *)
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 120
+            Lifecycle:
+              DeleteAfterDays: !Ref HourlyRetentionDays
+            CopyActions:
+              - DestinationBackupVaultArn: !Sub arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${DRVaultName}
+                Lifecycle:
+                  DeleteAfterDays: !Ref HourlyRetentionDays
+          - RuleName: DailyBackup
+            TargetBackupVault: !Ref SourceBackupVault
+            ScheduleExpression: cron(0 3 ? * * *)
+            StartWindowMinutes: 120
+            CompletionWindowMinutes: 300
+            Lifecycle:
+              DeleteAfterDays: !Ref DailyRetentionDays
+            CopyActions:
+              - DestinationBackupVaultArn: !Sub arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${DRVaultName}
+                Lifecycle:
+                  DeleteAfterDays: !Ref DailyRetentionDays
+      BackupPlanTags:
+        Name: !Sub ${AWS::StackName}-plan
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+####
+# IAM
+####
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-backup-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+
+####
+# Backup Selection
+####
+
+  BackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: !Sub ${AWS::StackName}-selection
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !Sub arn:aws:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:file-system/*
+        ListOfTags:
+          - ConditionType: STRINGEQUALS
+            ConditionKey: !Ref BackupTagKey
+            ConditionValue: !Ref BackupTagValue
+
+####
+# Alarm
+####
+
+  BackupFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-backup-failures
+      AlarmDescription: One or more EFS backup jobs failed — check AWS Backup console for details.
+      MetricName: NumberOfBackupJobsFailed
+      Namespace: AWS/Backup
+      Dimensions:
+        - Name: BackupVaultName
+          Value: !Ref SourceBackupVault
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !If
+          - HasSNS
+          - !ImportValue
+            Fn::Sub: ${SNSStackName}-TopicArn
+          - !Ref AWS::NoValue
+
+Outputs:
+
+  BackupVaultName:
+    Description: Name of the source backup vault in Singapore.
+    Value: !Ref SourceBackupVault
+    Export:
+      Name: !Sub ${AWS::StackName}-VaultName
+
+  BackupPlanId:
+    Description: ID of the backup plan.
+    Value: !Ref BackupPlan
+    Export:
+      Name: !Sub ${AWS::StackName}-PlanId
