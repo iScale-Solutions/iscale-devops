@@ -144,10 +144,10 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   UseTagInclusion: !And [!Not [!Equals [!Ref TagName, ""]], !Not [!Equals [!Ref TagValue, ""]]]
-  IsProdOrProductionDR: !Or
+  IsProdOrDR: !Or
     - Condition: IsProd
-    - !Equals [!Ref EnvName, ProductionDR]
-  IsNotProdOrProductionDR: !Not [Condition: IsProdOrProductionDR]
+    - Condition: IsDR
+  IsNotProdOrDR: !Not [Condition: IsProdOrDR]
   IsHourlyBackupEnabled: !Equals [!Ref EnableHourlyBackup, 'true']
   IsCrossRegionBackupEnabled: !And
     - !Equals [!Ref EnableCrossRegionBackup, 'true']
@@ -156,7 +156,7 @@ Conditions:
 Resources:
 
   ProdBackupVault:
-    Condition: IsProdOrProductionDR
+    Condition: IsProdOrDR
     Type: AWS::Backup::BackupVault
     DeletionPolicy: Retain #Prod vaults are retained
     Properties:
@@ -167,7 +167,7 @@ Resources:
         Organization: !Ref OrgName
 
   NonProdBackupVault:
-    Condition: IsNotProdOrProductionDR #No retention for non-prod
+    Condition: IsNotProdOrDR #No retention for non-prod
     Type: AWS::Backup::BackupVault
     Properties:
       BackupVaultName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], vault]]
@@ -177,7 +177,7 @@ Resources:
         Organization: !Ref OrgName
 
   ProdBackupPlan:
-    Condition: IsProdOrProductionDR
+    Condition: IsProdOrDR
     DependsOn: ProdBackupVault
     Type: AWS::Backup::BackupPlan
     Properties:
@@ -233,7 +233,7 @@ Resources:
         Organization: !Ref OrgName
 
   NonProdBackupPlan:
-    Condition: IsNotProdOrProductionDR
+    Condition: IsNotProdOrDR
     DependsOn: NonProdBackupVault
     Type: AWS::Backup::BackupPlan
     Properties:
@@ -266,7 +266,7 @@ Resources:
         BackupPlanName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, hourly, backup, plan]]
         BackupPlanRule:
           - RuleName: HourlyBackup
-            TargetBackupVault: !If [IsProdOrProductionDR, !Ref ProdBackupVault, !Ref NonProdBackupVault]
+            TargetBackupVault: !If [IsProdOrDR, !Ref ProdBackupVault, !Ref NonProdBackupVault]
             ScheduleExpression: "cron(0 * ? * * *)"
             StartWindowMinutes: 60
             CompletionWindowMinutes: 120
@@ -314,7 +314,7 @@ Resources:
   BackupSelection:
     Type: AWS::Backup::BackupSelection
     Properties:
-      BackupPlanId: !If [IsProdOrProductionDR, !Ref ProdBackupPlan, !Ref NonProdBackupPlan]
+      BackupPlanId: !If [IsProdOrDR, !Ref ProdBackupPlan, !Ref NonProdBackupPlan]
       BackupSelection:
         SelectionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup-selection]]
         IamRoleArn: !GetAtt BackupRole.Arn
