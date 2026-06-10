@@ -21,6 +21,9 @@ Metadata:
           - TagName
           - TagValue
           - WeeklyExpiration
+          - EnableHourlyBackup
+          - EnableCrossRegionBackup
+          - CrossRegionBackupVaultArn
 
     ParameterLabels:
       Name:
@@ -41,6 +44,12 @@ Metadata:
         default: Number of days for monthly backup expiration
       WeeklyExpiration:
         default: Number of days for weekly backup expiration
+      EnableHourlyBackup:
+        default: Enable hourly incremental backup plan
+      EnableCrossRegionBackup:
+        default: Enable cross-region copy of backups to a DR vault
+      CrossRegionBackupVaultArn:
+        default: ARN of the destination backup vault in the DR region
 
 Parameters:
   Name:
@@ -106,6 +115,15 @@ Parameters:
     Type: String
     Default: 'false'
     AllowedValues: ['true', 'false']
+  EnableCrossRegionBackup:
+    Description: Enable cross-region copy of EFS backups to the DR vault on every backup rule
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  CrossRegionBackupVaultArn:
+    Description: ARN of the destination backup vault in the DR region (e.g. arn:aws:backup:us-west-2:<account>:backup-vault:<name>)
+    Type: String
+    Default: ''
 
 Mappings: 
   Fn::Transform:
@@ -124,6 +142,9 @@ Conditions:
     - !Equals [!Ref EnvName, ProductionDR]
   IsNotProdOrProductionDR: !Not [Condition: IsProdOrProductionDR]
   IsHourlyBackupEnabled: !Equals [!Ref EnableHourlyBackup, 'true']
+  IsCrossRegionBackupEnabled: !And
+    - !Equals [!Ref EnableCrossRegionBackup, 'true']
+    - !Not [!Equals [!Ref CrossRegionBackupVaultArn, '']]
 
 Resources:
 
@@ -163,6 +184,12 @@ Resources:
             CompletionWindowMinutes: 300
             Lifecycle:
               DeleteAfterDays: !Ref DailyExpiration
+            CopyActions: !If
+              - IsCrossRegionBackupEnabled
+              - - DestinationBackupVaultArn: !Ref CrossRegionBackupVaultArn
+                  Lifecycle:
+                    DeleteAfterDays: !Ref DailyExpiration
+              - !Ref 'AWS::NoValue'
           - RuleName: WeeklyBackup
             TargetBackupVault: !Ref ProdBackupVault
             ScheduleExpression: !Join [' ', ['cron(0', !Ref BackupTime, '?', '*', 7, '*)']]
@@ -171,6 +198,13 @@ Resources:
             Lifecycle:
               MoveToColdStorageAfterDays: !Ref ColdStorageTrigger
               DeleteAfterDays: !Ref WeeklyExpiration
+            CopyActions: !If
+              - IsCrossRegionBackupEnabled
+              - - DestinationBackupVaultArn: !Ref CrossRegionBackupVaultArn
+                  Lifecycle:
+                    MoveToColdStorageAfterDays: !Ref ColdStorageTrigger
+                    DeleteAfterDays: !Ref WeeklyExpiration
+              - !Ref 'AWS::NoValue'
           - RuleName: MonthlyBackup
             TargetBackupVault: !Ref ProdBackupVault
             ScheduleExpression: !Join [' ', ['cron(0', !Ref BackupTime, 1, '*', '?', '*)']]
@@ -179,6 +213,13 @@ Resources:
             Lifecycle:
               MoveToColdStorageAfterDays: !Ref ColdStorageTrigger
               DeleteAfterDays: !Ref MonthlyExpiration
+            CopyActions: !If
+              - IsCrossRegionBackupEnabled
+              - - DestinationBackupVaultArn: !Ref CrossRegionBackupVaultArn
+                  Lifecycle:
+                    MoveToColdStorageAfterDays: !Ref ColdStorageTrigger
+                    DeleteAfterDays: !Ref MonthlyExpiration
+              - !Ref 'AWS::NoValue'
       BackupPlanTags:
         Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup, plan]]
         Environment: !Ref EnvName
@@ -199,6 +240,12 @@ Resources:
             CompletionWindowMinutes: 300
             Lifecycle:
               DeleteAfterDays: !Ref DailyExpiration
+            CopyActions: !If
+              - IsCrossRegionBackupEnabled
+              - - DestinationBackupVaultArn: !Ref CrossRegionBackupVaultArn
+                  Lifecycle:
+                    DeleteAfterDays: !Ref DailyExpiration
+              - !Ref 'AWS::NoValue'
       BackupPlanTags:
         Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, backup, plan]]
         Environment: !Ref EnvName
@@ -218,6 +265,12 @@ Resources:
             CompletionWindowMinutes: 120
             Lifecycle:
               DeleteAfterDays: 2
+            CopyActions: !If
+              - IsCrossRegionBackupEnabled
+              - - DestinationBackupVaultArn: !Ref CrossRegionBackupVaultArn
+                  Lifecycle:
+                    DeleteAfterDays: 2
+              - !Ref 'AWS::NoValue'
       BackupPlanTags:
         Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, hourly, backup, plan]]
         Environment: !Ref EnvName
