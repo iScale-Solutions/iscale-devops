@@ -1,8 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: |
-  PCHC DR Monitoring stack — Route 53 health checks, CloudWatch Synthetics canaries,
-  and AWS Health EventBridge rule for all 10 PCHC applications.
-  Deployed to us-east-1. Covers PCHCDR-52, PCHCDR-53, PCHCDR-54.
+Description: DR Monitoring stack — Route 53 health checks, Synthetics canaries, and AWS Health EventBridge for all 10 PCHC apps (us-east-1)
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -10,8 +7,13 @@ Metadata:
       - Label:
           default: Resource Configuration
         Parameters:
+          - Name
           - OrgName
           - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - SNSStackName
       - Label:
           default: Monitoring Configuration
         Parameters:
@@ -19,11 +21,6 @@ Metadata:
           - HealthCheckFailureThreshold
           - CanarySchedule
           - LogRetentionDays
-      - Label:
-          default: Notification Configuration
-        Parameters:
-          - Email
-          - EnableEmailSubscription
       - Label:
           default: App Endpoints
         Parameters:
@@ -52,10 +49,14 @@ Metadata:
           - PhilpassHealthCheckPath
 
     ParameterLabels:
+      Name:
+        default: Resource Name
       OrgName:
         default: Organization Name
       EnvName:
         default: Environment Name
+      SNSStackName:
+        default: SNS Topic Stack Name
       HealthCheckInterval:
         default: Health Check Interval (seconds)
       HealthCheckFailureThreshold:
@@ -64,10 +65,6 @@ Metadata:
         default: Canary Schedule Expression
       LogRetentionDays:
         default: Canary Log Retention (days)
-      Email:
-        default: Notification Email Address
-      EnableEmailSubscription:
-        default: Enable Email Subscription
       PesonetEndpoint:
         default: PESONET Endpoint
       PddtsEndpoint:
@@ -112,6 +109,12 @@ Metadata:
 Parameters:
 
   # Resource Configuration
+  Name:
+    Description: Unique name/identifier for this stack's resources
+    Type: String
+    Default: dr-monitoring
+    MinLength: 3
+    MaxLength: 20
   OrgName:
     Description: The name of the organization
     Type: String
@@ -128,6 +131,13 @@ Parameters:
       - Staging
       - Development
       - Test
+
+  # Stack Configuration
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: pchc-prd-ue1-sns
+    MinLength: 1
 
   # Monitoring Configuration
   HealthCheckInterval:
@@ -157,19 +167,6 @@ Parameters:
       - 30
       - 60
       - 90
-
-  # Notification Configuration
-  Email:
-    Description: Email address for SNS alert notifications
-    Type: String
-    Default: ''
-  EnableEmailSubscription:
-    Description: Subscribe Email to the monitoring SNS topic
-    Type: String
-    Default: 'false'
-    AllowedValues:
-      - 'true'
-      - 'false'
 
   # App Endpoints
   PesonetEndpoint:
@@ -255,65 +252,11 @@ Parameters:
     Type: String
     Default: /
 
-Conditions:
-  IsEmailSubscriptionEnabled: !Equals [!Ref EnableEmailSubscription, 'true']
-
 Resources:
 
-####
-# Shared — SNS
-####
-
-  DRMonitoringTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub '${OrgName}-prd-ue1-dr-monitoring'
-      Tags:
-        - Key: Name
-          Value: !Sub '${OrgName}-prd-ue1-dr-monitoring'
-        - Key: Organization
-          Value: !Ref OrgName
-        - Key: Environment
-          Value: !Ref EnvName
-
-  DRMonitoringEmailSubscription:
-    Type: AWS::SNS::Subscription
-    Condition: IsEmailSubscriptionEnabled
-    Properties:
-      Protocol: email
-      Endpoint: !Ref Email
-      TopicArn: !Ref DRMonitoringTopic
-
-  DRMonitoringTopicPolicy:
-    Type: AWS::SNS::TopicPolicy
-    Properties:
-      Topics:
-        - !Ref DRMonitoringTopic
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowCloudWatchAlarms
-            Effect: Allow
-            Principal:
-              Service: cloudwatch.amazonaws.com
-            Action: sns:Publish
-            Resource: !Ref DRMonitoringTopic
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-          - Sid: AllowEventBridge
-            Effect: Allow
-            Principal:
-              Service: events.amazonaws.com
-            Action: sns:Publish
-            Resource: !Ref DRMonitoringTopic
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-
-####
+##
 # Shared — Synthetics
-####
+##
 
   CanaryArtifactBucket:
     Type: AWS::S3::Bucket
@@ -406,9 +349,9 @@ Resources:
         - Key: Environment
           Value: !Ref EnvName
 
-####
+##
 # Shared — AWS Health EventBridge
-####
+##
 
   AWSHealthEventRule:
     Type: AWS::Events::Rule
@@ -429,11 +372,12 @@ Resources:
               - ap-southeast-1
       Targets:
         - Id: DRMonitoringTopicTarget
-          Arn: !Ref DRMonitoringTopic
+          Arn:
+            Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # PESONET
-####
+##
 
   PesonetHealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -470,9 +414,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PesonetCanary:
     Type: AWS::Synthetics::Canary
@@ -525,9 +469,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PesonetCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -536,13 +480,13 @@ Resources:
       AlarmDescription: PESONET is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${PesonetHealthCheckAlarm}) AND ALARM(${PesonetCanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # PDDTS
-####
+##
 
   PddtsHealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -579,9 +523,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsCanary:
     Type: AWS::Synthetics::Canary
@@ -634,9 +578,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -645,13 +589,13 @@ Resources:
       AlarmDescription: PDDTS is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${PddtsHealthCheckAlarm}) AND ALARM(${PddtsCanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # PDDTS-EOD
-####
+##
 
   PddtsEodHealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -688,9 +632,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsEodCanary:
     Type: AWS::Synthetics::Canary
@@ -743,9 +687,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsEodCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -754,13 +698,13 @@ Resources:
       AlarmDescription: PDDTS-EOD is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${PddtsEodHealthCheckAlarm}) AND ALARM(${PddtsEodCanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # MIS
-####
+##
 
   MisHealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -797,9 +741,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   MisCanary:
     Type: AWS::Synthetics::Canary
@@ -852,9 +796,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   MisCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -863,13 +807,13 @@ Resources:
       AlarmDescription: MIS is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${MisHealthCheckAlarm}) AND ALARM(${MisCanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # CICS
-####
+##
 
   CicsHealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -906,9 +850,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   CicsCanary:
     Type: AWS::Synthetics::Canary
@@ -961,9 +905,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   CicsCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -972,13 +916,13 @@ Resources:
       AlarmDescription: CICS is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${CicsHealthCheckAlarm}) AND ALARM(${CicsCanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # DirectDebit
-####
+##
 
   DirectDebitHealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -1015,9 +959,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DirectDebitCanary:
     Type: AWS::Synthetics::Canary
@@ -1070,9 +1014,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DirectDebitCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1081,13 +1025,13 @@ Resources:
       AlarmDescription: DirectDebit is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${DirectDebitHealthCheckAlarm}) AND ALARM(${DirectDebitCanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # PAS6
-####
+##
 
   Pas6HealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -1124,9 +1068,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   Pas6Canary:
     Type: AWS::Synthetics::Canary
@@ -1179,9 +1123,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   Pas6CompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1190,13 +1134,13 @@ Resources:
       AlarmDescription: PAS6 is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${Pas6HealthCheckAlarm}) AND ALARM(${Pas6CanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # DSAPP
-####
+##
 
   DsappHealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -1233,9 +1177,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DsappCanary:
     Type: AWS::Synthetics::Canary
@@ -1288,9 +1232,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DsappCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1299,13 +1243,13 @@ Resources:
       AlarmDescription: DSAPP is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${DsappHealthCheckAlarm}) AND ALARM(${DsappCanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # PayGate
-####
+##
 
   PaygateHealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -1342,9 +1286,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PaygateCanary:
     Type: AWS::Synthetics::Canary
@@ -1397,9 +1341,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PaygateCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1408,13 +1352,13 @@ Resources:
       AlarmDescription: PayGate is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${PaygateHealthCheckAlarm}) AND ALARM(${PaygateCanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-####
+##
 # PhilPass
-####
+##
 
   PhilpassHealthCheck:
     Type: AWS::Route53::HealthCheck
@@ -1451,9 +1395,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PhilpassCanary:
     Type: AWS::Synthetics::Canary
@@ -1506,9 +1450,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PhilpassCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1517,6 +1461,6 @@ Resources:
       AlarmDescription: PhilPass is unreachable — both Route 53 health check and Synthetics canary are failing
       AlarmRule: !Sub 'ALARM(${PhilpassHealthCheckAlarm}) AND ALARM(${PhilpassCanaryAlarm})'
       AlarmActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref DRMonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
