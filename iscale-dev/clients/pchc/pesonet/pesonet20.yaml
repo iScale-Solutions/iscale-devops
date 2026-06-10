@@ -298,6 +298,12 @@ Conditions:
   IsProdOrTestOrDRAndDeployPaidResourcesAndNotPITR: !And
     - Condition: IsProdOrTestOrDR
     - Condition: IsDeployPaidResourcesAndNotPITR
+  IsProdOrTest: !Or
+    - Condition: IsProd
+    - Condition: IsTest
+  IsProdOrTestAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrTest
+    - Condition: IsDeployPaidResourcesAndNotPITR
   IsDashboardDeployed: !And
     - Condition: IsProdOrProductionDR
     - Condition: IsDeployPaidResources
@@ -965,11 +971,25 @@ Resources:
             - CustomerServiceDeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
+  # Always-on vault in the DR region — exists independently of DeployPaidResources so the live region's
+  # CopyActions have a destination even during cold standby. Excluded from BackupStack to avoid naming conflicts at failover.
+  DRBackupVault:
+    Condition: IsDR
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+      BackupVaultTags:
+        Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
   BackupStack:
     DependsOn:
       - DBStack
       - TreasuryServerStack
-    Condition: IsProdOrTestOrDRAndDeployPaidResourcesAndNotPITR
+    Condition: IsProdOrTestAndDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -986,7 +1006,7 @@ Resources:
               - TreasuryServerStack
               - Outputs.AppServerEFSArn
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
-        EnableHourlyBackup: !If [IsProdOrTestOrDR, 'true', 'false']
+        EnableHourlyBackup: !If [IsProdOrTest, 'true', 'false']
         HourlyBackupARNList:
           Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFSArn]
         # TODO: scope back to !If [IsProd, 'true', 'false'] once cross-region backup is validated in all environments
