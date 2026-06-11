@@ -83,6 +83,8 @@ Metadata:
         default: Source DB Instance ARN (live region — required when replication is enabled)
       BackupReplicationRetentionPeriod:
         default: Backup Retention Period in DR region (days)
+      DRRegion:
+        default: DR AWS Region (backup copy destination)
       IsPITRMode:
         default: PITR Mode (true = DB restored externally via PITR, DBStack suppressed)
       PITRDBEndpoint:
@@ -213,6 +215,17 @@ Parameters:
     Default: 7
     MinValue: 1
     MaxValue: 35
+  DRRegion:
+    Description: AWS region of the DR stack — used to construct the DR backup vault ARN for cross-region EFS copy
+    Type: String
+    Default: 'us-east-2'
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-1
+      - us-west-2
+      - ap-southeast-1
+      - ap-southeast-2
   IsPITRMode:
     Description: |
       Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
@@ -284,6 +297,12 @@ Conditions:
     - Condition: IsDeployPaidResourcesAndNotPITR
   IsProdOrTestOrDRAndDeployPaidResourcesAndNotPITR: !And
     - Condition: IsProdOrTestOrDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
+  IsProdOrTest: !Or
+    - Condition: IsProd
+    - Condition: IsTest
+  IsProdOrTestAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrTest
     - Condition: IsDeployPaidResourcesAndNotPITR
   IsDashboardDeployed: !And
     - Condition: IsProdOrProductionDR
@@ -952,11 +971,25 @@ Resources:
             - CustomerServiceDeployStack
             - Outputs.CodeDeployDeploymentGroupName
 
+  # Always-on vault in the DR region — exists independently of DeployPaidResources so the live region's
+  # CopyActions have a destination even during cold standby. Excluded from BackupStack to avoid naming conflicts at failover.
+  DRBackupVault:
+    Condition: IsDR
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+      BackupVaultTags:
+        Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
   BackupStack:
     DependsOn:
       - DBStack
       - TreasuryServerStack
-    Condition: IsProdOrTestOrDRAndDeployPaidResourcesAndNotPITR
+    Condition: IsProdOrTestAndDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -973,7 +1006,15 @@ Resources:
               - TreasuryServerStack
               - Outputs.AppServerEFSArn
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
-        EnableHourlyBackup: !If [IsProductionDR, 'true', 'false']
+        EnableHourlyBackup: !If [IsProdOrTest, 'true', 'false']
+        HourlyBackupARNList:
+          Fn::GetAtt: [TreasuryServerStack, Outputs.AppServerEFSArn]
+        # TODO: scope back to !If [IsProd, 'true', 'false'] once cross-region backup is validated in all environments
+        EnableCrossRegionBackup: 'true'
+        CrossRegionBackupVaultArn: !Sub
+          - 'arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-vault'
+          - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+            DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
 
   Dashboard:
     Condition: IsDashboardDeployedAndNotPITR
