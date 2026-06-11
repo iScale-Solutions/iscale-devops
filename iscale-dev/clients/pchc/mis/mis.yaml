@@ -43,6 +43,8 @@ Metadata:
           - SourceDbInstanceArn
           - BackupReplicationRetentionPeriod
           - LiveSecretArn
+          - IsPITRMode
+          - PITRDBEndpoint
 
     ParameterLabels:
       Name:
@@ -87,6 +89,10 @@ Metadata:
         default: Backup Retention Period in DR region (days)
       LiveSecretArn:
         default: Live Region Secret ARN (DR standby only — required for secrets sync)
+      IsPITRMode:
+        default: PITR Mode (set by dr-failover-v2 only — do not change manually)
+      PITRDBEndpoint:
+        default: PITR DB Endpoint (set by dr-failover-v2 only — do not change manually)
 
 Parameters:
   Name:
@@ -230,6 +236,24 @@ Parameters:
       Only required when deploying in any DR variant (ProductionDR, TestDR, etc.) — leave blank for normal deployments.
     Type: String
     Default: ''
+  IsPITRMode:
+    Description: |
+      Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
+      When true, DBStack is suppressed (DB was restored externally via PITR) and all DB references
+      resolve from PITRDBEndpoint and the pre-deployed DBStandbySecurityGroup instead of DBStack outputs.
+      Default false — live stacks and snapshot-based failover are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  PITRDBEndpoint:
+    Description: |
+      Endpoint of the PITR-restored RDS instance. Written to SSM and Secrets Manager by the
+      dr-failover Step Functions machine before the app stack update. Only used when IsPITRMode=true.
+      Leave blank for all other deployments — existing stacks are unaffected.
+    Type: String
+    Default: ''
 
 Mappings:
   Fn::Transform:
@@ -273,6 +297,14 @@ Conditions:
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
     - !Not [Condition: IsDR]
+  IsPITRMode: !Equals [!Ref IsPITRMode, 'true']
+  # DBStack and its dependents are suppressed when PITR mode is active — DB was restored externally.
+  IsDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsDeployPaidResources
+    - !Not [{Condition: IsPITRMode}]
+  IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
 
 
 Resources:
@@ -300,7 +332,8 @@ Resources:
 ##
 
   DBStack:
-    Condition: IsDeployPaidResources
+    # Suppressed when IsPITRMode=true — DB was restored externally via PITR by dr-failover Step Functions.
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -329,7 +362,7 @@ Resources:
         ExistingSecretArn: !If [IsDR, !Ref DRDBSecret, '']
 
   AllowJumpHostIntoDB:
-    Condition: IsDeployPaidResources
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from jump host
@@ -383,15 +416,15 @@ Resources:
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
           - ''
         DatabasePort: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
           - 3306
         DatabaseSecurityGroupId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
           - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
@@ -400,14 +433,14 @@ Resources:
         InstanceType: !Ref InstanceType
         LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', !Ref LoadBalancerHostName]
         LoadBalancerPriority: 100
-        LoadBalancerStackName: !If 
+        LoadBalancerStackName: !If
           - IsDeployPaidResources
           - !Select [ 1, !Split [ '/', !Ref ELBStack]]
           - ''
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId: !If 
+        SharedSecretId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
           - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
@@ -604,7 +637,7 @@ Resources:
 # permissions to deploy lambda using serverless.yml
 
   LambdaDeploymentUserGroup:
-    Condition: IsDeployPaidResources
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::IAM::Group
     Properties:
       Policies:
@@ -736,7 +769,7 @@ Resources:
           Value: !Ref OrgName
 
   AllowMisLambdaIntoMisDB:
-    Condition: IsDeployPaidResources
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from MIS Lambda
@@ -842,7 +875,7 @@ Resources:
 # Backup Section
 
   BackupStack:
-    Condition: IsProdOrProductionDRAndDeployPaidResources
+    Condition: IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBStack
       - ServerStack
@@ -1085,7 +1118,7 @@ Outputs:
         - Outputs.DeploymentUserGroup
 
   LambdaDeploymentUserGroup:
-    Condition: IsDeployPaidResources
+    Condition: IsDeployPaidResourcesAndNotPITR
     Description: Add the BitBucket user into this group
     Value: !Ref LambdaDeploymentUserGroup
 
