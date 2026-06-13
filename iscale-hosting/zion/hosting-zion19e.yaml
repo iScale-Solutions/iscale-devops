@@ -24,6 +24,7 @@ Metadata:
           - LoadBalancerStackName
           - LoadBalancerHostName
           - LoadBalancerEnabled 
+          - HelpWebsiteCertificateArn
       - Label:
           default: DB Instance Configuration
         Parameters:
@@ -48,6 +49,8 @@ Metadata:
         default: Environment Name
       AllowDatabaseRemoteAccess:
         default: Allow Database remote access
+      HelpWebsiteCertificateArn:
+        default: Help Website Certificate ARN
       LoadBalancerCertificateArn:
         default: Load Balancer Certificate ARN
       LoadBalancerStackName:
@@ -110,6 +113,10 @@ Parameters:
     AllowedValues:
       - true
       - false
+  HelpWebsiteCertificateArn:
+    Description: Help Website Certificate ARN (only needed when using own ELB)
+    Type: String
+    Default: arn:aws:acm:us-west-2:178070162686:certificate/6082ef60-e1f0-47d5-bb8c-f459051f19a9
   LoadBalancerCertificateArn:
     Description: Load Balancer Certificate ARN (only needed when using own ELB)
     Type: String
@@ -491,11 +498,39 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
     Condition: IsLoadBalancerNotEnabled
     Properties:
-      ListenerArn: 
+      ListenerArn:
         Fn::ImportValue:
           !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
       Certificates:
         - CertificateArn: !Ref LoadBalancerCertificateArn
+
+  HelpWebsiteListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref OdooServerTargetGroup
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Join ['.', [help, !Ref ClientDomainName]]
+      ListenerArn:
+        Fn::If:
+          - IsLoadBalancerEnabled
+          - !GetAtt [ELBStack, Outputs.ApplicationListenerArn]
+          - Fn::ImportValue:
+              !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
+      Priority: 300
+
+  HelpWebsiteListenerCertificate:
+    Type: AWS::ElasticLoadBalancingV2::ListenerCertificate
+    Condition: IsLoadBalancerNotEnabled
+    Properties:
+      ListenerArn: 
+        Fn::ImportValue:
+          !Sub "${LoadBalancerStackName}-ApplicationListenerArn"
+      Certificates:
+        - CertificateArn: !Ref HelpWebsiteCertificateArn
 
   StagingDNSRecord:
     Condition: IsStagingELB
