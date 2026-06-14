@@ -271,20 +271,18 @@ def _restore_efs(event):
     # returns PascalCase (e.g. PerformanceMode, Encrypted, KmsKeyId) — normalize them.
     pascal_to_lower = {
         'PerformanceMode': 'performancemode',
-        'Encrypted':       'encrypted',
         'KmsKeyId':        'kmskeyid',
     }
     for pascal, lower in pascal_to_lower.items():
         if pascal in metadata and lower not in metadata:
             metadata[lower] = metadata.pop(pascal)
-    # EFS restore API requires these keys — cross-region backup copies often omit
-    # them from RestoreMetadata, so we inject safe defaults when absent.
+    # Drop whatever the source says about Encrypted — cross-region backup copies
+    # sometimes return Encrypted=false even when the source was encrypted.
+    # Always force true: EFS encryption is a one-way door (cannot encrypt after creation).
+    metadata.pop('Encrypted', None)
+    metadata['encrypted'] = 'true'
     if 'performancemode' not in metadata:
         metadata['performancemode'] = 'generalPurpose'
-    if 'encrypted' not in metadata:
-        # Default to encrypted — AWS-managed EFS keys have no KmsKeyId in restore metadata,
-        # so absence of a key does NOT mean unencrypted. Safer to default true.
-        metadata['encrypted'] = 'true'
     metadata['newFileSystem'] = 'true'
     metadata['creationtoken'] = f'{source_efs_id}-dr-{int(time.time())}'
 
@@ -293,6 +291,7 @@ def _restore_efs(event):
         Metadata=metadata,
         IamRoleArn=backup_role_arn,
         ResourceType='EFS',
+        CopySourceTagsToDestination=True,
     )
     job_id = resp['RestoreJobId']
     logger.info(f'EFS restore job started: {job_id}')
