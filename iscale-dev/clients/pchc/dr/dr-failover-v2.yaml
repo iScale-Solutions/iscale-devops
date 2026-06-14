@@ -5,9 +5,22 @@ AWSTemplateFormatVersion: 2010-09-09
 #   pitr_security_group_id, redshift_cluster_identifier,
 #   redshift_snapshot_identifier, snapshot_identifier, db_master_password,
 #   sns_topic_arn
+# EFS restore keys (PITR path only — omit to skip EFS restore and create fresh EFS):
+#   efs_backup_vault_name, efs_id_ssm_path, backup_role_arn
 # Lambda actions: discover | pitr_restore | check_db_status | update_secrets |
+#   check_efs_recovery_point | restore_efs | check_restore_job |
 #   update_stack | check_stack_status | notify
 # Per-app EventBridge triggers: dr-trigger-<app>.yaml imports StateMachineArn.
+#
+# EFS SG design — how NFS access is established after restore:
+#   AWS Backup creates a brand-new EFS file system (newFileSystem=true). The
+#   check_restore_job Lambda creates VPC mount targets using InternalSubnetId1/2
+#   (from network stack) and attaches EFSStandbySecurityGroup (exported from the
+#   app stack, e.g. pesonet20.yaml). NFS ingress rules (port 2049) on that SG
+#   are NOT set manually — appserver-basic2.yaml's AllowExternalEFSConnectionFromAppServer
+#   resource (Condition: UseExternalEFS) adds them automatically for every app
+#   server stack (Treasury, API, Sidekiq, CS) during the UpdateAppStackPITR
+#   step. Result: DR EFS access pattern is identical to live region.
 Description: >-
   DR Failover Engine — deploy once, app-agnostic. All app-specific config is
   passed via state machine input at invocation time, not baked into this template.
@@ -69,6 +82,20 @@ Resources:
 ####
 # IAM
 ####
+
+  BackupRestoreRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-backup-restore-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
 
   LambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -176,13 +203,16 @@ Resources:
 
           def handler(event, context):
               action = event.get('action', '')
-              if action == 'discover':           return _discover(event)
-              if action == 'pitr_restore':        return _pitr_restore(event)
-              if action == 'check_db_status':     return _check_db_status(event)
-              if action == 'update_secrets':      return _update_secrets(event)
-              if action == 'update_stack':        return _update_stack_action(event)
-              if action == 'check_stack_status':  return _check_stack_status(event)
-              if action == 'notify':              return _notify(event)
+              if action == 'discover':                  return _discover(event)
+              if action == 'pitr_restore':              return _pitr_restore(event)
+              if action == 'check_db_status':           return _check_db_status(event)
+              if action == 'update_secrets':            return _update_secrets(event)
+              if action == 'check_efs_recovery_point':  return _check_efs_recovery_point(event)
+              if action == 'restore_efs':               return _restore_efs(event)
+              if action == 'check_restore_job':         return _check_restore_job(event)
+              if action == 'update_stack':              return _update_stack_action(event)
+              if action == 'check_stack_status':        return _check_stack_status(event)
+              if action == 'notify':                    return _notify(event)
               raise ValueError(f'Unknown action: {action!r}')
 
 
@@ -346,6 +376,137 @@ Resources:
               return {'secrets_updated': True, 'db_endpoint': db_endpoint}
 
 
+          # ── check_efs_recovery_point ──────────────────────────────────────────
+
+          def _check_efs_recovery_point(event):
+              region     = os.environ['AWS_REGION']
+              vault_name = event.get('efs_backup_vault_name', '')
+              if not vault_name:
+                  logger.info('No efs_backup_vault_name in event — skipping EFS restore.')
+                  return {'efs_found': False, 'recovery_point_arn': '', 'source_efs_id': ''}
+              backup = boto3.client('backup', region_name=region)
+              resp   = backup.list_recovery_points_by_backup_vault(
+                  BackupVaultName=vault_name,
+                  ByResourceType='EFS',
+              )
+              points = [p for p in resp.get('RecoveryPoints', []) if p.get('Status') == 'COMPLETED']
+              if not points:
+                  logger.info(f'No completed EFS recovery points in vault: {vault_name}')
+                  return {'efs_found': False, 'recovery_point_arn': '', 'source_efs_id': ''}
+              points.sort(key=lambda p: p['CreationDate'], reverse=True)
+              latest        = points[0]
+              source_efs_id = latest['ResourceArn'].split('/')[-1]
+              logger.info(f'Latest EFS recovery point: {latest["RecoveryPointArn"]} source={source_efs_id}')
+              return {
+                  'efs_found':          True,
+                  'recovery_point_arn': latest['RecoveryPointArn'],
+                  'source_efs_id':      source_efs_id,
+              }
+
+
+          # ── restore_efs ───────────────────────────────────────────────────────
+
+          def _restore_efs(event):
+              import time
+              region          = os.environ['AWS_REGION']
+              vault_name      = event.get('backup_vault_name', '') or event.get('efs_backup_vault_name', '')
+              backup_role_arn = event.get('backup_role_arn', '')
+              if not vault_name or not backup_role_arn:
+                  raise ValueError('backup_vault_name and backup_role_arn are required for EFS restore.')
+              backup = boto3.client('backup', region_name=region)
+              resp   = backup.list_recovery_points_by_backup_vault(
+                  BackupVaultName=vault_name,
+                  ByResourceType='EFS',
+              )
+              points = [p for p in resp.get('RecoveryPoints', []) if p.get('Status') == 'COMPLETED']
+              if not points:
+                  raise Exception(f'No completed EFS recovery points found in vault: {vault_name} (region={region})')
+              points.sort(key=lambda p: p['CreationDate'], reverse=True)
+              latest        = points[0]
+              recovery_arn  = latest['RecoveryPointArn']
+              source_efs_id = latest['ResourceArn'].split('/')[-1]
+              backup_size   = latest.get('BackupSizeInBytes', 0)
+              logger.info(
+                  f'Latest EFS recovery point: {recovery_arn} source={source_efs_id} '
+                  f'created={latest["CreationDate"]} size={backup_size}B'
+              )
+              if backup_size < 10 * 1024 * 1024:
+                  logger.warning(
+                      f'Recovery point size is {backup_size}B — this is likely an incremental backup. '
+                      f'If the DR vault is missing intermediate recovery points, the restore will not '
+                      f'reflect the full live EFS state. Ensure all incremental backups are copied cross-region.'
+                  )
+              meta_resp = backup.get_recovery_point_restore_metadata(
+                  BackupVaultName=vault_name,
+                  RecoveryPointArn=recovery_arn,
+              )
+              metadata = meta_resp.get('RestoreMetadata', {})
+              pascal_to_lower = {
+                  'PerformanceMode': 'performancemode',
+                  'Encrypted':       'encrypted',
+                  'KmsKeyId':        'kmskeyid',
+              }
+              for pascal, lower in pascal_to_lower.items():
+                  if pascal in metadata and lower not in metadata:
+                      metadata[lower] = metadata.pop(pascal)
+              # EFS restore API requires these keys — cross-region backup copies often omit
+              # them from RestoreMetadata, so we inject safe defaults when absent.
+              if 'performancemode' not in metadata:
+                  metadata['performancemode'] = 'generalPurpose'
+              if 'encrypted' not in metadata:
+                  # Default to encrypted — AWS-managed EFS keys have no KmsKeyId in restore metadata,
+                  # so absence of a key does NOT mean unencrypted. Safer to default true.
+                  metadata['encrypted'] = 'true'
+              metadata['newFileSystem'] = 'true'
+              metadata['creationtoken'] = f'{source_efs_id}-dr-{int(time.time())}'
+              resp   = backup.start_restore_job(
+                  RecoveryPointArn=recovery_arn,
+                  Metadata=metadata,
+                  IamRoleArn=backup_role_arn,
+                  ResourceType='EFS',
+              )
+              job_id = resp['RestoreJobId']
+              logger.info(f'EFS restore job started: {job_id}')
+              return {'restore_job_id': job_id}
+
+
+          # ── check_restore_job ─────────────────────────────────────────────────
+
+          def _check_restore_job(event):
+              region        = os.environ['AWS_REGION']
+              job_id        = event.get('restore_job_id', '')
+              ssm_path      = event.get('efs_id_ssm_path', '')
+              network_stack = event.get('network_stack_name', '')
+              app_stack     = event.get('app_stack_name', '')
+              backup        = boto3.client('backup', region_name=region)
+              resp          = backup.describe_restore_job(RestoreJobId=job_id)
+              status        = resp['Status']
+              if status in ('FAILED', 'ABORTED', 'EXPIRED'):
+                  raise Exception(f'EFS restore job {job_id} failed: {resp.get("StatusMessage", "")} (status={status})')
+              complete = status == 'COMPLETED'
+              efs_id   = ''
+              if complete:
+                  created_arn = resp.get('CreatedResourceArn', '')
+                  efs_id      = created_arn.split('/')[-1] if created_arn else ''
+                  logger.info(f'EFS restore COMPLETED: efs_id={efs_id}')
+                  if efs_id and network_stack:
+                      cf    = boto3.client('cloudformation', region_name=region)
+                      sg_id = _get_stack_output(cf, app_stack, 'EFSStandbySecurityGroupId') if app_stack else ''
+                      _create_efs_mount_targets(region, efs_id, network_stack, sg_id, cf=cf)
+                  if efs_id:
+                      _tag_efs(region, efs_id, app_stack)
+                  if ssm_path and efs_id:
+                      ssm = boto3.client('ssm', region_name=region)
+                      ssm.put_parameter(Name=ssm_path, Value=efs_id, Type='String', Overwrite=True)
+                      logger.info(f'SSM {ssm_path} = {efs_id}')
+              return {
+                  'restore_job_id':   job_id,
+                  'restore_complete': complete,
+                  'restore_status':   status,
+                  'efs_id':           efs_id,
+              }
+
+
           # ── update_stack ──────────────────────────────────────────────────────
 
           def _update_stack_action(event):
@@ -433,6 +594,49 @@ Resources:
                       snaps.sort(key=lambda x: x['SnapshotCreateTime'], reverse=True)
                       return snaps[0]['SnapshotIdentifier']
               raise Exception(f'No available Redshift snapshots for: {cluster_id}')
+
+          def _get_stack_output(cf, stack_name, output_key):
+              resp = cf.describe_stacks(StackName=stack_name)
+              for o in resp['Stacks'][0].get('Outputs', []):
+                  if o['OutputKey'] == output_key:
+                      return o['OutputValue']
+              return ''
+
+          def _tag_efs(region, efs_id, app_stack_name):
+              efs_client = boto3.client('efs', region_name=region)
+              name = f'{app_stack_name}-efs' if app_stack_name else efs_id
+              try:
+                  efs_client.tag_resource(
+                      ResourceId=efs_id,
+                      Tags=[
+                          {'Key': 'Name',        'Value': name},
+                          {'Key': 'Environment', 'Value': 'DR'},
+                          {'Key': 'ManagedBy',   'Value': 'dr-failover-v2'},
+                      ],
+                  )
+                  logger.info(f'Tagged EFS {efs_id} with Name={name}')
+              except Exception:
+                  logger.warning(f'Failed to tag EFS {efs_id}', exc_info=True)
+
+          def _create_efs_mount_targets(region, efs_id, network_stack, sg_id, cf=None):
+              if cf is None:
+                  cf         = boto3.client('cloudformation', region_name=region)
+              efs_client = boto3.client('efs', region_name=region)
+              subnet1    = _get_stack_output(cf, network_stack, 'InternalSubnetId1')
+              subnet2    = _get_stack_output(cf, network_stack, 'InternalSubnetId2')
+              for subnet_id in [s for s in [subnet1, subnet2] if s]:
+                  try:
+                      mt = efs_client.create_mount_target(
+                          FileSystemId=efs_id,
+                          SubnetId=subnet_id,
+                          SecurityGroups=[sg_id] if sg_id else [],
+                      )
+                      logger.info(f'EFS mount target created: {mt["MountTargetId"]} subnet={subnet_id}')
+                  except ClientError as e:
+                      if e.response['Error']['Code'] == 'MountTargetConflict':
+                          logger.warning(f'Mount target already exists in subnet {subnet_id}')
+                      else:
+                          raise
 
           def _find_latest_ami(region, org_name, app_name):
               ec2  = boto3.client('ec2', region_name=region)
@@ -563,9 +767,9 @@ Resources:
                       params.append({'ParameterKey': key, 'ParameterValue': str(extra_params[key])})
                   else:
                       params.append({'ParameterKey': key, 'UsePreviousValue': True})
-              for key, val in extra_params.items():
+              for key in extra_params:
                   if key not in current:
-                      params.append({'ParameterKey': key, 'ParameterValue': str(val)})
+                      logger.warning(f'[UPDATE_STACK] Skipping {key!r} — not a parameter in the deployed template of {stack_name}')
 
               caps = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
               if template_url:
@@ -747,25 +951,104 @@ Resources:
                 "pitr_endpoint_ssm_path.$": "$.pitr_endpoint_ssm_path"
               },
               "ResultPath": "$.secrets_result",
-              "Next": "UpdateAppStackPITR",
+              "Next": "CheckEFSRecoveryPoint",
               "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
             },
 
-            "UpdateAppStackPITR": {
-              "Comment": "Update app stack with IsPITRMode=true. DBStack suppressed — app connects to PITR instance.",
+            "CheckEFSRecoveryPoint": {
+              "Comment": "Find the latest completed EFS recovery point in the DR backup vault. Falls through to SetNoEFS on any error so missing vault/keys never abort the failover.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
-                "action":      "update_stack",
-                "stack_type":  "app",
+                "action":                   "check_efs_recovery_point",
+                "efs_backup_vault_name.$":  "$.efs_backup_vault_name"
+              },
+              "ResultPath": "$.efs_check",
+              "Next": "EFSCheckRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 2, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "SetNoEFS", "ResultPath": "$.efs_check_error"}]
+            },
+
+            "EFSCheckRoute": {
+              "Comment": "Branch: restore from recovery point, or skip and let app stack create a fresh EFS.",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.efs_check.efs_found", "BooleanEquals": true, "Next": "RestoreEFS"}
+              ],
+              "Default": "SetNoEFS"
+            },
+
+            "SetNoEFS": {
+              "Comment": "No recovery point found (or vault not configured) — pass empty efs_id so TreasuryServerStack creates a fresh EFS.",
+              "Type": "Pass",
+              "Result": {"efs_id": ""},
+              "ResultPath": "$.efs_result",
+              "Next": "UpdateAppStackPITR"
+            },
+
+            "RestoreEFS": {
+              "Comment": "Start AWS Backup restore job. Dynamically fetches the latest completed EFS recovery point from the DR vault. newFileSystem=true — always creates a brand-new file system ID.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":               "restore_efs",
+                "backup_role_arn.$":    "$.backup_role_arn",
+                "backup_vault_name.$":  "$.efs_backup_vault_name"
+              },
+              "ResultPath": "$.efs_restore",
+              "Next": "WaitEFSRestore",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 2, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitEFSRestore": {
+              "Comment": "EFS restore typically takes 2-5 minutes — poll every 60 seconds.",
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckRestoreJob"
+            },
+
+            "CheckRestoreJob": {
+              "Comment": "Poll restore job. On COMPLETED: (1) reads EFSStandbySecurityGroupId from app stack CFN output, (2) creates mount targets in InternalSubnetId1/2, (3) writes restored EFS ID to SSM. NFS ingress rules on EFSStandbySecurityGroup are NOT set here — AllowExternalEFSConnectionFromAppServer in appserver-basic2.yaml handles them automatically during the subsequent app stack update.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":               "check_restore_job",
+                "restore_job_id.$":     "$.efs_restore.restore_job_id",
+                "efs_id_ssm_path.$":    "$.efs_id_ssm_path",
+                "network_stack_name.$": "$.network_stack_name",
+                "app_stack_name.$":     "$.app_stack_name"
+              },
+              "ResultPath": "$.efs_result",
+              "Next": "EFSRestoreDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 1.5}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "EFSRestoreDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.efs_result.restore_complete", "BooleanEquals": true, "Next": "UpdateAppStackPITR"}
+              ],
+              "Default": "WaitEFSRestore"
+            },
+
+            "UpdateAppStackPITR": {
+              "Comment": "Update app stack with IsPITRMode=true. DBStack suppressed — app connects to PITR instance. ExternalEFSId set to restored EFS ID (or empty string to create fresh EFS).",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "update_stack",
+                "stack_type":   "app",
                 "stack_name.$": "$.app_stack_name",
                 "extra_params": {
                   "DeployPaidResources": "true",
-                  "IsPITRMode":          "true"
-                },
-                "pitr_endpoint.$":   "$.pitr_status.db_endpoint",
-                "instance_ami.$":    "$.discovered.instance_ami"
+                  "IsPITRMode":          "true",
+                  "PITRDBEndpoint.$":    "$.pitr_status.db_endpoint",
+                  "InstanceAMI.$":       "$.discovered.instance_ami",
+                  "ExternalEFSId.$":     "$.efs_result.efs_id"
+                }
               },
               "ResultPath": "$.app_update",
               "Next": "WaitAppStack",
@@ -778,17 +1061,17 @@ Resources:
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
-                "action":      "update_stack",
-                "stack_type":  "app",
+                "action":       "update_stack",
+                "stack_type":   "app",
                 "stack_name.$": "$.app_stack_name",
                 "extra_params": {
-                  "DeployPaidResources": "true",
-                  "IsPITRMode":          "false"
-                },
-                "snapshot_identifier.$":          "$.discovered.snapshot_identifier",
-                "db_master_password.$":           "$.discovered.db_master_password",
-                "instance_ami.$":                 "$.discovered.instance_ami",
-                "redshift_snapshot_identifier.$": "$.discovered.redshift_snapshot_identifier"
+                  "DeployPaidResources":           "true",
+                  "IsPITRMode":                    "false",
+                  "SnapshotIdentifier.$":          "$.discovered.snapshot_identifier",
+                  "DBMasterUserPassword.$":        "$.discovered.db_master_password",
+                  "InstanceAMI.$":                 "$.discovered.instance_ami",
+                  "RedshiftSnapshotIdentifier.$":  "$.discovered.redshift_snapshot_identifier"
+                }
               },
               "ResultPath": "$.app_update",
               "Next": "WaitAppStack",
@@ -893,3 +1176,9 @@ Outputs:
     Value: !Ref StateMachineLogGroup
     Export:
       Name: !Sub '${AWS::StackName}-StateMachineLogGroup'
+
+  BackupRestoreRoleArn:
+    Description: IAM role ARN that AWS Backup assumes when performing EFS restores — use as backup_role_arn in state machine input
+    Value: !GetAtt BackupRestoreRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BackupRestoreRoleArn'

@@ -107,7 +107,7 @@ These set up the EFS backup pipeline needed for the next task:
 | PITR DB restore via Step Functions | Bug fixed — **not yet re-tested after fix** |
 | Snapshot DB restore (fallback path) | Should work — not re-tested after Step Functions rewrite |
 | EFS backup → DR vault pipeline | Set up by team — recovery points exist |
-| EFS restore at failover | **Not implemented — next task** |
+| EFS restore at failover | **Implemented** — CheckEFSRecoveryPoint → RestoreEFS → CheckRestoreJob states in dr-failover-v2.yaml; handler.py actions: check_efs_recovery_point, restore_efs, check_restore_job |
 | App servers (ASG, ALB, ElastiCache) | Should work once DB is up |
 | Secrets Manager + SSM endpoint update | Implemented, not tested end-to-end |
 
@@ -122,85 +122,46 @@ aws rds describe-db-instance-automated-backups \
 
 ---
 
-## Next Task — EFS Restore from AWS Backup
+## EFS Restore — Completed
 
-### Problem
+### What was implemented
 
-When `DeployPaidResources=true` is set, `TreasuryServerStack` (via `appserver-basic2.yaml`) always creates a **fresh empty EFS**. The DR vault has EFS recovery points but the failover state machine never calls AWS Backup to restore them.
+`dr-failover-v2.yaml` + `dr-failover-v2/handler.py` now fully restore EFS from AWS Backup before the app stack update. `pesonet20.yaml` passes the restored EFS ID to `TreasuryServerStack` via `ExternalEFSId`.
 
-### Agreed approach — Conditional restore before app stack update (Option 1)
-
-Same pattern as PITR DB restore. Add steps to the state machine:
+**State machine flow (inserted between UpdateSecrets and UpdateAppStackPITR):**
 
 ```
-CheckEFSRecoveryPoint (backup:ListRecoveryPointsByBackupVault)
-  ├─ recovery point found
-  │    → RestoreEFS (backup:StartRestoreJob, newFileSystem=true)
-  │    → WaitRestoreJob — poll backup:DescribeRestoreJob until COMPLETED
-  │    → Write restored EFS ID to SSM Parameter Store
-  │    → App stack update passes EFS ID to TreasuryServerStack
-  │       TreasuryServerStack uses existing EFS, skips creation
-  │
-  └─ no recovery point
-       → Skip EFS restore
-       → App stack creates fresh EFS as normal (no behavior change)
+CheckEFSRecoveryPoint → EFSCheckRoute
+  ├─ efs_found=true  → RestoreEFS → WaitEFSRestore (60s) → CheckRestoreJob
+  │                                  └──────────────────────────────────┘ (poll loop)
+  │                                        ↓ restore_complete=true → UpdateAppStackPITR
+  └─ efs_found=false → SetNoEFS ($.efs_result.efs_id = "") → UpdateAppStackPITR
 ```
 
-### Files to change
+**Lambda actions added:**
 
-| File | Change needed |
+| Action | What it does |
 |---|---|
-| `dr-failover-v2.yaml` + `dr-failover-v2/handler.py` | Add `check_efs_recovery_point`, `restore_efs`, `check_restore_job` Lambda actions + state machine states |
-| `pesonet/pesonet20.yaml` | Add `ExternalEFSId` parameter (default `''`) passed to `TreasuryServerStack` |
-| `common/appserver-basic2.yaml` | Add `ExternalEFSId` parameter — if blank, create new EFS; if provided, skip creation and use existing |
+| `check_efs_recovery_point` | Queries DR vault, filters COMPLETED EFS recovery points, returns latest by CreationDate. Returns `efs_found: false` gracefully if vault missing/empty. |
+| `restore_efs` | Calls `backup.start_restore_job` with `newFileSystem=true`. Returns `restore_job_id`. |
+| `check_restore_job` | Polls job. On COMPLETED: looks up `EFSStandbySecurityGroupId` from app stack output, creates mount targets in InternalSubnetId1/2, writes EFS ID to SSM. |
 
-### AWS Backup APIs
+**EFS SG — no manual rule management needed:**
+`AllowExternalEFSConnectionFromAppServer` (Condition: `UseExternalEFS`) in `appserver-basic2.yaml` automatically adds NFS (2049) ingress from each app server SG (Treasury, API, Sidekiq, CS) to `EFSStandbySecurityGroup` during the app stack update. Identical to live region.
 
-```python
-# 1. Find latest EFS recovery point in DR vault
-backup.list_recovery_points_by_backup_vault(
-    BackupVaultName='pchc-tdr-ue2-pesonet20-vault',
-    ByResourceType='EFS'
-)
-# Filter: Status = 'COMPLETED', sort by CreationDate desc, take [0]
-
-# 2. Start restore job
-backup.start_restore_job(
-    RecoveryPointArn='<arn>',
-    Metadata={
-        'file-system-id': '<source-efs-id>',   # from recovery point metadata
-        'Encrypted': 'true',
-        'PerformanceMode': 'generalPurpose',
-        'newFileSystem': 'true',
-    },
-    IamRoleArn='<backup-restore-role-arn>',
-    ResourceType='EFS'
-)
-
-# 3. Poll until done
-backup.describe_restore_job(RestoreJobId='<job-id>')
-# .Status: 'RUNNING' | 'COMPLETED' | 'FAILED'
-# .CreatedResourceArn: arn:aws:elasticfilesystem:us-east-2:...:file-system/fs-xxxxxxxxx
-```
-
-### Input payload additions (state machine input)
-
+**Input payload keys (PITR path only — omit to skip EFS restore):**
 ```json
 {
   "efs_backup_vault_name": "pchc-tdr-ue2-pesonet20-vault",
   "efs_id_ssm_path":       "/pchc/tdr/pesonet20/pitr-efs-id",
-  "backup_role_arn":       "arn:aws:iam::050821737631:role/<backup-restore-role>"
+  "backup_role_arn":       "<BackupRestoreRoleArn output from dr-failover-v2 stack>"
 }
 ```
 
-### Critical gotcha — EFS restore always creates a new file system ID
-
-AWS Backup EFS restore always creates a brand-new file system with a new ID. You cannot restore into an existing EFS. The new ID must be:
-1. Written to SSM before app stack update
-2. Passed as `ExternalEFSId` to `TreasuryServerStack`
-3. `appserver-basic2.yaml` must skip EFS creation when `ExternalEFSId` is provided
-
-Also verify: does `TreasuryServerStack` still output `AppServerEFSSecurityGroup` when using an existing EFS? If `appserver-basic2.yaml` ties the SG creation to EFS creation, the other server stacks that receive `ExternalEFSSecurityGroup` from `TreasuryServerStack` will need separate handling.
+**Files changed:**
+- `dr-failover-v2.yaml` — `BackupRestoreRole` IAM resource, `BackupRestoreRoleArn` output, 7 new state machine states
+- `dr-failover-v2/handler.py` — 3 new actions + `_get_stack_output` + `_create_efs_mount_targets` helpers
+- `pesonet/pesonet20.yaml` — `ExternalEFSId` param, `EFSStandbySecurityGroup` resource (IsDR), `EFSStandbySecurityGroupId` output
 
 ---
 
