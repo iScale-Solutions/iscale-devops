@@ -41,6 +41,9 @@ Metadata:
           - EnableCrossRegionBackupReplication
           - SourceDbInstanceArn
           - BackupReplicationRetentionPeriod
+          - LiveSecretArn
+          - IsPITRMode
+          - PITRDBEndpoint
 
     ParameterLabels:
       Name:
@@ -81,6 +84,12 @@ Metadata:
         default: Source DB Instance ARN (live region — required when replication is enabled)
       BackupReplicationRetentionPeriod:
         default: Backup Retention Period in DR region (days)
+      LiveSecretArn:
+        default: Live Region Secret ARN (DR standby only — required for secrets sync)
+      IsPITRMode:
+        default: PITR Mode (set by dr-failover-v2 only — do not change manually)
+      PITRDBEndpoint:
+        default: PITR DB Endpoint (set by dr-failover-v2 only — do not change manually)
 
 Parameters:
   Name:
@@ -207,6 +216,31 @@ Parameters:
     Default: 7
     MinValue: 1
     MaxValue: 35
+  LiveSecretArn:
+    Description: |
+      ARN of the live region Secrets Manager secret to replicate from.
+      Obtain from the live stack Secrets Manager console.
+      Only required when deploying in DR (ProductionDR) — leave blank for normal deployments.
+    Type: String
+    Default: ''
+  IsPITRMode:
+    Description: |
+      Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
+      When true, DBStack is suppressed (DB was restored externally via PITR) and all DB references
+      resolve from PITRDBEndpoint and the pre-deployed DBStandbySecurityGroup instead of DBStack outputs.
+      Default false — live stacks and snapshot-based failover are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  PITRDBEndpoint:
+    Description: |
+      Endpoint of the PITR-restored RDS instance. Written to SSM and Secrets Manager by the
+      dr-failover Step Functions machine before the app stack update. Only used when IsPITRMode=true.
+      Leave blank for all other deployments — existing stacks are unaffected.
+    Type: String
+    Default: ''
 
 Mappings:
   Fn::Transform:
@@ -239,9 +273,31 @@ Conditions:
   IsNotProdAndDeployPaidResources: !And
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
+  IsNotProdAndDeployPaidResourcesAndNotDR: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
+    - !Not [Condition: IsDR]
   IsProdOrProductionDRAndDeployPaidResources: !And
     - Condition: IsProdOrProductionDR
     - Condition: IsDeployPaidResources
+  IsDashboardDeployed: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResources
+  IsPITRMode: !Equals [!Ref IsPITRMode, 'true']
+  # DBStack and its dependents are suppressed when PITR mode is active — DB was restored externally.
+  IsDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsDeployPaidResources
+    - !Not [{Condition: IsPITRMode}]
+  IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
+  IsDashboardDeployedAndNotPITR: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
+  IsSFTPDeployed: !Or
+    - Condition: IsProd
+    - !Equals [!Ref EnvName, ProductionDR]
+    - !Equals [!Ref EnvName, TestDR]
 
 Resources:
 
@@ -261,6 +317,7 @@ Resources:
         DeployPaidResources: !Ref DeployPaidResources
 
   DBStack:
+    # Suppressed when IsPITRMode=true — DB was restored externally via PITR by dr-failover Step Functions.
     Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
