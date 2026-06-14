@@ -291,7 +291,7 @@ def _restore_efs(event):
         Metadata=metadata,
         IamRoleArn=backup_role_arn,
         ResourceType='EFS',
-        CopySourceTagsToDestination=True,
+        CopySourceTagsToRestoredResource=True,
     )
     job_id = resp['RestoreJobId']
     logger.info(f'EFS restore job started: {job_id}')
