@@ -281,6 +281,13 @@ def _restore_efs(event):
     # Always force true: EFS encryption is a one-way door (cannot encrypt after creation).
     metadata.pop('Encrypted', None)
     metadata['encrypted'] = 'true'
+    # AWS Backup requires kmskeyid when encrypted=true. If the source had no explicit
+    # CMK (unencrypted or default AWS-managed key), look up the AWS-managed EFS key.
+    if 'kmskeyid' not in metadata:
+        kms      = boto3.client('kms', region_name=region)
+        key_info = kms.describe_key(KeyId='alias/aws/elasticfilesystem')
+        metadata['kmskeyid'] = key_info['KeyMetadata']['Arn']
+        logger.info(f'Using AWS-managed EFS key: {metadata["kmskeyid"]}')
     if 'performancemode' not in metadata:
         metadata['performancemode'] = 'generalPurpose'
     metadata['newFileSystem'] = 'true'
