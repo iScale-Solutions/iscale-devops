@@ -32,6 +32,10 @@ Metadata:
           - ContainerImageUri
           # - EnvBucket
           - ContainerPort
+      - Label:
+          default: Disaster Recovery
+        Parameters:
+          - DeployPaidResources
 
     ParameterLabels:
       Name:
@@ -66,6 +70,8 @@ Metadata:
       #   default: Env Bucket Name
       ContainerPort:
         default: Container Port
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
 
 Parameters:
   Name:
@@ -86,10 +92,14 @@ Parameters:
     Type: String
     Default: Staging
     AllowedValues:
-      - Production #Prod
-      - Staging #Pre-production
-      - Development #Regular day to day commit / deplay
+      - Production
+      - Staging
+      - Development
       - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
@@ -126,9 +136,9 @@ Parameters:
     Type: String
     Default: arn:aws:acm:us-west-2:050821737631:certificate/715bd527-40f0-4b1c-9da6-5880131ac2a9
   MinContainers:
-    Description: Minimum running containers. 
+    Description: Minimum running containers.
     Type: Number
-    Default: 2
+    Default: 0
   MaxContainers:
     Description: Maximum running containers. 
     Type: Number
@@ -147,7 +157,17 @@ Parameters:
   #   Default: 'pchc-test-ase1-smartportal-prereq-env-bucket'
   ContainerPort:
     Type: Number
-    Default: 80    
+    Default: 80
+  DeployPaidResources:
+    Description: |
+      true (default): Deploy all paid resources — ALB and DNS. Normal operation.
+      false: DR standby mode — suppress ALB and DNS. ECS service stays deployed with 0 containers.
+      DR failover: set back to true to activate ALB, DNS, and full ECS service.
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
 
 Mappings: 
   Fn::Transform:
@@ -161,6 +181,12 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasSubDomainName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsDR: !Or
+    - !Equals [!Ref EnvName, ProductionDR]
+    - !Equals [!Ref EnvName, StagingDR]
+    - !Equals [!Ref EnvName, DevelopmentDR]
+    - !Equals [!Ref EnvName, TestDR]
 
 Resources:
 
@@ -194,6 +220,7 @@ Resources:
         TgStickinessAppCookieName: pchc
         TgStickinessAppCookieDuration: 86400
         TgDeregistrationDelay: 5
+        DeployPaidResources: !Ref DeployPaidResources
 
 ###
 # FRONTEND SECTION (SMART PORTAL)
@@ -295,11 +322,11 @@ Resources:
       DeploymentConfiguration:
         MinimumHealthyPercent: 50
         MaximumPercent: 200
-      DesiredCount: 1
+      DesiredCount: !If [IsDR, 0, 1]
       # This may need to be adjusted if the container takes a while to start up
       HealthCheckGracePeriodSeconds: 10
       LaunchType: FARGATE
-      NetworkConfiguration: 
+      NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
           Subnets:
@@ -309,13 +336,15 @@ Resources:
                 !Sub "${NetworkStackName}-PrivateSubnetId2"
           SecurityGroups:
             - !Ref ContainerSecurityGroup0
-      LoadBalancers:
-        - ContainerName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, container]]
-          ContainerPort: !Ref ContainerPort
-          TargetGroupArn:
-            Fn::GetAtt:
-              - ELBStack
-              - Outputs.ApplicationTargetGroup
+      LoadBalancers: !If
+        - IsDeployPaidResources
+        - - ContainerName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, container]]
+            ContainerPort: !Ref ContainerPort
+            TargetGroupArn:
+              Fn::GetAtt:
+                - ELBStack
+                - Outputs.ApplicationTargetGroup
+        - !Ref 'AWS::NoValue'
 
   # Container security group
   ContainerSecurityGroup0:
@@ -328,7 +357,7 @@ Resources:
           !Sub "${NetworkStackName}-VpcId"
       SecurityGroupIngress:
         - FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort  
+          ToPort: !Ref ContainerPort
           IpProtocol: tcp
           # CidrIp: 0.0.0.0/0
           SourceSecurityGroupId:
@@ -400,6 +429,7 @@ Resources:
 
   # Add DNS record for the frontend portal
   DNSRecord:
+    Condition: IsDeployPaidResources
     DependsOn:
       - ELBStack
     Type: AWS::Route53::RecordSetGroup
@@ -457,6 +487,7 @@ Resources:
           
 Outputs:
   ApplicationLoadBalancerDNSName:
+    Condition: IsDeployPaidResources
     Description: DNS name of the Application Load Balancer
     Value:
       Fn::GetAtt:
@@ -464,6 +495,7 @@ Outputs:
         - Outputs.DNSName
 
   Endpoint:
+    Condition: IsDeployPaidResources
     Description: Endpoint URL
     Value: !Join ['', ['https://', !Ref DNSRecord]]
 
