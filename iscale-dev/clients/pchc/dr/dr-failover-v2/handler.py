@@ -22,13 +22,16 @@ ROLLBACK_STATES = {
 
 def handler(event, context):
     action = event.get('action', '')
-    if action == 'discover':           return _discover(event)
-    if action == 'pitr_restore':        return _pitr_restore(event)
-    if action == 'check_db_status':     return _check_db_status(event)
-    if action == 'update_secrets':      return _update_secrets(event)
-    if action == 'update_stack':        return _update_stack_action(event)
-    if action == 'check_stack_status':  return _check_stack_status(event)
-    if action == 'notify':              return _notify(event)
+    if action == 'discover':                  return _discover(event)
+    if action == 'pitr_restore':              return _pitr_restore(event)
+    if action == 'check_db_status':           return _check_db_status(event)
+    if action == 'update_secrets':            return _update_secrets(event)
+    if action == 'check_efs_recovery_point':  return _check_efs_recovery_point(event)
+    if action == 'restore_efs':               return _restore_efs(event)
+    if action == 'check_restore_job':         return _check_restore_job(event)
+    if action == 'update_stack':              return _update_stack_action(event)
+    if action == 'check_stack_status':        return _check_stack_status(event)
+    if action == 'notify':                    return _notify(event)
     raise ValueError(f'Unknown action: {action!r}')
 
 
@@ -182,6 +185,171 @@ def _update_secrets(event):
     return {'secrets_updated': True, 'db_endpoint': db_endpoint}
 
 
+# ── check_efs_recovery_point ──────────────────────────────────────────
+
+def _check_efs_recovery_point(event):
+    """
+    Lists completed EFS recovery points in the DR backup vault.
+    Returns the latest one. Returns efs_found=False (no error) when the vault
+    has no completed EFS recovery points — the state machine falls through to
+    create a fresh EFS instead.
+    """
+    region     = os.environ['AWS_REGION']
+    vault_name = event.get('efs_backup_vault_name', '')
+    if not vault_name:
+        logger.info('No efs_backup_vault_name in event — skipping EFS restore.')
+        return {'efs_found': False, 'recovery_point_arn': '', 'source_efs_id': ''}
+    backup = boto3.client('backup', region_name=region)
+    resp   = backup.list_recovery_points_by_backup_vault(
+        BackupVaultName=vault_name,
+        ByResourceType='EFS',
+    )
+    points = [p for p in resp.get('RecoveryPoints', []) if p.get('Status') == 'COMPLETED']
+    if not points:
+        logger.info(f'No completed EFS recovery points in vault: {vault_name}')
+        return {'efs_found': False, 'recovery_point_arn': '', 'source_efs_id': ''}
+    points.sort(key=lambda p: p['CreationDate'], reverse=True)
+    latest        = points[0]
+    # ResourceArn format: arn:aws:elasticfilesystem:<region>:<account>:file-system/fs-xxx
+    source_efs_id = latest['ResourceArn'].split('/')[-1]
+    logger.info(f'Latest EFS recovery point: {latest["RecoveryPointArn"]} source={source_efs_id}')
+    return {
+        'efs_found':          True,
+        'recovery_point_arn': latest['RecoveryPointArn'],
+        'source_efs_id':      source_efs_id,
+    }
+
+
+# ── restore_efs ───────────────────────────────────────────────────────
+
+def _restore_efs(event):
+    """
+    Dynamically fetches the latest completed EFS recovery point from the DR vault
+    (same region as this Lambda), then starts an AWS Backup restore job that creates
+    a brand-new EFS file system (newFileSystem=true). Returns the restore job ID.
+    Mount targets are created by _check_restore_job once the job completes.
+    """
+    import time
+    region          = os.environ['AWS_REGION']
+    vault_name      = event.get('backup_vault_name', '') or event.get('efs_backup_vault_name', '')
+    backup_role_arn = event.get('backup_role_arn', '')
+    if not vault_name or not backup_role_arn:
+        raise ValueError('backup_vault_name and backup_role_arn are required for EFS restore.')
+
+    backup = boto3.client('backup', region_name=region)
+
+    # Dynamically fetch the latest completed EFS recovery point from the DR vault.
+    resp   = backup.list_recovery_points_by_backup_vault(
+        BackupVaultName=vault_name,
+        ByResourceType='EFS',
+    )
+    points = [p for p in resp.get('RecoveryPoints', []) if p.get('Status') == 'COMPLETED']
+    if not points:
+        raise Exception(f'No completed EFS recovery points found in vault: {vault_name} (region={region})')
+    points.sort(key=lambda p: p['CreationDate'], reverse=True)
+    latest        = points[0]
+    recovery_arn  = latest['RecoveryPointArn']
+    source_efs_id = latest['ResourceArn'].split('/')[-1]
+    backup_size   = latest.get('BackupSizeInBytes', 0)
+    logger.info(
+        f'Latest EFS recovery point: {recovery_arn} source={source_efs_id} '
+        f'created={latest["CreationDate"]} size={backup_size}B'
+    )
+    if backup_size < 10 * 1024 * 1024:  # < 10 MB
+        logger.warning(
+            f'Recovery point size is {backup_size}B — this is likely an incremental backup. '
+            f'If the DR vault is missing intermediate recovery points, the restore will not '
+            f'reflect the full live EFS state. Ensure all incremental backups are copied cross-region.'
+        )
+
+    meta_resp = backup.get_recovery_point_restore_metadata(
+        BackupVaultName=vault_name,
+        RecoveryPointArn=recovery_arn,
+    )
+    metadata = meta_resp.get('RestoreMetadata', {})
+    # EFS restore API requires lowercase keys; get_recovery_point_restore_metadata
+    # returns PascalCase (e.g. PerformanceMode, Encrypted, KmsKeyId) — normalize them.
+    pascal_to_lower = {
+        'PerformanceMode': 'performancemode',
+        'KmsKeyId':        'kmskeyid',
+    }
+    for pascal, lower in pascal_to_lower.items():
+        if pascal in metadata and lower not in metadata:
+            metadata[lower] = metadata.pop(pascal)
+    # Drop whatever the source says about Encrypted — cross-region backup copies
+    # sometimes return Encrypted=false even when the source was encrypted.
+    # Always force true: EFS encryption is a one-way door (cannot encrypt after creation).
+    metadata.pop('Encrypted', None)
+    metadata['encrypted'] = 'true'
+    # AWS Backup requires kmskeyid when encrypted=true. If the source had no explicit
+    # CMK (unencrypted or default AWS-managed key), look up the AWS-managed EFS key.
+    if 'kmskeyid' not in metadata:
+        kms      = boto3.client('kms', region_name=region)
+        key_info = kms.describe_key(KeyId='alias/aws/elasticfilesystem')
+        metadata['kmskeyid'] = key_info['KeyMetadata']['Arn']
+        logger.info(f'Using AWS-managed EFS key: {metadata["kmskeyid"]}')
+    if 'performancemode' not in metadata:
+        metadata['performancemode'] = 'generalPurpose'
+    metadata['newFileSystem'] = 'true'
+    metadata['creationtoken'] = f'{source_efs_id}-dr-{int(time.time())}'
+
+    resp   = backup.start_restore_job(
+        RecoveryPointArn=recovery_arn,
+        Metadata=metadata,
+        IamRoleArn=backup_role_arn,
+        ResourceType='EFS',
+        CopySourceTagsToRestoredResource=True,
+    )
+    job_id = resp['RestoreJobId']
+    logger.info(f'EFS restore job started: {job_id}')
+    return {'restore_job_id': job_id}
+
+
+# ── check_restore_job ─────────────────────────────────────────────────
+
+def _check_restore_job(event):
+    """
+    Polls an AWS Backup restore job. When COMPLETED:
+    - Extracts the new EFS file system ID from CreatedResourceArn
+    - Creates EFS mount targets in the DR VPC private subnets (InternalSubnetId1/2)
+    - Writes the EFS ID to SSM so the app stack can read it via {{resolve:ssm:...}}
+    AWS Backup EFS restore creates a new file system without mount targets —
+    we must create them here before the app stack update.
+    """
+    region        = os.environ['AWS_REGION']
+    job_id        = event.get('restore_job_id', '')
+    ssm_path      = event.get('efs_id_ssm_path', '')
+    network_stack = event.get('network_stack_name', '')
+    app_stack     = event.get('app_stack_name', '')
+    backup        = boto3.client('backup', region_name=region)
+    resp          = backup.describe_restore_job(RestoreJobId=job_id)
+    status        = resp['Status']
+    if status in ('FAILED', 'ABORTED', 'EXPIRED'):
+        raise Exception(f'EFS restore job {job_id} failed: {resp.get("StatusMessage", "")} (status={status})')
+    complete = status == 'COMPLETED'
+    efs_id   = ''
+    if complete:
+        created_arn = resp.get('CreatedResourceArn', '')
+        efs_id      = created_arn.split('/')[-1] if created_arn else ''
+        logger.info(f'EFS restore COMPLETED: efs_id={efs_id}')
+        if efs_id and network_stack:
+            cf    = boto3.client('cloudformation', region_name=region)
+            sg_id = _get_stack_output(cf, app_stack, 'EFSStandbySecurityGroupId') if app_stack else ''
+            _create_efs_mount_targets(region, efs_id, network_stack, sg_id, cf=cf)
+        if efs_id:
+            _tag_efs(region, efs_id, app_stack)
+        if ssm_path and efs_id:
+            ssm = boto3.client('ssm', region_name=region)
+            ssm.put_parameter(Name=ssm_path, Value=efs_id, Type='String', Overwrite=True)
+            logger.info(f'SSM {ssm_path} = {efs_id}')
+    return {
+        'restore_job_id':   job_id,
+        'restore_complete': complete,
+        'restore_status':   status,
+        'efs_id':           efs_id,
+    }
+
+
 # ── update_stack ──────────────────────────────────────────────────────
 
 def _update_stack_action(event):
@@ -298,6 +466,61 @@ def _find_latest_redshift_snapshot(region, cluster_id):
             snaps.sort(key=lambda x: x['SnapshotCreateTime'], reverse=True)
             return snaps[0]['SnapshotIdentifier']
     raise Exception(f'No available Redshift snapshots for: {cluster_id}')
+
+
+def _get_stack_output(cf, stack_name, output_key):
+    resp = cf.describe_stacks(StackName=stack_name)
+    for o in resp['Stacks'][0].get('Outputs', []):
+        if o['OutputKey'] == output_key:
+            return o['OutputValue']
+    return ''
+
+
+def _tag_efs(region, efs_id, app_stack_name):
+    """
+    Tags the restored EFS file system. AWS Backup restore does not carry over
+    source tags — name and DR markers must be applied explicitly after restore.
+    """
+    efs_client = boto3.client('efs', region_name=region)
+    name = f'{app_stack_name}-efs' if app_stack_name else efs_id
+    try:
+        efs_client.tag_resource(
+            ResourceId=efs_id,
+            Tags=[
+                {'Key': 'Name',        'Value': name},
+                {'Key': 'Environment', 'Value': 'DR'},
+                {'Key': 'ManagedBy',   'Value': 'dr-failover-v2'},
+            ],
+        )
+        logger.info(f'Tagged EFS {efs_id} with Name={name}')
+    except Exception:
+        logger.warning(f'Failed to tag EFS {efs_id}', exc_info=True)
+
+
+def _create_efs_mount_targets(region, efs_id, network_stack, sg_id, cf=None):
+    """
+    Creates EFS mount targets in the InternalSubnet1/2 of the DR VPC.
+    appserver.yaml only creates mount targets for UseInternalEFS — for a restored
+    (external) EFS we must create them here before the app stack update launches instances.
+    """
+    if cf is None:
+        cf         = boto3.client('cloudformation', region_name=region)
+    efs_client = boto3.client('efs', region_name=region)
+    subnet1    = _get_stack_output(cf, network_stack, 'InternalSubnetId1')
+    subnet2    = _get_stack_output(cf, network_stack, 'InternalSubnetId2')
+    for subnet_id in [s for s in [subnet1, subnet2] if s]:
+        try:
+            mt = efs_client.create_mount_target(
+                FileSystemId=efs_id,
+                SubnetId=subnet_id,
+                SecurityGroups=[sg_id] if sg_id else [],
+            )
+            logger.info(f'EFS mount target created: {mt["MountTargetId"]} subnet={subnet_id}')
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'MountTargetConflict':
+                logger.warning(f'Mount target already exists in subnet {subnet_id}')
+            else:
+                raise
 
 
 def _find_latest_ami(region, org_name, app_name):
@@ -437,9 +660,9 @@ def _cfn_update(cf, stack_name, extra_params, template_url=None, preserve_yaml=F
             params.append({'ParameterKey': key, 'ParameterValue': str(extra_params[key])})
         else:
             params.append({'ParameterKey': key, 'UsePreviousValue': True})
-    for key, val in extra_params.items():
+    for key in extra_params:
         if key not in current:
-            params.append({'ParameterKey': key, 'ParameterValue': str(val)})
+            logger.warning(f'[UPDATE_STACK] Skipping {key!r} — not a parameter in the deployed template of {stack_name}')
 
     caps = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
     if template_url:

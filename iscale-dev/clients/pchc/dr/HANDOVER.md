@@ -1,163 +1,268 @@
 # PCHC DR — Handover Notes
 
-## Overview
-
-Two CloudFormation stacks handle DR automation for PCHC applications. They are independent — each is deployed once per app.
-
-| Stack | File | Purpose |
-|-------|------|---------|
-| `dr-failover` | `dr-failover.yaml` | Activates DR (sets `DeployPaidResources=true`) and tears it down (failback via `DeployPaidResources=false`). Triggered by EventBridge. Non-blocking Lambda. |
-| `dr-failback` | `dr-failback.yaml` | Orchestrates the full ordered failback sequence via Step Functions. Handles template patching + parameter updates in the correct order. |
+**Live region:** `us-west-2` (Oregon)
+**DR region:** `us-east-2` (Ohio)
+**Repo:** `iscale-devops` → `iscale-dev/clients/pchc/`
+**Account ID:** `050821737631`
 
 ---
 
-## dr-failover.yaml
+## DR Automation Stack Overview
 
-### What it does
-A Lambda + two EventBridge rules scoped to a specific `app_name`. Non-blocking — fires `update_stack` calls and returns immediately. CloudFormation provisions/deprovisions asynchronously.
-
-- **Failover**: sets `DeployPaidResources=true` on network stack first, then app stack. Auto-discovers latest DR AMI and RDS snapshot.
-- **Failback**: sets `DeployPaidResources=false` on app stack first, then network stack. Requires `confirm_failback=true` as a safety pin.
-
-### Trigger payloads
-
-**Failover via EventBridge:**
-```json
-{
-  "Source": "pchc.dr.failover",
-  "DetailType": "FailoverRequest",
-  "Detail": {
-    "app_name": "pesonet20",
-    "snapshot_identifier": "<rds-snapshot-arn-or-blank>",
-    "db_master_password": "<password-or-blank>"
-  }
-}
-```
-
-**Failback via EventBridge:**
-```json
-{
-  "Source": "pchc.dr.failover",
-  "DetailType": "FailbackRequest",
-  "Detail": {
-    "app_name": "pesonet20",
-    "confirm_failback": true
-  }
-}
-```
-
-**Direct Lambda invocation:**
-```json
-{ "mode": "failover", "snapshot_identifier": "<arn>", "db_master_password": "<pw>" }
-{ "mode": "failback", "confirm_failback": true }
-```
-
-### Notes
-- `snapshot_identifier` and `db_master_password` are auto-discovered if blank (requires `DBInstanceIdentifier` and `DRDBSecretArn` parameters set on the stack).
-- `UsePreviousTemplate=True` is intentional here — dr-failover never reads the template back, so format normalisation to JSON is harmless.
+| File | Deploy count | Purpose |
+|---|---|---|
+| `dr-failover.yaml` | Once per app | Per-app failover engine (Step Functions + Lambda). Has EventBridge rule embedded. |
+| `dr-failover-v2.yaml` | Once total | **App-agnostic engine — use this going forward.** All app config passed in event payload. |
+| `dr-failback.yaml` | Once total | Ordered teardown — Step Functions 4-step sequence (comment → set false → uncomment → network false). |
 
 ---
 
-## dr-failback.yaml
+## What Was Done — Failover PITR Session
 
-### What it does
-A Lambda + Step Functions Standard state machine that runs the full ordered failback sequence. Blocking — polls CloudFormation until each step is terminal before proceeding to the next.
+### 1. `dr-failover.yaml` — Converted from Lambda to Step Functions
 
-### Lambda source
-The Lambda code lives in two places that must be kept in sync:
-- `dr-failback/handler.py` — source of truth for development/review
-- `dr-failback.yaml` ZipFile — what actually gets deployed; must match `handler.py`
+Original was a single non-blocking Lambda (fire and forget). Rewritten as a **Step Functions state machine + worker Lambda** with two paths:
 
-### 4-step failback workflow (`action: "failback"`)
+- **PITR path** (`use_pitr=true`) — `restore-db-instance-to-point-in-time` with `UseLatestRestorableTime=True`, ~5 min RPO
+- **Snapshot path** (`use_pitr=false`) — original snapshot auto-discovery behavior, ~24h RPO (fallback)
+
+Both paths: network stack update → DB restore → update Secrets Manager + SSM → app stack update. Each step polled to completion.
+
+### 2. `dr-failover-v2.yaml` — New App-Agnostic Engine
+
+Same Step Functions logic as v1 but:
+- Deploy **once** (not 10 times for 10 apps)
+- All app config (stack names, DB IDs, PITR params) passed in **state machine input payload** at invocation time
+- Per-app EventBridge trigger rules will live in a future `dr-trigger-<app>.yaml`
+
+See `DR-FAILOVER-V2.md` for full details.
+
+### 3. `pesonet20.yaml` — PITR Mode Support Added
+
+Two new parameters with **safe defaults — live Singapore stacks are completely unaffected**:
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `IsPITRMode` | `'false'` | Suppresses `DBStack` when Step Functions sets `'true'` |
+| `PITRDBEndpoint` | `''` | PITR instance endpoint injected by Step Functions before app stack update |
+
+New conditions: `IsDeployPaidResourcesAndNotPITR`, `IsDashboardDeployedAndNotPITR`, etc.
+
+All `!GetAtt [DBStack, Outputs.xxx]` references wrapped with `!If [IsPITRMode, <pitr-value>, <cfn-value>]`:
+- `DatabaseEndpoint` → `PITRDBEndpoint`
+- `DatabaseSecurityGroupId` → pre-deployed `DBStandbySecurityGroup`
+- `DatabasePort` → `'3306'` (MySQL always)
+- `SharedSecretId` → `DRDBSecret` (already updated with PITR endpoint by Step Functions)
+
+### 4. Critical Bug Fix — Cross-Region PITR API Parameter
+
+**Bug:** Used `SourceDBInstanceIdentifier` which looks for the source DB **in the DR region (us-east-2)** — not found, returned `DBInstanceNotFoundFault`.
+
+**Fix:** Use `SourceDBInstanceAutomatedBackupsArn` — the ARN of the **replicated automated backup in us-east-2**. Auto-discovered via `describe_db_instance_automated_backups`.
+
+```python
+# WRONG — fails with DBInstanceNotFoundFault
+SourceDBInstanceIdentifier = "pchc-test-uw2-pesonet20"
+
+# CORRECT — cross-region restore
+SourceDBInstanceAutomatedBackupsArn = "arn:aws:rds:us-east-2:...:auto-backup:..."
+```
+
+Fix applied to: `dr-failover.yaml`, `dr-failover-v2.yaml`, `dr-failover/handler.py`, `dr-failover-v2/handler.py`.
+
+### 5. `handler.py` Companion Files Added
+
+Lambda code lives in both the YAML `ZipFile` block AND a standalone Python file (mirrors `dr-failback/handler.py` pattern).
+
+**Rule: edit `handler.py` first, then sync to `ZipFile` in the YAML.**
+
+### 6. Key Design Decision — `database.yaml` Not Touched
+
+PITR restore happens entirely via SDK outside CloudFormation. `DBStack` (which calls `database.yaml`) is suppressed via `IsPITRMode=true`. This keeps `database.yaml` clean and shared across all apps.
+
+---
+
+## Team Commits After PITR Session (same day)
+
+These set up the EFS backup pipeline needed for the next task:
+
+| Commit | What |
+|---|---|
+| `70d8554` | Extended `BackupStack` to all DR environments |
+| `5b7e693` | Added opt-in hourly incremental backup plan to `backup.yaml` |
+| `fe8661c` | **Cross-region EFS backup copy** — `EnableCrossRegionBackup` + `CrossRegionBackupVaultArn` params in `backup.yaml`. Live stack copies EFS backups to DR vault. |
+| `9ee5d45` | Made DR vault ARN dynamic in `pesonet20.yaml` using `DRRegion` + `DREnvName` mappings |
+| `da4e95c` | Extended `ProdBackupPlan` and `ProdBackupVault` to all DR environments in `backup.yaml` |
+| `781a5f6` | **Always-on `DRBackupVault`** added to `pesonet20.yaml` (IsDR condition) — vault exists even when `DeployPaidResources=false`. `BackupStack` excluded from DR envs to avoid naming conflict at failover. |
+
+**Net result:** EFS backup pipeline is now end-to-end. Live stack copies EFS backups cross-region to the DR vault. DR vault always exists (cold standby). Recovery points are available — but failover automation does not yet restore them.
+
+---
+
+## Current State
+
+| Item | Status |
+|---|---|
+| Network stack failover (NAT GW, Jump Host) | Working |
+| PITR DB restore via Step Functions | Bug fixed — **not yet re-tested after fix** |
+| Snapshot DB restore (fallback path) | Should work — not re-tested after Step Functions rewrite |
+| EFS backup → DR vault pipeline | Set up by team — recovery points exist |
+| EFS restore at failover | **Implemented** — CheckEFSRecoveryPoint → RestoreEFS → CheckRestoreJob states in dr-failover-v2.yaml; handler.py actions: check_efs_recovery_point, restore_efs, check_restore_job |
+| App servers (ASG, ALB, ElastiCache) | Should work once DB is up |
+| Secrets Manager + SSM endpoint update | Implemented, not tested end-to-end |
+
+**Pre-flight before re-testing PITR:**
+```bash
+# Must show Status: "replicating" or "retained" before triggering
+aws rds describe-db-instance-automated-backups \
+  --db-instance-identifier pchc-test-uw2-pesonet20 \
+  --region us-east-2 \
+  --query "DBInstanceAutomatedBackups[*].{Status:Status,ARN:DBInstanceAutomatedBackupsArn}"
+```
+
+---
+
+## EFS Restore — Completed
+
+### What was implemented
+
+`dr-failover-v2.yaml` + `dr-failover-v2/handler.py` now fully restore EFS from AWS Backup before the app stack update. `pesonet20.yaml` passes the restored EFS ID to `TreasuryServerStack` via `ExternalEFSId`.
+
+**State machine flow (inserted between UpdateSecrets and UpdateAppStackPITR):**
 
 ```
-Step 1 — Comment LoadBalancerStackName
-  → Patches app stack template (YAML text-level, no parser)
-  → Submits UpdateStack with patched template
-  → Polls until UPDATE_COMPLETE
-
-Step 2 — Set DeployPaidResources=false (app stack)
-  → DB, Cache, LBs, App Servers down
-  → Polls until UPDATE_COMPLETE
-
-Step 3 — Uncomment LoadBalancerStackName
-  → Restores app stack template
-  → Submits UpdateStack with restored template
-  → Polls until UPDATE_COMPLETE
-
-Step 4 — Set DeployPaidResources=false (network stack only)
-  → NAT Gateways, Jump Host, VPC Endpoints down
-  → Polls until UPDATE_COMPLETE
+CheckEFSRecoveryPoint → EFSCheckRoute
+  ├─ efs_found=true  → RestoreEFS → WaitEFSRestore (60s) → CheckRestoreJob
+  │                                  └──────────────────────────────────┘ (poll loop)
+  │                                        ↓ restore_complete=true → UpdateAppStackPITR
+  └─ efs_found=false → SetNoEFS ($.efs_result.efs_id = "") → UpdateAppStackPITR
 ```
 
-> **Why Comment/Uncomment?** The app stack references `LoadBalancerStackName` which imports from a cross-stack export. Setting `DeployPaidResources=false` would delete the LB, which would break the export reference and cause a rollback. Commenting it out first removes the dependency so the stack can safely delete the LB.
+**Lambda actions added:**
 
-### Step Functions input payloads
+| Action | What it does |
+|---|---|
+| `check_efs_recovery_point` | Queries DR vault, filters COMPLETED EFS recovery points, returns latest by CreationDate. Returns `efs_found: false` gracefully if vault missing/empty. |
+| `restore_efs` | Calls `backup.start_restore_job` with `newFileSystem=true`. Returns `restore_job_id`. |
+| `check_restore_job` | Polls job. On COMPLETED: looks up `EFSStandbySecurityGroupId` from app stack output, creates mount targets in InternalSubnetId1/2, writes EFS ID to SSM. |
 
-| Action | Payload | Description |
-|--------|---------|-------------|
-| `failback` | `{"app_name": "...", "action": "failback", "network_stack_name": "..."}` | Full 4-step ordered failback |
-| `comment` | `{"app_name": "...", "action": "comment"}` | Comment out `LoadBalancerStackName` only |
-| `uncomment` | `{"app_name": "...", "action": "uncomment"}` | Restore `LoadBalancerStackName` only |
-| `set_deploy_paid_false` | `{"app_name": "...", "action": "set_deploy_paid_false"}` | Set `DeployPaidResources=false` + poll |
+**EFS SG — no manual rule management needed:**
+`AllowExternalEFSConnectionFromAppServer` (Condition: `UseExternalEFS`) in `appserver-basic2.yaml` automatically adds NFS (2049) ingress from each app server SG (Treasury, API, Sidekiq, CS) to `EFSStandbySecurityGroup` during the app stack update. Identical to live region.
 
-> `network_stack_name` defaults to `{app_name}-network` if omitted.
+**Input payload keys (PITR path only — omit to skip EFS restore):**
+```json
+{
+  "efs_backup_vault_name": "pchc-tdr-ue2-pesonet20-vault",
+  "efs_id_ssm_path":       "/pchc/tdr/pesonet20/pitr-efs-id",
+  "backup_role_arn":       "<BackupRestoreRoleArn output from dr-failover-v2 stack>"
+}
+```
 
-**Start an execution via CLI:**
+**Files changed:**
+- `dr-failover-v2.yaml` — `BackupRestoreRole` IAM resource, `BackupRestoreRoleArn` output, 7 new state machine states
+- `dr-failover-v2/handler.py` — 3 new actions + `_get_stack_output` + `_create_efs_mount_targets` helpers
+- `pesonet/pesonet20.yaml` — `ExternalEFSId` param, `EFSStandbySecurityGroup` resource (IsDR), `EFSStandbySecurityGroupId` output
+
+---
+
+## dr-failback.yaml — Reference
+
+### 4-step failback workflow
+
+```
+Step 1 — Comment LoadBalancerStackName in app stack template → UpdateStack → poll
+Step 2 — Set DeployPaidResources=false on app stack (DB, Cache, LBs, Servers down) → poll
+Step 3 — Uncomment LoadBalancerStackName → UpdateStack → poll
+Step 4 — Set DeployPaidResources=false on network stack (NAT GW, Jump Host down) → poll
+```
+
+Why comment/uncomment: `LoadBalancerStackName` creates a cross-stack export dependency. Deleting the LB while the reference exists causes a rollback. Commenting removes the dependency first.
+
+### Trigger
+
 ```bash
 aws stepfunctions start-execution \
   --state-machine-arn arn:aws:states:<region>:<account>:stateMachine:dr-failback \
-  --input '{"app_name":"pchc-tdr-ue2-pesonet","action":"failback","network_stack_name":"pchc-tdr-ue2-pesonet-network"}'
-```
-
-### Lambda actions (internal, called by state machine)
-
-| Action | Description |
-|--------|-------------|
-| `comment` | Fetch template, comment out `LoadBalancerStackName` in all `*ServerStack` resources |
-| `uncomment` | Fetch template, restore `LoadBalancerStackName` in all `*ServerStack` resources |
-| `update_stack` | Submit UpdateStack with a provided template body |
-| `set_deploy_paid_false` | Set `DeployPaidResources=false` on one stack + return submitted flag |
-| `set_deploy_paid_false_both` | Set `DeployPaidResources=false` on app + network simultaneously |
-| `check_stack_status` | Describe one stack; returns `update_complete`, `rollback_occurred`, `status` |
-| `check_both_stacks_status` | Describe both stacks; returns `both_complete`, `any_rollback` |
-
----
-
-## Key technical decisions
-
-### YAML template preservation
-CloudFormation can normalise a YAML template to JSON internally when `UsePreviousTemplate=True` is used. Once normalised to JSON, the text-level YAML patcher (`comment`/`uncomment`) fails because it looks for `LoadBalancerStackName:` which no longer exists in that form.
-
-**Fix**: `_fetch_as_yaml` always returns the template as a YAML string (converts dict/JSON response via `_cfn_to_yaml`). `_submit_deploy_paid_false` submits `TemplateBody` explicitly to preserve format.
-
-**Exception**: If the template exceeds 51,200 bytes (CloudFormation's `TemplateBody` API limit), it falls back to `UsePreviousTemplate=True`. This is safe because:
-- The app stack (steps 1–3) is small enough to always use `TemplateBody`.
-- The network stack (step 4) is large and uses the fallback, but step 4 is the last step — nothing reads its template format afterwards.
-
-### Template patcher
-`_patch_cfn_parameter` is a single-pass state machine (no YAML parser). It walks every `*ServerStack` resource, enters the `Properties.Parameters` block, and comments/uncomments the target key plus any continuation lines. Pure stdlib — no PyYAML dependency (not available in Lambda Python 3.12 runtime by default).
-
-### `_cfn_to_yaml`
-Pure stdlib dict-to-YAML converter. Used when `get_template` returns a Python `dict` (boto3 deserialises JSON-stored templates automatically) or a JSON string. Handles all CFN template structures: nested dicts, lists, intrinsic functions (`Fn::Sub`, `Ref`, etc.), scalars with special characters.
-
----
-
-## Files
-
-```
-clients/pchc/dr/
-├── dr-failover.yaml          # EventBridge-triggered failover/failback Lambda
-├── dr-failback.yaml          # Step Functions state machine + Lambda (ZipFile)
-├── dr-failback/
-│   └── handler.py            # Lambda source (keep in sync with ZipFile above)
-└── old-dr/                   # Previous DR engine implementations (archived)
+  --input '{"app_name":"pchc-tdr-ue2-pesonet20","action":"failback","network_stack_name":"pchc-tdr-ue2-pesonet20-network"}'
 ```
 
 ---
 
-## Known gaps / next steps
+## Architecture Rules — Do Not Revisit Without Strong Reason
 
-- **dr-failover.yaml `update_stack` and large templates**: If the network or app stack template exceeds 51,200 bytes, `dr-failover.yaml`'s `update_stack` will hit the same constraint error. dr-failover uses `TemplateBody` (added for consistency) but since it never reads the template back, it could safely use `UsePreviousTemplate=True` instead — or apply the same size-check fallback as dr-failback.
-- **No S3 template storage**: Large templates would be better served by uploading to S3 and using `TemplateURL`. This would remove the 51,200 byte constraint entirely.
-- **dr-failback does not handle failover** — that is intentional. Use `dr-failover.yaml` to activate DR.
+1. **`database.yaml` stays untouched** — PITR/snapshot restore via SDK only, never through `database.yaml` changes.
+2. **Live stack safety** — all new params in `pesonet20.yaml` must have safe defaults (`'false'` or `''`). Live Singapore stacks must be updatable at any time with zero behavior change.
+3. **`dr-failover-v2.yaml` is the engine going forward** — v1 (`dr-failover.yaml`) kept for reference. All new work goes into v2.
+4. **Snapshot path stays as fallback** — `use_pitr=false` keeps the original behavior. Never remove it.
+5. **SSM as handoff point** — Step Functions writes resource IDs (DB endpoint, EFS ID) to SSM before app stack update. CloudFormation reads via `{{resolve:ssm:...}}`.
+6. **handler.py is source of truth** — edit Python in `handler.py`, sync to `ZipFile` in the YAML. Never edit the YAML ZipFile directly.
+
+---
+
+## File Map
+
+```
+iscale-dev/clients/pchc/
+├── dr/
+│   ├── HANDOVER.md                   ← this file
+│   ├── DR-FAILOVER-V2.md             ← detailed change doc for dr-failover-v2
+│   ├── dr-failover.yaml              ← per-app failover (Step Functions, PITR fixed)
+│   ├── dr-failover/
+│   │   └── handler.py                ← Lambda source for dr-failover.yaml
+│   ├── dr-failover-v2.yaml           ← app-agnostic engine (USE THIS)
+│   ├── dr-failover-v2/
+│   │   └── handler.py                ← Lambda source for dr-failover-v2.yaml
+│   ├── dr-failback.yaml              ← teardown Step Functions
+│   └── dr-failback/
+│       └── handler.py                ← Lambda source for dr-failback.yaml
+├── pesonet/
+│   └── pesonet20.yaml                ← IsPITRMode, PITRDBEndpoint, DRBackupVault added
+└── ...other apps...
+
+iscale-dev/common/
+├── backup.yaml                       ← cross-region EFS backup copy, hourly plan added
+├── appserver-basic2.yaml             ← needs ExternalEFSId param (next task)
+└── database.yaml                     ← NOT modified, do not touch
+```
+
+---
+
+## Quick Reference — Trigger PITR Failover (Test)
+
+```bash
+# Step 1 — get stack outputs
+aws cloudformation describe-stacks \
+  --stack-name pchc-tdr-ue2-pesonet20 \
+  --region us-east-2 \
+  --query "Stacks[0].Outputs[?OutputKey=='DBStandbySubnetGroup'||OutputKey=='DBStandbySecurityGroupId'||OutputKey=='DRDBSecretArn'].{Key:OutputKey,Value:OutputValue}"
+
+# Step 2 — get state machine ARN
+aws cloudformation describe-stacks \
+  --stack-name pchc-tdr-ue2-dr-failover \
+  --region us-east-2 \
+  --query "Stacks[0].Outputs[?OutputKey=='StateMachineArn'].OutputValue" --output text
+
+# Step 3 — fire
+aws stepfunctions start-execution \
+  --state-machine-arn <arn> \
+  --region us-east-2 \
+  --input '{
+    "app_name": "pesonet20",
+    "org_name": "pchc",
+    "use_pitr": true,
+    "network_stack_name": "pchc-tdr-ue2-pesonet20-network",
+    "app_stack_name": "pchc-tdr-ue2-pesonet20",
+    "network_template_url": "https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml",
+    "db_instance_identifier": "pchc-test-uw2-pesonet20",
+    "dr_db_secret_arn": "arn:aws:secretsmanager:us-east-2:050821737631:secret:pchc-tdr-ue2-pesonet20-DqhIQI",
+    "pitr_target_identifier": "pchc-tdr-ue2-pesonet20-pitr",
+    "pitr_endpoint_ssm_path": "/pchc/tdr/pesonet20/pitr-db-endpoint",
+    "pitr_subnet_group": "<DBStandbySubnetGroup output>",
+    "pitr_security_group_id": "<DBStandbySecurityGroupId output>",
+    "redshift_cluster_identifier": "",
+    "redshift_snapshot_identifier": "",
+    "snapshot_identifier": "",
+    "db_master_password": "",
+    "sns_topic_arn": "arn:aws:sns:us-east-2:050821737631:pchc-tdr-ue2-snstopic"
+  }'
+```

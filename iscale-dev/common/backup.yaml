@@ -25,6 +25,8 @@ Metadata:
           - HourlyBackupARNList
           - EnableCrossRegionBackup
           - CrossRegionBackupVaultArn
+          - HourlyDRRetentionDays
+          - EncryptionKeyArn
 
     ParameterLabels:
       Name:
@@ -53,6 +55,10 @@ Metadata:
         default: Enable cross-region copy of backups to a DR vault
       CrossRegionBackupVaultArn:
         default: ARN of the destination backup vault in the DR region
+      HourlyDRRetentionDays:
+        default: Hourly backup retention in DR vault (days) — must cover full incremental chain
+      EncryptionKeyArn:
+        default: KMS CMK ARN for backup vault encryption (leave blank for AWS-managed key)
 
 Parameters:
   Name:
@@ -131,6 +137,25 @@ Parameters:
     Description: ARN of the destination backup vault in the DR region (e.g. arn:aws:backup:us-west-2:<account>:backup-vault:<name>)
     Type: String
     Default: ''
+  HourlyDRRetentionDays:
+    Description: |
+      Number of days to retain hourly EFS backup copies in the DR vault.
+      Must be long enough to preserve the full incremental chain — 14 days recommended.
+      Source vault always retains 2 days (daily backups cover longer periods there).
+    Type: Number
+    Default: 14
+    MinValue: 2
+    MaxValue: 35
+  EncryptionKeyArn:
+    Description: |
+      ARN of the KMS CMK to encrypt the backup vault and all recovery points stored in it.
+      For DR: must be a multi-region key with a replica in the DR region so that cross-region
+      copy actions produce recovery points decryptable at restore time without any key import.
+      Leave blank to use the default AWS-managed aws/backup key (acceptable if CMK compliance
+      is not required, but cross-region copies will be re-encrypted with the destination
+      vault's default key — ensure that key is available before initiating a DR restore).
+    Type: String
+    Default: ''
 
 Mappings: 
   Fn::Transform:
@@ -144,14 +169,22 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   UseTagInclusion: !And [!Not [!Equals [!Ref TagName, ""]], !Not [!Equals [!Ref TagValue, ""]]]
+  # Defined inline (not via Condition: IsProd / Condition: IsDR) because those come from the
+  # Fn::Transform AWS::Include of conditions.yaml. CloudFormation validates inline condition
+  # dependencies before transforms execute, so referencing injected conditions here causes
+  # "Unresolved condition dependencies" errors at update time.
   IsProdOrDR: !Or
-    - Condition: IsProd
-    - Condition: IsDR
+    - !Equals [!Ref EnvName, Production]
+    - !Equals [!Ref EnvName, ProductionDR]
+    - !Equals [!Ref EnvName, StagingDR]
+    - !Equals [!Ref EnvName, DevelopmentDR]
+    - !Equals [!Ref EnvName, TestDR]
   IsNotProdOrDR: !Not [Condition: IsProdOrDR]
   IsHourlyBackupEnabled: !Equals [!Ref EnableHourlyBackup, 'true']
   IsCrossRegionBackupEnabled: !And
     - !Equals [!Ref EnableCrossRegionBackup, 'true']
     - !Not [!Equals [!Ref CrossRegionBackupVaultArn, '']]
+  IsEncryptionKeyProvided: !Not [!Equals [!Ref EncryptionKeyArn, '']]
 
 Resources:
 
@@ -161,6 +194,9 @@ Resources:
     DeletionPolicy: Retain #Prod vaults are retained
     Properties:
       BackupVaultName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], vault]]
+      # CMK encrypts all recovery points (daily, weekly, monthly, hourly) stored in this vault.
+      # For DR restores: supply the replica key ARN in the DR region so copies are decryptable.
+      EncryptionKeyArn: !If [IsEncryptionKeyProvided, !Ref EncryptionKeyArn, !Ref 'AWS::NoValue']
       BackupVaultTags:
         Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
         Environment: !Ref EnvName
@@ -171,6 +207,7 @@ Resources:
     Type: AWS::Backup::BackupVault
     Properties:
       BackupVaultName: !Join [ '-', [!Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], vault]]
+      EncryptionKeyArn: !If [IsEncryptionKeyProvided, !Ref EncryptionKeyArn, !Ref 'AWS::NoValue']
       BackupVaultTags:
         Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
         Environment: !Ref EnvName
@@ -276,7 +313,7 @@ Resources:
               - IsCrossRegionBackupEnabled
               - - DestinationBackupVaultArn: !Ref CrossRegionBackupVaultArn
                   Lifecycle:
-                    DeleteAfterDays: 2
+                    DeleteAfterDays: !Ref HourlyDRRetentionDays
               - !Ref 'AWS::NoValue'
       BackupPlanTags:
         Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, hourly, backup, plan]]
