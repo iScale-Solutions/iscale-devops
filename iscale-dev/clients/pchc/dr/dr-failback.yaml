@@ -5,11 +5,22 @@ Description: |
   every *ServerStack resource, sets DeployPaidResources=false, and drives the full
   4-step failover sequence via Step Functions.
 
-  Event payload:
+  Event payload (standard EC2/ASG apps — e.g. pesonet20):
     { "app_name": "pchc-tdr-ue2-pesonet", "action": "failback", "network_stack_name": "pchc-tdr-ue2-pesonet-network" }
     { "app_name": "pchc-tdr-ue2-pesonet", "action": "comment" }
     { "app_name": "pchc-tdr-ue2-pesonet", "action": "uncomment" }
     { "app_name": "pchc-tdr-ue2-pesonet", "action": "set_deploy_paid_false" }
+
+  Event payload (ECS Fargate multi-stack apps — e.g. SmartAPI):
+    {
+      "action": "ecs_failback",
+      "network_stack_name": "pchc-tdr-ue2-smartapi-network",
+      "prereq_stack_name":  "pchc-tdr-ue2-smartapi-prereq",
+      "parallel_stacks": [
+        {"stack_name": "pchc-tdr-ue2-smartapi"},
+        {"stack_name": "pchc-tdr-ue2-smartportal"}
+      ]
+    }
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -632,6 +643,11 @@ Resources:
                   "Variable": "$.action",
                   "StringEquals": "failback",
                   "Next": "FailbackStep1Comment"
+                },
+                {
+                  "Variable": "$.action",
+                  "StringEquals": "ecs_failback",
+                  "Next": "ECSFailbackParallelAppStacks"
                 }
               ],
               "Default": "InvalidAction"
@@ -640,7 +656,7 @@ Resources:
             "InvalidAction": {
               "Type": "Fail",
               "Error": "InvalidAction",
-              "Cause": "action must be 'comment', 'uncomment', 'set_deploy_paid_false', or 'failback'."
+              "Cause": "action must be 'comment', 'uncomment', 'set_deploy_paid_false', 'failback', or 'ecs_failback'."
             },
 
             "PatchTemplate": {
@@ -1195,6 +1211,158 @@ Resources:
                 }
               ],
               "Default": "FailbackStep4Wait"
+            },
+
+            "ECSFailbackParallelAppStacks": {
+              "Comment": "ECS FAILBACK STEP 1 — Set DeployPaidResources=false on app stacks concurrently (ALB, DNS, ECS tasks down). Must complete before prereq to avoid dangling ImportValue consumers.",
+              "Type": "Map",
+              "ItemsPath": "$.parallel_stacks",
+              "MaxConcurrency": 0,
+              "Iterator": {
+                "StartAt": "SetDeployPaidFalseOne",
+                "States": {
+                  "SetDeployPaidFalseOne": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":       "set_deploy_paid_false",
+                      "stack_name.$": "$.stack_name"
+                    },
+                    "ResultPath": "$.set_result",
+                    "Next": "CheckIfOneSubmitted",
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneFalseFailed", "ResultPath": "$.error"}]
+                  },
+                  "CheckIfOneSubmitted": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {"Variable": "$.set_result.submitted", "BooleanEquals": true, "Next": "WaitOneFalse"}
+                    ],
+                    "Default": "OneFalseComplete"
+                  },
+                  "WaitOneFalse": {
+                    "Type": "Wait",
+                    "Seconds": 30,
+                    "Next": "PollOneFalse"
+                  },
+                  "PollOneFalse": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":       "check_stack_status",
+                      "stack_name.$": "$.stack_name"
+                    },
+                    "ResultPath": "$.poll_result",
+                    "Next": "OneFalseDone",
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneFalseFailed", "ResultPath": "$.error"}]
+                  },
+                  "OneFalseDone": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {"Variable": "$.poll_result.rollback_occurred", "BooleanEquals": true, "Next": "OneFalseFailed"},
+                      {"Variable": "$.poll_result.update_complete",   "BooleanEquals": true, "Next": "OneFalseComplete"}
+                    ],
+                    "Default": "WaitOneFalse"
+                  },
+                  "OneFalseComplete": {
+                    "Type": "Succeed"
+                  },
+                  "OneFalseFailed": {
+                    "Type": "Fail",
+                    "Error": "StackTeardownFailed",
+                    "Cause": "App stack DeployPaidResources=false update failed — check CloudFormation events."
+                  }
+                }
+              },
+              "ResultPath": "$.ecs_parallel_result",
+              "Next": "ECSFailbackPrereq",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackPrereq": {
+              "Comment": "ECS FAILBACK STEP 2 — Set DeployPaidResources=false on prereq stack (DocumentDB torn down). Safe now that app stacks no longer import DocuDBElasticSecurityGroup.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "set_deploy_paid_false",
+                "stack_name.$": "$.prereq_stack_name"
+              },
+              "ResultPath": "$.ecs_prereq_result",
+              "Next": "ECSFailbackPrereqWait",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackPrereqWait": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "ECSFailbackPrereqPoll"
+            },
+
+            "ECSFailbackPrereqPoll": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "check_stack_status",
+                "stack_name.$": "$.prereq_stack_name"
+              },
+              "ResultPath": "$.ecs_prereq_status",
+              "Next": "ECSFailbackPrereqDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackPrereqDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.ecs_prereq_status.rollback_occurred", "BooleanEquals": true, "Next": "FailbackFailed"},
+                {"Variable": "$.ecs_prereq_status.update_complete",   "BooleanEquals": true, "Next": "ECSFailbackNetwork"}
+              ],
+              "Default": "ECSFailbackPrereqWait"
+            },
+
+            "ECSFailbackNetwork": {
+              "Comment": "ECS FAILBACK STEP 3 — Set DeployPaidResources=false on network stack (NAT GW, Jump Host down).",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "set_deploy_paid_false",
+                "stack_name.$": "$.network_stack_name",
+                "template_url": "${NetworkTemplateUrl}"
+              },
+              "ResultPath": "$.ecs_network_result",
+              "Next": "ECSFailbackNetworkWait",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackNetworkWait": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "ECSFailbackNetworkPoll"
+            },
+
+            "ECSFailbackNetworkPoll": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "check_stack_status",
+                "stack_name.$": "$.network_stack_name"
+              },
+              "ResultPath": "$.ecs_network_status",
+              "Next": "ECSFailbackNetworkDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackNetworkDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.ecs_network_status.rollback_occurred", "BooleanEquals": true, "Next": "FailbackFailed"},
+                {"Variable": "$.ecs_network_status.update_complete",   "BooleanEquals": true, "Next": "Complete"}
+              ],
+              "Default": "ECSFailbackNetworkWait"
             },
 
             "FailbackFailed": {
