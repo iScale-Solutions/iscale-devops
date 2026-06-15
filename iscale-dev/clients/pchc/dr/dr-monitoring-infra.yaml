@@ -10,10 +10,9 @@ Metadata:
           - OrgName
           - EnvName
       - Label:
-          default: Notification Configuration
+          default: Stack Configuration
         Parameters:
-          - Email
-          - EnableEmailSubscription
+          - SNSStackName
       - Label:
           default: PESONET Configuration
         Parameters:
@@ -90,10 +89,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
-      Email:
-        default: Notification Email Address
-      EnableEmailSubscription:
-        default: Enable Email Subscription
+      SNSStackName:
+        default: SNS Topic Stack Name
       PesonetAutoScalingGroupName:
         default: PESONET Auto Scaling Group Name
       PesonetDBInstanceIdentifier:
@@ -195,18 +192,12 @@ Parameters:
       - Development
       - Test
 
-  # Notification Configuration
-  Email:
-    Description: Email address for SNS alert notifications
+  # Stack Configuration
+  SNSStackName:
+    Description: The name of the SNS stack
     Type: String
-    Default: ''
-  EnableEmailSubscription:
-    Description: Create an email subscription for the monitoring SNS topic
-    Type: String
-    Default: 'false'
-    AllowedValues:
-      - 'true'
-      - 'false'
+    Default: pchc-prd-ase1-snstopic
+    MinLength: 1
 
   # PESONET
   PesonetAutoScalingGroupName:
@@ -398,59 +389,7 @@ Parameters:
     Default: 100
     MinValue: 1
 
-Conditions:
-
-  IsEmailSubscriptionEnabled: !Equals [!Ref EnableEmailSubscription, 'true']
-
 Resources:
-
-##
-# Shared — SNS
-##
-
-  MonitoringTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub '${OrgName}-prd-ase1-monitoring-topic'
-      Tags:
-        - Key: Name
-          Value: !Sub '${OrgName}-prd-ase1-monitoring-topic'
-        - Key: Organization
-          Value: !Ref OrgName
-        - Key: Environment
-          Value: !Ref EnvName
-
-  MonitoringEmailSubscription:
-    Type: AWS::SNS::Subscription
-    Condition: IsEmailSubscriptionEnabled
-    Properties:
-      TopicArn: !Ref MonitoringTopic
-      Protocol: email
-      Endpoint: !Ref Email
-
-  MonitoringTopicPolicy:
-    Type: AWS::SNS::TopicPolicy
-    Properties:
-      Topics:
-        - !Ref MonitoringTopic
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowAccountRoot
-            Effect: Allow
-            Principal:
-              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
-            Action: sns:*
-            Resource: !Ref MonitoringTopic
-          - Sid: AllowCloudWatch
-            Effect: Allow
-            Principal:
-              Service: cloudwatch.amazonaws.com
-            Action: sns:Publish
-            Resource: !Ref MonitoringTopic
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref 'AWS::AccountId'
 
 ##
 # PESONET
@@ -473,9 +412,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PesonetRDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -494,9 +433,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PesonetALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -533,9 +472,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PesonetCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -544,9 +483,9 @@ Resources:
       AlarmDescription: PESONET infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${PesonetEC2Alarm}) AND ALARM(${PesonetRDSAlarm}) AND ALARM(${PesonetALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
 ##
 # PDDTS
@@ -569,9 +508,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsRDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -590,9 +529,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -629,9 +568,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -640,9 +579,9 @@ Resources:
       AlarmDescription: PDDTS infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${PddtsEC2Alarm}) AND ALARM(${PddtsRDSAlarm}) AND ALARM(${PddtsALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
 ##
 # PDDTS-EOD
@@ -665,9 +604,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsEodRDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -686,9 +625,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsEodALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -725,9 +664,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PddtsEodCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -736,9 +675,9 @@ Resources:
       AlarmDescription: PDDTS-EOD infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${PddtsEodEC2Alarm}) AND ALARM(${PddtsEodRDSAlarm}) AND ALARM(${PddtsEodALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
 ##
 # MIS
@@ -761,9 +700,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   MisRDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -782,9 +721,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   MisALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -821,9 +760,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   MisCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -832,9 +771,9 @@ Resources:
       AlarmDescription: MIS infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${MisEC2Alarm}) AND ALARM(${MisRDSAlarm}) AND ALARM(${MisALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
 ##
 # CICS
@@ -857,9 +796,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   CicsRDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -878,9 +817,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   CicsALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -917,9 +856,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   CicsCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -928,9 +867,9 @@ Resources:
       AlarmDescription: CICS infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${CicsEC2Alarm}) AND ALARM(${CicsRDSAlarm}) AND ALARM(${CicsALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
 ##
 # DirectDebit
@@ -953,9 +892,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DirectDebitRDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -974,9 +913,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DirectDebitALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1013,9 +952,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DirectDebitCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1024,9 +963,9 @@ Resources:
       AlarmDescription: DirectDebit infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${DirectDebitEC2Alarm}) AND ALARM(${DirectDebitRDSAlarm}) AND ALARM(${DirectDebitALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
 ##
 # PAS6
@@ -1049,9 +988,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   Pas6RDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1070,9 +1009,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   Pas6ALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1109,9 +1048,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   Pas6CompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1120,9 +1059,9 @@ Resources:
       AlarmDescription: PAS6 infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${Pas6EC2Alarm}) AND ALARM(${Pas6RDSAlarm}) AND ALARM(${Pas6ALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
 ##
 # DSAPP
@@ -1145,9 +1084,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DsappRDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1166,9 +1105,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DsappALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1205,9 +1144,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   DsappCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1216,9 +1155,9 @@ Resources:
       AlarmDescription: DSAPP infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${DsappEC2Alarm}) AND ALARM(${DsappRDSAlarm}) AND ALARM(${DsappALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
 ##
 # PayGate
@@ -1241,9 +1180,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PaygateRDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1262,9 +1201,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PaygateALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1301,9 +1240,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PaygateCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1312,9 +1251,9 @@ Resources:
       AlarmDescription: PayGate infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${PaygateEC2Alarm}) AND ALARM(${PaygateRDSAlarm}) AND ALARM(${PaygateALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
 ##
 # PhilPass
@@ -1337,9 +1276,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PhilpassRDSAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1358,9 +1297,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PhilpassALBAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1397,9 +1336,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
   PhilpassCompositeAlarm:
     Type: AWS::CloudWatch::CompositeAlarm
@@ -1408,14 +1347,7 @@ Resources:
       AlarmDescription: PhilPass infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
       AlarmRule: !Sub 'ALARM(${PhilpassEC2Alarm}) AND ALARM(${PhilpassRDSAlarm}) AND ALARM(${PhilpassALBAlarm})'
       AlarmActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
-        - !Ref MonitoringTopic
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-Outputs:
-
-  MonitoringTopicArn:
-    Description: ARN of the monitoring SNS topic
-    Value: !Ref MonitoringTopic
-    Export:
-      Name: !Sub '${AWS::StackName}-TopicArn'
