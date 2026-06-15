@@ -318,7 +318,7 @@ Resources:
 
   DBStack:
     # Suppressed when IsPITRMode=true — DB was restored externally via PITR by dr-failover Step Functions.
-    Condition: IsDeployPaidResources
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -351,7 +351,7 @@ Resources:
   DBSchedulerStack:
     DependsOn:
       - DBStack
-    Condition: IsNotProdAndDeployPaidResources
+    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -418,6 +418,10 @@ Resources:
           Value: !Ref EnvName
         - Key: Organization
           Value: !Ref OrgName
+        - Key: DRSync
+          Value: 'true'
+        - Key: SourceSecretArn
+          Value: !Ref LiveSecretArn
 
   # Pre-deployed DB subnet group for PITR restore in DR standby.
   # Uses -dr suffix to avoid naming conflict with DBStack's own subnet group at failover.
@@ -487,18 +491,19 @@ Resources:
         Name: pg-ui
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
+        ASGDesiredSize: !If [IsDR, 0, 1]
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
           - ''
         DatabasePort: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
           - 3306
         DatabaseSecurityGroupId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
           - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
@@ -520,7 +525,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
           - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
@@ -531,7 +536,7 @@ Resources:
   PaygateSchedulerStack:
     DependsOn:
       - PayGateAppServerStack
-    Condition: IsNotProdAndDeployPaidResources
+    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -576,18 +581,19 @@ Resources:
         Name: pg-pchc
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
+        ASGDesiredSize: !If [IsDR, 0, 1]
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
           - ''
         DatabasePort: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
           - 3306
         DatabaseSecurityGroupId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
           - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
@@ -609,7 +615,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
           - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
@@ -620,7 +626,7 @@ Resources:
   PGPCHCSchedulerStack:
     DependsOn:
       - PGPCHCAppServerStack
-    Condition: IsNotProdAndDeployPaidResources
+    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -665,18 +671,19 @@ Resources:
         Name: pg-pay
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
+        ASGDesiredSize: !If [IsDR, 0, 1]
         ClientDomainName: !Ref ClientDomainName
         DatabaseEndpoint: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
           - ''
         DatabasePort: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
           - 3306
         DatabaseSecurityGroupId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
           - ''
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !Ref InstanceKeyName
@@ -698,7 +705,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId: !If
           - IsDeployPaidResources
-          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
           - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
@@ -709,7 +716,7 @@ Resources:
   PGPaymentSchedulerStack:
     DependsOn:
       - PGPaymentAppServerStack
-    Condition: IsNotProdAndDeployPaidResources
+    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -739,7 +746,7 @@ Resources:
       - PGPCHCAppServerStack
       - PayGateAppServerStack
       - PGPaymentAppServerStack
-    Condition: IsProdOrProductionDRAndDeployPaidResources
+    Condition: IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
