@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-# Input payload keys: app_name, org_name, use_pitr, network_stack_name,
+# Input payload keys (PITR/snapshot path): app_name, org_name, use_pitr, network_stack_name,
 #   app_stack_name, network_template_url, db_instance_identifier, dr_db_secret_arn,
 #   pitr_target_identifier, pitr_endpoint_ssm_path, pitr_subnet_group,
 #   pitr_security_group_id, redshift_cluster_identifier,
@@ -7,6 +7,9 @@ AWSTemplateFormatVersion: 2010-09-09
 #   sns_topic_arn
 # EFS restore keys (PITR path only — omit to skip EFS restore and create fresh EFS):
 #   efs_backup_vault_name, efs_id_ssm_path, backup_role_arn
+# Input payload keys (ecs_app_group mode — ECS Fargate multi-stack, e.g. SmartAPI):
+#   mode="ecs_app_group", network_stack_name, network_template_url,
+#   prereq_stack_name, parallel_stacks=[{"stack_name": "..."}, ...], sns_topic_arn
 # Lambda actions: discover | pitr_restore | check_db_status | update_secrets |
 #   check_efs_recovery_point | restore_efs | check_restore_job |
 #   update_stack | check_stack_status | notify
@@ -819,9 +822,24 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "DR Failover engine — PITR path (use_pitr=true) or snapshot path (use_pitr=false). App-agnostic: all config passed in input.",
-          "StartAt": "Discover",
+          "Comment": "DR Failover engine — PITR (use_pitr=true), snapshot (use_pitr=false), or ECS app group (mode=ecs_app_group). App-agnostic: all config passed in input.",
+          "StartAt": "PreRoute",
           "States": {
+
+            "PreRoute": {
+              "Comment": "Skip Discover for ecs_app_group — ECS Fargate needs no AMI or snapshot lookup.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "And": [
+                    {"Variable": "$.mode", "IsPresent": true},
+                    {"Variable": "$.mode", "StringEquals": "ecs_app_group"}
+                  ],
+                  "Next": "UpdateNetworkStack"
+                }
+              ],
+              "Default": "Discover"
+            },
 
             "Discover": {
               "Comment": "Resolve AMI, snapshot (snapshot path), and DB master password from event input.",
@@ -893,12 +911,129 @@ Resources:
             },
 
             "RouteByMode": {
-              "Comment": "Branch on use_pitr flag — PITR path or snapshot path.",
+              "Comment": "Branch on use_pitr or mode — PITR path, snapshot path, or ecs_app_group path.",
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.use_pitr", "BooleanEquals": true, "Next": "PITRRestore"}
+                {"Variable": "$.use_pitr", "BooleanEquals": true, "Next": "PITRRestore"},
+                {
+                  "And": [
+                    {"Variable": "$.mode", "IsPresent": true},
+                    {"Variable": "$.mode", "StringEquals": "ecs_app_group"}
+                  ],
+                  "Next": "UpdatePrereqStack"
+                }
               ],
               "Default": "UpdateAppStackSnapshot"
+            },
+
+            "UpdatePrereqStack": {
+              "Comment": "ecs_app_group — update prereq stack first; creates DocumentDB and exports DocuDBElasticSecurityGroup.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "update_stack",
+                "stack_type":   "app",
+                "stack_name.$": "$.prereq_stack_name",
+                "extra_params": {
+                  "DeployPaidResources": "true"
+                }
+              },
+              "ResultPath": "$.prereq_update",
+              "Next": "WaitPrereqStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitPrereqStack": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckPrereqStack"
+            },
+
+            "CheckPrereqStack": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "check_stack_status",
+                "stack_name.$": "$.prereq_stack_name"
+              },
+              "ResultPath": "$.prereq_status",
+              "Next": "PrereqStackDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "PrereqStackDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.prereq_status.stack_rollback", "BooleanEquals": true, "Next": "FailoverFailed"},
+                {"Variable": "$.prereq_status.stack_complete", "BooleanEquals": true, "Next": "UpdateAppStacksParallel"}
+              ],
+              "Default": "WaitPrereqStack"
+            },
+
+            "UpdateAppStacksParallel": {
+              "Comment": "Update parallel_stacks concurrently. Each item: {stack_name: '...'}. MaxConcurrency 0 = unlimited.",
+              "Type": "Map",
+              "ItemsPath": "$.parallel_stacks",
+              "MaxConcurrency": 0,
+              "Iterator": {
+                "StartAt": "UpdateOneStack",
+                "States": {
+                  "UpdateOneStack": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":       "update_stack",
+                      "stack_type":   "app",
+                      "stack_name.$": "$.stack_name",
+                      "extra_params": {
+                        "DeployPaidResources": "true"
+                      }
+                    },
+                    "ResultPath": "$.update_result",
+                    "Next": "WaitOneStack",
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneStackFailed", "ResultPath": "$.error"}]
+                  },
+                  "WaitOneStack": {
+                    "Type": "Wait",
+                    "Seconds": 60,
+                    "Next": "CheckOneStack"
+                  },
+                  "CheckOneStack": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":       "check_stack_status",
+                      "stack_name.$": "$.stack_name"
+                    },
+                    "ResultPath": "$.stack_status",
+                    "Next": "OneStackDone",
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneStackFailed", "ResultPath": "$.error"}]
+                  },
+                  "OneStackDone": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {"Variable": "$.stack_status.stack_rollback", "BooleanEquals": true, "Next": "OneStackFailed"},
+                      {"Variable": "$.stack_status.stack_complete", "BooleanEquals": true, "Next": "OneStackComplete"}
+                    ],
+                    "Default": "WaitOneStack"
+                  },
+                  "OneStackComplete": {
+                    "Type": "Succeed"
+                  },
+                  "OneStackFailed": {
+                    "Type": "Fail",
+                    "Error": "StackUpdateFailed",
+                    "Cause": "App stack update rolled back or errored — check CloudFormation events."
+                  }
+                }
+              },
+              "ResultPath": "$.parallel_results",
+              "Next": "NotifyComplete",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
             },
 
             "PITRRestore": {
