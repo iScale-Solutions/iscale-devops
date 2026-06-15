@@ -74,7 +74,7 @@ def _cfn_to_yaml(obj, _depth=0):
                 fk, fv = _key(str(kvs[0][0])), kvs[0][1]
                 if isinstance(fv, (dict, list)) and fv:
                     parts.append(f'{p}- {fk}:')
-                    parts.append(_node(fv, d + 1))
+                    parts.append(_node(fv, d + 2))
                 elif isinstance(fv, bool):
                     parts.append(f'{p}- {fk}: {"true" if fv else "false"}')
                 elif fv is None:
@@ -88,7 +88,7 @@ def _cfn_to_yaml(obj, _depth=0):
                     rks = _key(str(rk))
                     if isinstance(rv, (dict, list)) and rv:
                         parts.append(f'{cp}{rks}:')
-                        parts.append(_node(rv, d + 1))
+                        parts.append(_node(rv, d + 2))
                     elif isinstance(rv, bool):
                         parts.append(f'{cp}{rks}: {"true" if rv else "false"}')
                     elif rv is None:
@@ -366,8 +366,22 @@ def _get_stack_status(cfn, stack_name: str) -> dict:
 # Action: comment / uncomment
 # ---------------------------------------------------------------------------
 
+def _upload_template_to_s3(template_body: str, stack_name: str, action: str) -> str:
+    import os
+    region = os.environ.get('AWS_REGION', 'us-east-2')
+    bucket = os.environ.get('TEMP_TEMPLATE_BUCKET', '')
+    if not bucket:
+        raise ValueError('TEMP_TEMPLATE_BUCKET environment variable not set')
+    key = f'failback/{stack_name}/{action}.yaml'
+    s3 = boto3.client('s3', region_name=region)
+    s3.put_object(Bucket=bucket, Key=key, Body=template_body.encode('utf-8'), ContentType='text/plain')
+    url = f'https://{bucket}.s3.{region}.amazonaws.com/{key}'
+    logger.info("[S3_UPLOAD] Uploaded patched template | bucket=%s | key=%s", bucket, key)
+    return url
+
+
 def _handle_patch(event: dict, action: str) -> dict:
-    """Fetch template as YAML, patch it, return modified template + whether a change was made."""
+    """Fetch template as YAML, patch it, upload to S3, return template_s3_url + whether a change was made."""
     app_name = _get_app_name(event)
     logger.info("[PATCH] Start | stack=%s | action=%s", app_name, action)
 
@@ -384,17 +398,17 @@ def _handle_patch(event: dict, action: str) -> dict:
     patched = modified != template_body
     logger.info("[PATCH] Result | patched=%s | stack=%s | action=%s", patched, app_name, action)
 
-    if patched:
-        sep = '=' * 72
-        logger.info("[PATCH] Modified template for %s:\n%s\n%s\n%s", app_name, sep, modified, sep)
-    else:
+    if not patched:
         logger.info("[PATCH] No changes — template already in desired state | stack=%s | action=%s", app_name, action)
+
+    # Upload to S3 so update_stack can use TemplateURL (bypasses 51,200-byte TemplateBody API limit)
+    template_s3_url = _upload_template_to_s3(modified, app_name, action)
 
     return {
         'stack_name': app_name,
         'action': action,
         'patched': patched,
-        'modified_template': modified,
+        'template_s3_url': template_s3_url,
     }
 
 
@@ -403,13 +417,13 @@ def _handle_patch(event: dict, action: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _handle_update_stack(event: dict) -> dict:
-    """Submit UpdateStack with a provided template body. All parameters preserved via UsePreviousValue."""
+    """Submit UpdateStack with the patched template via S3 URL. All parameters preserved via UsePreviousValue."""
     app_name = _get_app_name(event)
-    template_body = event.get('template_body') or event.get('modified_template')
-    if not template_body:
-        raise ValueError("update_stack action requires 'template_body' in the event")
+    template_s3_url = event.get('template_s3_url')
+    if not template_s3_url:
+        raise ValueError("update_stack action requires 'template_s3_url' in the event")
 
-    logger.info("[UPDATE_STACK] Submitting template update | stack=%s", app_name)
+    logger.info("[UPDATE_STACK] Submitting template update | stack=%s | url=%s", app_name, template_s3_url)
 
     cfn = boto3.client('cloudformation')
     current_params = _get_current_parameters(cfn, app_name)
@@ -421,7 +435,7 @@ def _handle_update_stack(event: dict) -> dict:
     try:
         cfn.update_stack(
             StackName=app_name,
-            TemplateBody=template_body,
+            TemplateURL=template_s3_url,
             Parameters=parameters,
             Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
         )

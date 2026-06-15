@@ -55,6 +55,11 @@ Parameters:
     Type: String
     Default: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml
 
+  TempTemplateBucket:
+    Description: S3 bucket used to stage patched app templates during failback (steps 1 + 3). Must be in the same region as this stack. Used to bypass the 51,200-byte TemplateBody API limit.
+    Type: String
+    Default: cf-templates-190aa836foqbm-us-east-2
+
 Resources:
 
 ####
@@ -102,6 +107,9 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.12
       Timeout: 30
+      Environment:
+        Variables:
+          TEMP_TEMPLATE_BUCKET: !Ref TempTemplateBucket
       Code:
         ZipFile: |
           import logging
@@ -294,7 +302,7 @@ Resources:
                           fk, fv = _key(str(kvs[0][0])), kvs[0][1]
                           if isinstance(fv, (dict, list)) and fv:
                               parts.append(f'{p}- {fk}:')
-                              parts.append(_node(fv, d + 1))
+                              parts.append(_node(fv, d + 2))
                           elif isinstance(fv, bool):
                               parts.append(f'{p}- {fk}: {"true" if fv else "false"}')
                           elif fv is None:
@@ -308,7 +316,7 @@ Resources:
                               rks = _key(str(rk))
                               if isinstance(rv, (dict, list)) and rv:
                                   parts.append(f'{cp}{rks}:')
-                                  parts.append(_node(rv, d + 1))
+                                  parts.append(_node(rv, d + 2))
                               elif isinstance(rv, bool):
                                   parts.append(f'{cp}{rks}: {"true" if rv else "false"}')
                               elif rv is None:
@@ -396,6 +404,19 @@ Resources:
               rollback = status in ROLLBACK_STATES
               return {'status': status, 'complete': complete, 'rollback': rollback}
 
+          def _upload_template_to_s3(template_body, stack_name, action):
+              import os
+              region = os.environ.get('AWS_REGION', 'us-east-2')
+              bucket = os.environ.get('TEMP_TEMPLATE_BUCKET', '')
+              if not bucket:
+                  raise ValueError('TEMP_TEMPLATE_BUCKET environment variable not set')
+              key = f'failback/{stack_name}/{action}.yaml'
+              s3 = boto3.client('s3', region_name=region)
+              s3.put_object(Bucket=bucket, Key=key, Body=template_body.encode('utf-8'), ContentType='text/plain')
+              url = f'https://{bucket}.s3.{region}.amazonaws.com/{key}'
+              logger.info("[S3_UPLOAD] Uploaded patched template | bucket=%s | key=%s", bucket, key)
+              return url
+
           def _handle_patch(event, action):
               app_name = _get_app_name(event)
               logger.info("[PATCH] Start | stack=%s | action=%s", app_name, action)
@@ -405,26 +426,24 @@ Resources:
               modified = _patch_cfn_parameter(template_body, param_key='LoadBalancerStackName', comment=(action == 'comment'))
               patched = modified != template_body
               logger.info("[PATCH] Result | patched=%s | stack=%s | action=%s", patched, app_name, action)
-              if patched:
-                  sep = '=' * 72
-                  logger.info("[PATCH] Modified template for %s:\n%s\n%s\n%s", app_name, sep, modified, sep)
-              else:
+              if not patched:
                   logger.info("[PATCH] No changes — already in desired state | stack=%s | action=%s", app_name, action)
-              return {'stack_name': app_name, 'action': action, 'patched': patched, 'modified_template': modified}
+              template_s3_url = _upload_template_to_s3(modified, app_name, action)
+              return {'stack_name': app_name, 'action': action, 'patched': patched, 'template_s3_url': template_s3_url}
 
           def _handle_update_stack(event):
               app_name = _get_app_name(event)
-              template_body = event.get('template_body') or event.get('modified_template')
-              if not template_body:
-                  raise ValueError("update_stack action requires 'template_body' in the event")
-              logger.info("[UPDATE_STACK] Submitting template update | stack=%s", app_name)
+              template_s3_url = event.get('template_s3_url')
+              if not template_s3_url:
+                  raise ValueError("update_stack action requires 'template_s3_url' in the event")
+              logger.info("[UPDATE_STACK] Submitting template update | stack=%s | url=%s", app_name, template_s3_url)
               cfn = boto3.client('cloudformation')
               parameters = [{'ParameterKey': p['ParameterKey'], 'UsePreviousValue': True}
                             for p in _get_current_parameters(cfn, app_name)]
               try:
                   cfn.update_stack(
                       StackName=app_name,
-                      TemplateBody=template_body,
+                      TemplateURL=template_s3_url,
                       Parameters=parameters,
                       Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
                   )
@@ -677,13 +696,13 @@ Resources:
             },
 
             "ApplyStackUpdate": {
-              "Comment": "PATCH STEP 2 — Submit CloudFormation UpdateStack with the patched template. All parameters preserved via UsePreviousValue.",
+              "Comment": "PATCH STEP 2 — Submit CloudFormation UpdateStack with the patched template via S3 URL. All parameters preserved via UsePreviousValue.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "update_stack",
                 "app_name.$": "$.app_name",
-                "template_body.$": "$.patch_result.modified_template"
+                "template_s3_url.$": "$.patch_result.template_s3_url"
               },
               "ResultPath": "$.update_result",
               "Next": "Complete",
@@ -832,13 +851,13 @@ Resources:
             },
 
             "FailbackStep1ApplyUpdate": {
-              "Comment": "FAILOVER STEP 1b — Submit UpdateStack with the commented template.",
+              "Comment": "FAILOVER STEP 1b — Submit UpdateStack with the commented template via S3 URL (bypasses 51,200-byte TemplateBody limit).",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "update_stack",
                 "app_name.$": "$.app_name",
-                "template_body.$": "$.fo_s1_patch.modified_template"
+                "template_s3_url.$": "$.fo_s1_patch.template_s3_url"
               },
               "ResultPath": "$.fo_s1_update",
               "Next": "FailbackStep1Wait",
@@ -912,12 +931,13 @@ Resources:
             },
 
             "FailbackStep2SetDeployPaid": {
-              "Comment": "FAILOVER STEP 2a — Set DeployPaidResources=false on app stack (paid resources down).",
+              "Comment": "FAILOVER STEP 2a — Set DeployPaidResources=false on app stack (paid resources down). preserve_format=false uses UsePreviousTemplate — safe here because Step 1 already wrote the commented YAML to CFN.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "set_deploy_paid_false",
-                "app_name.$": "$.app_name"
+                "app_name.$": "$.app_name",
+                "preserve_format": false
               },
               "ResultPath": "$.fo_s2",
               "Next": "FailbackStep2Wait",
@@ -1018,13 +1038,13 @@ Resources:
             },
 
             "FailbackStep3ApplyUpdate": {
-              "Comment": "FAILOVER STEP 3b — Submit UpdateStack with the uncommented template.",
+              "Comment": "FAILOVER STEP 3b — Submit UpdateStack with the uncommented template via S3 URL (bypasses 51,200-byte TemplateBody limit).",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "update_stack",
                 "app_name.$": "$.app_name",
-                "template_body.$": "$.fo_s3_patch.modified_template"
+                "template_s3_url.$": "$.fo_s3_patch.template_s3_url"
               },
               "ResultPath": "$.fo_s3_update",
               "Next": "FailbackStep3Wait",

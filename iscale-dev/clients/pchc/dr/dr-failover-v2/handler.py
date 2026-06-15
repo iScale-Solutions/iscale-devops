@@ -366,7 +366,7 @@ def _update_stack_action(event):
     if stack_type == 'network':
         _cfn_update(cf, stack_name, extra, template_url=template_url or None)
     else:
-        _cfn_update(cf, stack_name, extra, preserve_yaml=True)
+        _cfn_update(cf, stack_name, extra)  # UsePreviousTemplate — avoids 51200-byte TemplateBody limit
 
     return {'stack_name': stack_name, 'submitted': True}
 
@@ -600,7 +600,7 @@ def _cfn_to_yaml(obj, _depth=0):
                 fk, fv = _key(str(kvs[0][0])), kvs[0][1]
                 if isinstance(fv, (dict, list)) and fv:
                     parts.append(f'{p}- {fk}:')
-                    parts.append(_node(fv, d + 1))
+                    parts.append(_node(fv, d + 2))
                 elif isinstance(fv, bool):
                     parts.append(f'{p}- {fk}: {"true" if fv else "false"}')
                 elif fv is None:
@@ -614,7 +614,7 @@ def _cfn_to_yaml(obj, _depth=0):
                     rks = _key(str(rk))
                     if isinstance(rv, (dict, list)) and rv:
                         parts.append(f'{cp}{rks}:')
-                        parts.append(_node(rv, d + 1))
+                        parts.append(_node(rv, d + 2))
                     elif isinstance(rv, bool):
                         parts.append(f'{cp}{rks}: {"true" if rv else "false"}')
                     elif rv is None:
