@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cross-account IAM roles 
+
+# Deployed in Prod SG region
+
+Parameters:
+  # ARN exec role of Image Builder AMI lifecycle lambda in source account that manages 
+  # AMI tags and SSM parameters in target accounts. This role must have permission to 
+  # assume the ImageBuilderLambda role created by this template.
+  LambdaExecRoleArn:
+    Type: String
+    Description: ARN of the Image Builder Lambda execution role in the source account.
+    Default: arn:aws:iam::123456789012:role/lambda-exec-role 
+
+  SourceAccountId:
+    Description: The AWS account ID where Image Builder pipelines run (source account).
+    Type: String
+    Default: "000000000000" # source account
+    AllowedPattern: "^[0-9]{12}$"
+
+Resources:
+
+  # Cross-account IAM role assumed by the Image Builder AMI lifecycle Lambda
+  # in the source account. Performs SSM parameter read/write/delete under
+  # /image_Builder/*, EC2 tagging, and AMI deregistration (each target account
+  # owns its own AMI copy via TargetAccountIds). Deployed via CloudFormation
+  # StackSet to all target accounts that receive base images.
+  ImageBuilderLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Image_Builder_Lambda # fix name across accounts to ensure the same role is used for all Image Builder Lambdas
+      Description: >
+        Assumed by the Image Builder Lambda in the source account to manage
+        AMI tags and SSM parameters in this account.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref LambdaExecRoleArn
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ImageBuilder_SSM_Parameters
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowSSMImageBuilderPath
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/image_Builder/*' # Scoped to only the Image Builder parameter path
+        - PolicyName: ImageBuilder_EC2_Tags
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowAMITagging
+                Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DescribeImages
+                  - ec2:DeregisterImage
+                Resource: '*' # CreateTags, DescribeImages, and DeregisterImage
+
+  # Cross-account IAM role required by EC2 Image Builder to distribute AMIs via
+  # TargetAccountIds. The role name is mandated by AWS and cannot be changed.
+  # Deploy via StackSet to all target accounts that receive base images.  
+  EC2ImageBuilderDistributionCrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EC2ImageBuilderDistributionCrossAccountRole # This role name is fixed and required by AWS and should not be changed
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              # Image Builder service-linked role in the source account (only this role can assume)
+              AWS: !Sub "arn:${AWS::Partition}:iam::${SourceAccountId}:role/aws-service-role/imagebuilder.amazonaws.com/AWSServiceRoleForImageBuilder"
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ImageBuilderDistribution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CopyImage
+                  - ec2:CreateTags
+                  - ec2:DescribeImages
+                  - ec2:DescribeSnapshots
+                  - ec2:ModifyImageAttribute
+                  - ec2:DescribeImageAttribute
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncryptFrom
+                  - kms:ReEncryptTo
+                  - kms:GenerateDataKeyWithoutPlaintext
+                  - kms:DescribeKey
+                  - kms:CreateGrant
+                Resource: "*"
+
