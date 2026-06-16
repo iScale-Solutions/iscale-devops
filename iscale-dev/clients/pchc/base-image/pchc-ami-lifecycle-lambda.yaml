@@ -1,0 +1,483 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation template for the EC2 Image Builder AMI lifecycle Lambda
+  and its IAM execution role. Triggered by SNS notifications from Image
+  Builder to update AMI tags and SSM parameters across multiple AWS accounts.
+
+# not stackset
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - SNSStackName
+          - CrossAccountRoleName
+
+  ParameterLabels:
+    OrgName:
+      default: Organization Name
+    EnvName:
+      default: Environment Name
+    SNSStackName:
+      default: SNS Topic Stack Name
+    CrossAccountRoleName:
+      default: Cross-Account Role Name
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 11
+  EnvName:
+    Description: Name of the environment.
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  SNSStackName:
+    Description: Name of the SNS topic stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-sns # change this if needed
+    MinLength: 1
+  CrossAccountRoleName:
+    Type: String
+    Description: Name of the IAM role to assume in target accounts. # iam-cross-account
+    Default: Image_Builder_Lambda # fix name across accounts to ensure the same role is used for all Image Builder Lambdas
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+  ImageBuilderLambdaExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Execution role for the Image Builder AMI lifecycle Lambda.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowCreateLogGroup
+                Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+              - Sid: AllowLogStreams
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+        - PolicyName: EC2AMIOperations
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowAMIDeregisterAndTag
+                Effect: Allow
+                Action:
+                  - ec2:DeregisterImage
+                  - ec2:CreateTags
+                  - ec2:DescribeImages
+                Resource: '*'
+        - PolicyName: SSMImageBuilderParameters
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowSSMImageBuilderPath
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/image_Builder/*' # ssm parameter name
+        # Cross-account Role Assumption
+        - PolicyName: AssumeTargetAccountRoles
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowAssumeImageBuilderRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${CrossAccountRoleName}'
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], image-builder-lifecycle]]
+      Role: !GetAtt ImageBuilderLambdaExecRole.Arn
+      Description: >
+        Processes EC2 Image Builder SNS notifications to manage AMI tags
+        and SSM parameters across multiple AWS accounts.
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import re
+          import logging
+          import boto3
+          from botocore.exceptions import ClientError
+
+          # Logging setup
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Global constants from environment variables
+          CROSS_ACCOUNT_ROLE_NAME = os.environ.get('CROSS_ACCOUNT_ROLE_NAME')
+          SOURCE_ACCOUNT_ID = os.environ.get('SOURCE_ACCOUNT_ID')
+
+          if not CROSS_ACCOUNT_ROLE_NAME:
+              logger.warning('CROSS_ACCOUNT_ROLE_NAME environment variable is not set')
+          if not SOURCE_ACCOUNT_ID:
+              logger.warning('SOURCE_ACCOUNT_ID environment variable is not set — old AMIs will never be deregistered')
+
+          # Entry point for Lambda
+          def lambda_handler(event, context):
+              logger.info('Event received: %s', json.dumps(event))
+              process_sns_event(event)
+              return None
+
+          # SNS event processing
+          def process_sns_event(event):
+              """Iterate over SNS records and process each Image Builder notification."""
+              for record in event.get('Records', []):
+                  message_json = json.loads(record['Sns']['Message'])
+                  logger.info('SNS message: %s', json.dumps(message_json))
+
+                  image_state = message_json.get('state', {}).get('status')
+                  if image_state != 'AVAILABLE':
+                      logger.info('Image state is %s - skipping.', image_state)
+                      continue
+
+                  handle_available_image(message_json)
+
+          # Core logic
+          def handle_available_image(message_json):
+              """
+              AMI lifecycle per build:
+
+              For each account:
+                - Deregister old previous AMI (each account owns its own copy with TargetAccountIds)
+                - Retag latest -> previous  (e.g. PCHC_AL2023_Previous, PCHC_AL2023_arm64_Previous)
+                - Tag new AMI  -> latest    (e.g. PCHC_AL2023_Latest,   PCHC_AL2023_arm64_Latest)
+                - Rotate SSM parameters     (e.g. /image_Builder/AL2023/base/latest, /image_Builder/AL2023/arm64/base/latest)
+
+              SSM parameter checks:
+                - If SSM path exists  -> normal rotation
+                - If SSM path missing -> first run, create new path
+              """
+              # Parse metadata
+              platform   = message_json['platform']
+              os_version = message_json['osVersion']
+
+              version_number = re.search(r'\d+', os_version)
+              if not version_number:
+                  logger.error('Cannot parse version number from osVersion: %s', os_version)
+                  return
+
+              os_ver_str = version_number.group(0)
+
+              # Proper OS-specific name e.g. AL2023, RHEL8, Windows2022
+              platform_tag = get_platform_tag_name(platform, os_ver_str, os_version)
+
+              # AL2023 ARM detection — check multiple SNS message fields since not all are guaranteed present.
+              # imagePipelineArn, arn (image ARN), and name all include the recipe/pipeline name which contains 'arm'.
+              arm_hints = ' '.join([
+                  message_json.get('imagePipelineArn', ''),
+                  message_json.get('arn', ''),
+                  message_json.get('name', ''),
+              ]).lower()
+              is_al2023_arm = platform_tag == f'AL{os_ver_str}' and 'arm' in arm_hints
+              logger.info('ARM detection: platform_tag=%s arm_hints=%s is_al2023_arm=%s', platform_tag, arm_hints, is_al2023_arm)
+
+              if is_al2023_arm:
+                  tag_latest   = f'PCHC_{platform_tag}_arm64_Latest'
+                  tag_previous = f'PCHC_{platform_tag}_arm64_Previous'
+                  ssm_latest   = f'/image_Builder/{platform_tag}/arm64/base/latest'
+                  ssm_previous = f'/image_Builder/{platform_tag}/arm64/base/previous'
+              else:
+                  tag_latest   = f'PCHC_{platform_tag}_Latest'
+                  tag_previous = f'PCHC_{platform_tag}_Previous'
+                  ssm_latest   = f'/image_Builder/{platform_tag}/base/latest'
+                  ssm_previous = f'/image_Builder/{platform_tag}/base/previous'
+
+              # Build a (region, account_id) -> AMI ID map.
+              # With TargetAccountIds each account gets its own copy with a unique AMI ID.
+              # The source account entry may have no accountId field — fall back to SOURCE_ACCOUNT_ID.
+              ami_by_region_account = {}
+              for ami in message_json['outputResources']['amis']:
+                  key = (ami['region'], ami.get('accountId', SOURCE_ACCOUNT_ID))
+                  ami_by_region_account[key] = ami['image']
+              logger.info('AMIs by region+account: %s', ami_by_region_account)
+
+              # Target accounts and regions come from the distribution config
+              distributions = message_json['distributionConfiguration']['distributions']
+
+              bad_accounts = []
+
+              for distribution in distributions:
+                  region = distribution['region']
+
+                  # Process source account first using the Lambda's own credentials.
+                  # The Lambda runs in the source account, so native clients read/write the correct SSM
+                  # and use the Lambda exec role to deregister AMI.
+                  # Always runs — even if there are no cross-account targets.
+                  if SOURCE_ACCOUNT_ID:
+                      new_ami_id = ami_by_region_account.get((region, SOURCE_ACCOUNT_ID))
+                      if not new_ami_id:
+                          logger.warning('No AMI found for source account %s region %s, skipping', SOURCE_ACCOUNT_ID, region)
+                      else:
+                          try:
+                              source_ssm = boto3.client('ssm', region_name=region)
+                              source_ec2 = boto3.client('ec2', region_name=region)
+                              rotate_account(
+                                  account_id   = SOURCE_ACCOUNT_ID,
+                                  ssm          = source_ssm,
+                                  ec2          = source_ec2,
+                                  new_ami_id   = new_ami_id,
+                                  ssm_latest   = ssm_latest,
+                                  ssm_previous = ssm_previous,
+                                  tag_latest   = tag_latest,
+                                  tag_previous = tag_previous,
+                              )
+                          except Exception:
+                              logger.exception('Unhandled error processing source account %s region %s', SOURCE_ACCOUNT_ID, region)
+                              bad_accounts.append(SOURCE_ACCOUNT_ID)
+
+                  aws_account_list = (
+                      distribution['amiDistributionConfiguration']
+                      .get('targetAccountIds', [])
+                  )
+
+                  if not aws_account_list:
+                      logger.info('No cross-account targets in region %s, skipping target loop', region)
+                      continue
+
+                  logger.info('Processing region %s, target accounts: %s', region, aws_account_list)
+
+                  for account_id in aws_account_list:
+                      if account_id == SOURCE_ACCOUNT_ID:
+                          logger.info('[%s][%s] Skipping source account (already processed above)', region, account_id)
+                          continue
+                      logger.info('[%s][%s] Processing account', region, account_id)
+
+                      # Each target account owns its own AMI copy — look up its unique AMI ID
+                      new_ami_id = ami_by_region_account.get((region, account_id))
+                      if not new_ami_id:
+                          logger.warning('[%s][%s] No AMI found for account, skipping', region, account_id)
+                          continue
+                      try:
+                          ssm, ec2 = get_cross_account_clients(account_id, region)
+                      except Exception:
+                          logger.exception('Unable to assume role in account %s', account_id)
+                          bad_accounts.append(account_id)
+                          continue
+
+                      try:
+                          rotate_account(
+                              account_id   = account_id,
+                              ssm          = ssm,
+                              ec2          = ec2,
+                              new_ami_id   = new_ami_id,
+                              ssm_latest   = ssm_latest,
+                              ssm_previous = ssm_previous,
+                              tag_latest   = tag_latest,
+                              tag_previous = tag_previous,
+                          )
+                      except Exception:
+                          logger.exception('Unhandled error processing account %s region %s', account_id, region)
+                          bad_accounts.append(account_id)
+
+              if bad_accounts:
+                  logger.warning('Failed to process accounts: %s', bad_accounts)
+
+          def rotate_account(account_id, ssm, ec2, new_ami_id, ssm_latest, ssm_previous, tag_latest, tag_previous):
+              """
+              Handles 2 scenarios per account:
+
+              First run — SSM path does not exist:
+                - Create SSM latest parameter
+                - Tag new AMI as latest
+
+              Normal rotation — SSM path exists:
+                - Deregister previous AMI (each account owns its own copy)
+                - Retag latest -> previous, new AMI -> latest
+                - Rotate SSM parameters
+              """
+              current_latest   = get_ssm_value(ssm, ssm_latest)
+              current_previous = get_ssm_value(ssm, ssm_previous)
+
+              if current_latest is None:
+                  # First run — no existing SSM parameter
+                  logger.info('[%s] First run detected, creating initial SSM parameter', account_id)
+                  put_ssm(ssm, ssm_latest, new_ami_id, 'Latest AMI ID')
+                  tag_ami(ec2, new_ami_id, tag_latest)
+                  return
+
+              # Normal rotation
+              # Deregister old previous AMI — each account owns its own copy with TargetAccountIds
+              if current_previous:
+                  logger.info('[%s] Deregistering previous AMI %s', account_id, current_previous)
+                  try:
+                      ec2.deregister_image(ImageId=current_previous)
+                      logger.info('[%s] Deregistered AMI %s', account_id, current_previous)
+                  except ClientError:
+                      logger.exception('[%s] Failed to deregister AMI %s', account_id, current_previous)
+
+              # Retag current latest -> previous
+              logger.info('[%s] Retagging %s -> %s', account_id, current_latest, tag_previous)
+              tag_ami(ec2, current_latest, tag_previous)
+
+              # Tag new AMI -> latest
+              logger.info('[%s] Tagging new AMI %s -> %s', account_id, new_ami_id, tag_latest)
+              tag_ami(ec2, new_ami_id, tag_latest)
+
+              # Rotate SSM
+              put_ssm(ssm, ssm_previous, current_latest, 'Previous AMI ID')
+              put_ssm(ssm, ssm_latest,   new_ami_id,     'Latest AMI ID')
+
+          # Helpers - AWS operations
+          def get_cross_account_clients(account_id, region=None):
+              """Assume cross-account role and return (ssm, ec2) clients for the given region."""
+              sts = boto3.client('sts')
+              partition = os.environ.get('PARTITION', 'aws')
+              role_arn = f'arn:{partition}:iam::{account_id}:role/{CROSS_ACCOUNT_ROLE_NAME}'
+              creds = sts.assume_role(
+                  RoleArn=role_arn,
+                  RoleSessionName='image_builder_lambda'
+              )['Credentials']
+
+              kwargs = dict(
+                  aws_access_key_id     = creds['AccessKeyId'],
+                  aws_secret_access_key = creds['SecretAccessKey'],
+                  aws_session_token     = creds['SessionToken'],
+              )
+              if region:
+                  kwargs['region_name'] = region
+              ssm = boto3.client('ssm', **kwargs)
+              ec2 = boto3.client('ec2', **kwargs)
+              return ssm, ec2
+
+          def get_ssm_value(ssm, name):
+              """Return SSM parameter value, or None if the parameter does not exist."""
+              try:
+                  return ssm.get_parameter(Name=name)['Parameter']['Value']
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'ParameterNotFound':
+                      return None
+                  raise
+
+          def put_ssm(ssm, name, value, description):
+              """Create or overwrite an SSM String parameter."""
+              ssm.put_parameter(
+                  Name        = name,
+                  Description = description,
+                  Value       = value,
+                  Type        = 'String',
+                  Overwrite   = True,
+                  Tier        = 'Standard',
+              )
+              logger.info('SSM parameter updated: %s = %s', name, value)
+
+          def tag_ami(ec2_client, ami_id, name_value):
+              """Apply a Name tag to an AMI."""
+              try:
+                  ec2_client.create_tags(
+                      Resources = [ami_id],
+                      Tags      = [{'Key': 'Name', 'Value': name_value}],
+                  )
+                  logger.info('Tagged AMI %s as %s', ami_id, name_value)
+              except ClientError:
+                  logger.exception('Failed to tag AMI %s with %s', ami_id, name_value)
+                  raise
+
+          # Detect OS
+          def get_platform_tag_name(platform: str, os_version: str, os_name_full: str) -> str:
+              name = os_name_full.lower()
+
+              if 'amazon linux' in name:
+                  return f'AL{os_version}'
+              if 'rhel' in name or 'red hat' in name:
+                  return f'RHEL{os_version}'
+              if 'ubuntu' in name:
+                  return f'Ubuntu{os_version}'
+              if 'windows' in name:
+                  return f'Windows{os_version}'
+
+              # Fallback: use platform + version e.g. Linux2023
+              return f'{platform}{os_version}'
+
+      Timeout: 300
+      MemorySize: 128
+      Environment:
+        Variables:
+          CROSS_ACCOUNT_ROLE_NAME: !Ref CrossAccountRoleName
+          SOURCE_ACCOUNT_ID: !Ref 'AWS::AccountId'
+          PARTITION: !Ref 'AWS::Partition'
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvName
+
+  LambdaSnsSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: LambdaSnsPermission
+    Properties:
+      TopicArn:
+        Fn::ImportValue:
+          !Sub "${SNSStackName}-TopicArn"
+      Protocol: lambda
+      Endpoint: !GetAtt LambdaFunction.Arn
+
+  LambdaSnsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn:
+        Fn::ImportValue:
+          !Sub "${SNSStackName}-TopicArn"
+
+Outputs:
+
+  LambdaExecRoleArn:
+    Description: ARN of the Lambda execution role.
+    Value: !GetAtt ImageBuilderLambdaExecRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaExecRoleArn'
+
+  LambdaExecRoleName:
+    Description: Name of the Lambda execution role.
+    Value: !Ref ImageBuilderLambdaExecRole
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaExecRoleName'
