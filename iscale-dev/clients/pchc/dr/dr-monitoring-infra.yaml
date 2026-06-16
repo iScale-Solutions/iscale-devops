@@ -45,7 +45,7 @@ Metadata:
       - Label:
           default: CICS Configuration
         Parameters:
-          - CicsAutoScalingGroupName
+          - CicsTargetGroupFullName
           - CicsDBInstanceIdentifier
           - CicsLoadBalancerFullName
           - CicsRDSConnectionThreshold
@@ -126,10 +126,10 @@ Metadata:
         default: MIS ALB Full Name
       MisRDSConnectionThreshold:
         default: MIS RDS Connection Threshold
-      CicsAutoScalingGroupName:
-        default: CICS Auto Scaling Group Name (leave empty to skip — app not monitored or not in this region)
+      CicsTargetGroupFullName:
+        default: CICS ALB Target Group Full Name (leave empty to skip — app not monitored or not in this region)
       CicsDBInstanceIdentifier:
-        default: CICS RDS Instance Identifier
+        default: CICS RDS Instance Identifier (primary DBStack — not the FE database)
       CicsLoadBalancerFullName:
         default: CICS ALB Full Name
       CicsRDSConnectionThreshold:
@@ -288,13 +288,13 @@ Parameters:
     Default: 100
     MinValue: 1
 
-  # CICS
-  CicsAutoScalingGroupName:
-    Description: CICS Auto Scaling Group name (used for EC2 StatusCheckFailed alarm)
+  # CICS (Windows EC2 — standalone instances, no ASG; monitored via ALB Target Group health)
+  CicsTargetGroupFullName:
+    Description: CICS ALB target group full name (e.g. targetgroup/pchc-prd-ase1-cics/abc123), used for HealthyHostCount alarm in place of an EC2 ASG status check
     Type: String
     Default: ''
   CicsDBInstanceIdentifier:
-    Description: CICS RDS instance identifier
+    Description: CICS RDS instance identifier (primary DBStack)
     Type: String
     Default: ''
   CicsLoadBalancerFullName:
@@ -414,7 +414,7 @@ Conditions:
   IsPddtsEnabled: !Not [!Equals [!Ref PddtsAutoScalingGroupName, '']]
   IsPddtsEodEnabled: !Not [!Equals [!Ref PddtsEodAutoScalingGroupName, '']]
   IsMisEnabled: !Not [!Equals [!Ref MisAutoScalingGroupName, '']]
-  IsCicsEnabled: !Not [!Equals [!Ref CicsAutoScalingGroupName, '']]
+  IsCicsEnabled: !Not [!Equals [!Ref CicsTargetGroupFullName, '']]
   IsDirectDebitEnabled: !Not [!Equals [!Ref DirectDebitAutoScalingGroupName, '']]
   IsPas6Enabled: !Not [!Equals [!Ref Pas6AutoScalingGroupName, '']]
   IsDsappEnabled: !Not [!Equals [!Ref DsappAutoScalingGroupName, '']]
@@ -827,22 +827,24 @@ Resources:
 # CICS
 ##
 
-  CicsEC2Alarm:
+  CicsTargetGroupAlarm:
     Type: AWS::CloudWatch::Alarm
     Condition: IsCicsEnabled
     Properties:
-      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'cics-ec2-alarm']]
-      AlarmDescription: CICS EC2 status check failed
-      Namespace: AWS/EC2
-      MetricName: StatusCheckFailed
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'cics-tg-alarm']]
+      AlarmDescription: CICS ALB target group has no healthy hosts (no EC2 ASG exists for this app — standalone instances behind the target group)
+      Namespace: AWS/ApplicationELB
+      MetricName: HealthyHostCount
       Dimensions:
-        - Name: AutoScalingGroupName
-          Value: !Ref CicsAutoScalingGroupName
-      Statistic: Maximum
-      Period: 300
+        - Name: LoadBalancer
+          Value: !Ref CicsLoadBalancerFullName
+        - Name: TargetGroup
+          Value: !Ref CicsTargetGroupFullName
+      Statistic: Average
+      Period: 60
       EvaluationPeriods: 1
-      Threshold: 0
-      ComparisonOperator: GreaterThanThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
         - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
@@ -916,8 +918,8 @@ Resources:
     Condition: IsCicsEnabled
     Properties:
       AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'cics-infra-composite-alarm']]
-      AlarmDescription: CICS infrastructure degraded — EC2, RDS, and ALB all alarming simultaneously
-      AlarmRule: !Sub 'ALARM(${CicsEC2Alarm}) AND ALARM(${CicsRDSAlarm}) AND ALARM(${CicsALBAlarm})'
+      AlarmDescription: CICS infrastructure degraded — Target Group health, RDS, and ALB all alarming simultaneously
+      AlarmRule: !Sub 'ALARM(${CicsTargetGroupAlarm}) AND ALARM(${CicsRDSAlarm}) AND ALARM(${CicsALBAlarm})'
       AlarmActions:
         - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
