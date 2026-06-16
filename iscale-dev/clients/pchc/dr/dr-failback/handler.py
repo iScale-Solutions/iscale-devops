@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 import boto3
 from botocore.exceptions import ClientError
 
@@ -579,6 +580,174 @@ def _handle_check_both_stacks_status(event: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Action: PITR DB / EFS cleanup (failback for PITR-mode failovers)
+# ---------------------------------------------------------------------------
+# The PITR RDS instance and the AWS-Backup-restored EFS file system are both
+# created out-of-band by the failover Lambda (boto3 calls, not CFN resources)
+# — see dr-failover-v2/handler.py _restore_db / _restore_efs. Neither is
+# covered by any stack's DeletionPolicy, so failback must snapshot + delete
+# them explicitly. Only run when the failback payload has use_pitr=true.
+
+def _handle_snapshot_pitr_db(event: dict) -> dict:
+    pitr_id = event.get('pitr_target_identifier')
+    if not pitr_id:
+        raise ValueError("snapshot_pitr_db requires 'pitr_target_identifier'")
+
+    rds = boto3.client('rds')
+    try:
+        rds.describe_db_instances(DBInstanceIdentifier=pitr_id)
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'DBInstanceNotFound':
+            logger.info("[SNAPSHOT_PITR_DB] Instance not found — nothing to snapshot | id=%s", pitr_id)
+            return {'submitted': False, 'reason': 'not_found'}
+        raise
+
+    snapshot_id = f'{pitr_id}-failback-{int(time.time())}'
+    rds.create_db_snapshot(DBSnapshotIdentifier=snapshot_id, DBInstanceIdentifier=pitr_id)
+    logger.info("[SNAPSHOT_PITR_DB] Snapshot started | id=%s | snapshot=%s", pitr_id, snapshot_id)
+    return {'submitted': True, 'snapshot_id': snapshot_id, 'db_instance_identifier': pitr_id}
+
+
+def _handle_check_pitr_snapshot_status(event: dict) -> dict:
+    snapshot_id = event.get('snapshot_id')
+    if not snapshot_id:
+        raise ValueError("check_pitr_snapshot_status requires 'snapshot_id'")
+
+    rds = boto3.client('rds')
+    resp = rds.describe_db_snapshots(DBSnapshotIdentifier=snapshot_id)
+    status = resp['DBSnapshots'][0]['Status']
+    complete = status == 'available'
+    failed = status in ('failed', 'incompatible-restore', 'incompatible-parameters')
+
+    logger.info("[CHECK_PITR_SNAPSHOT] id=%s | status=%s | complete=%s", snapshot_id, status, complete)
+    return {'status': status, 'complete': complete, 'failed': failed, 'snapshot_id': snapshot_id}
+
+
+def _handle_delete_pitr_db(event: dict) -> dict:
+    pitr_id = event.get('pitr_target_identifier')
+    if not pitr_id:
+        raise ValueError("delete_pitr_db requires 'pitr_target_identifier'")
+
+    rds = boto3.client('rds')
+    try:
+        # SkipFinalSnapshot=True — the manual snapshot was already taken in
+        # snapshot_pitr_db, so a second automatic snapshot here is redundant.
+        rds.delete_db_instance(DBInstanceIdentifier=pitr_id, SkipFinalSnapshot=True)
+        logger.info("[DELETE_PITR_DB] Delete submitted | id=%s", pitr_id)
+        return {'submitted': True, 'db_instance_identifier': pitr_id}
+    except ClientError as e:
+        code = e.response['Error']['Code']
+        if code == 'DBInstanceNotFound':
+            logger.info("[DELETE_PITR_DB] Already deleted | id=%s", pitr_id)
+            return {'submitted': False, 'reason': 'not_found', 'db_instance_identifier': pitr_id}
+        if code == 'InvalidDBInstanceState':
+            logger.info("[DELETE_PITR_DB] Already deleting | id=%s | msg=%s", pitr_id, e.response['Error']['Message'])
+            return {'submitted': False, 'reason': 'already_deleting', 'db_instance_identifier': pitr_id}
+        raise
+
+
+def _handle_check_pitr_db_deleted(event: dict) -> dict:
+    pitr_id = event.get('pitr_target_identifier')
+    if not pitr_id:
+        raise ValueError("check_pitr_db_deleted requires 'pitr_target_identifier'")
+
+    rds = boto3.client('rds')
+    try:
+        resp = rds.describe_db_instances(DBInstanceIdentifier=pitr_id)
+        status = resp['DBInstances'][0]['DBInstanceStatus']
+        logger.info("[CHECK_PITR_DB_DELETED] id=%s | status=%s", pitr_id, status)
+        return {'deleted': False, 'status': status}
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'DBInstanceNotFound':
+            logger.info("[CHECK_PITR_DB_DELETED] Confirmed deleted | id=%s", pitr_id)
+            return {'deleted': True, 'status': 'DELETED'}
+        raise
+
+
+def _handle_delete_pitr_efs_mount_targets(event: dict) -> dict:
+    ssm_path = event.get('efs_id_ssm_path')
+    if not ssm_path:
+        logger.info("[DELETE_PITR_EFS] No efs_id_ssm_path in payload — nothing to clean up.")
+        return {'submitted': False, 'reason': 'no_ssm_path'}
+
+    ssm = boto3.client('ssm')
+    try:
+        efs_id = ssm.get_parameter(Name=ssm_path)['Parameter']['Value']
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ParameterNotFound':
+            logger.info("[DELETE_PITR_EFS] No SSM parameter — nothing to clean up | path=%s", ssm_path)
+            return {'submitted': False, 'reason': 'not_found'}
+        raise
+
+    if not efs_id:
+        return {'submitted': False, 'reason': 'empty_efs_id'}
+
+    efs = boto3.client('efs')
+    try:
+        mount_targets = efs.describe_mount_targets(FileSystemId=efs_id).get('MountTargets', [])
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'FileSystemNotFound':
+            logger.info("[DELETE_PITR_EFS] Filesystem already gone | efs_id=%s", efs_id)
+            return {'submitted': False, 'reason': 'fs_not_found', 'efs_id': efs_id}
+        raise
+
+    for mt in mount_targets:
+        try:
+            efs.delete_mount_target(MountTargetId=mt['MountTargetId'])
+            logger.info("[DELETE_PITR_EFS] Deleting mount target %s | efs_id=%s", mt['MountTargetId'], efs_id)
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'MountTargetNotFound':
+                raise
+
+    return {'submitted': True, 'efs_id': efs_id}
+
+
+def _handle_check_pitr_efs_mount_targets_deleted(event: dict) -> dict:
+    efs_id = event.get('efs_id')
+    if not efs_id:
+        raise ValueError("check_pitr_efs_mount_targets_deleted requires 'efs_id'")
+
+    efs = boto3.client('efs')
+    try:
+        remaining = efs.describe_mount_targets(FileSystemId=efs_id).get('MountTargets', [])
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'FileSystemNotFound':
+            return {'deleted': True, 'efs_id': efs_id}
+        raise
+
+    deleted = len(remaining) == 0
+    logger.info("[CHECK_PITR_EFS_MT] efs_id=%s | remaining=%d", efs_id, len(remaining))
+    return {'deleted': deleted, 'efs_id': efs_id}
+
+
+def _handle_delete_pitr_efs_filesystem(event: dict) -> dict:
+    efs_id = event.get('efs_id')
+    ssm_path = event.get('efs_id_ssm_path')
+    if not efs_id:
+        raise ValueError("delete_pitr_efs_filesystem requires 'efs_id'")
+
+    efs = boto3.client('efs')
+    try:
+        efs.delete_file_system(FileSystemId=efs_id)
+        logger.info("[DELETE_PITR_EFS_FS] Deleted | efs_id=%s", efs_id)
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'FileSystemNotFound':
+            raise
+        logger.info("[DELETE_PITR_EFS_FS] Already gone | efs_id=%s", efs_id)
+
+    if ssm_path:
+        ssm = boto3.client('ssm')
+        try:
+            ssm.delete_parameter(Name=ssm_path)
+            logger.info("[DELETE_PITR_EFS_FS] Cleared SSM param | path=%s", ssm_path)
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'ParameterNotFound':
+                raise
+
+    return {'submitted': True, 'efs_id': efs_id}
+
+
+# ---------------------------------------------------------------------------
 # Lambda entry point
 # ---------------------------------------------------------------------------
 
@@ -597,9 +766,27 @@ def handler(event, context):
         return _handle_check_stack_status(event)
     if action == 'check_both_stacks_status':
         return _handle_check_both_stacks_status(event)
+    if action == 'snapshot_pitr_db':
+        return _handle_snapshot_pitr_db(event)
+    if action == 'check_pitr_snapshot_status':
+        return _handle_check_pitr_snapshot_status(event)
+    if action == 'delete_pitr_db':
+        return _handle_delete_pitr_db(event)
+    if action == 'check_pitr_db_deleted':
+        return _handle_check_pitr_db_deleted(event)
+    if action == 'delete_pitr_efs_mount_targets':
+        return _handle_delete_pitr_efs_mount_targets(event)
+    if action == 'check_pitr_efs_mount_targets_deleted':
+        return _handle_check_pitr_efs_mount_targets_deleted(event)
+    if action == 'delete_pitr_efs_filesystem':
+        return _handle_delete_pitr_efs_filesystem(event)
 
     raise ValueError(
         f"action must be 'comment', 'uncomment', 'update_stack', "
         f"'set_deploy_paid_false', 'set_deploy_paid_false_both', "
-        f"'check_stack_status', or 'check_both_stacks_status' — got: {action!r}"
+        f"'check_stack_status', 'check_both_stacks_status', "
+        f"'snapshot_pitr_db', 'check_pitr_snapshot_status', 'delete_pitr_db', "
+        f"'check_pitr_db_deleted', 'delete_pitr_efs_mount_targets', "
+        f"'check_pitr_efs_mount_targets_deleted', or "
+        f"'delete_pitr_efs_filesystem' — got: {action!r}"
     )

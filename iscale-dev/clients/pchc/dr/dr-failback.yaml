@@ -6,6 +6,19 @@ AWSTemplateFormatVersion: 2010-09-09
 #   { "app_name": "<stack>", "action": "set_deploy_paid_false" }
 # Stack pattern: pchc-<env>-<region>-<app>  e.g. pchc-tdr-ue2-pesonet20
 #
+# Event payload (PITR-mode failover — e.g. ddp, pesonet20, pddts, pddts-eod, pas6, mis):
+# When the prior failover used use_pitr=true, "failback" also snapshots and deletes the
+# out-of-band PITR RDS instance and the AWS-Backup-restored EFS file system. Pass:
+#   {
+#     "app_name":               "<stack>",
+#     "action":                 "failback",
+#     "network_stack_name":     "<network-stack>",
+#     "use_pitr":                true,
+#     "pitr_target_identifier": "<PITR RDS instance identifier created at failover>",
+#     "efs_id_ssm_path":        "<SSM path holding the restored EFS file system ID>"
+#   }
+# Set use_pitr=false (or omit it) to skip the PITR cleanup steps entirely.
+#
 # Event payload (ECS Fargate multi-stack apps — e.g. SmartAPI):
 #   {
 #     "action": "ecs_failback",
@@ -110,7 +123,9 @@ Resources:
       FunctionName: !Sub '${AWS::StackName}'
       Description: >-
         DR Failback Lambda. Actions: comment | uncomment | update_stack | set_deploy_paid_false |
-        set_deploy_paid_false_both | check_stack_status | check_both_stacks_status.
+        set_deploy_paid_false_both | check_stack_status | check_both_stacks_status |
+        snapshot_pitr_db | check_pitr_snapshot_status | delete_pitr_db | check_pitr_db_deleted |
+        delete_pitr_efs_mount_targets | check_pitr_efs_mount_targets_deleted | delete_pitr_efs_filesystem.
         Payload: { "app_name": "pchc-tdr-ue2-pesonet", "action": "<action>" }
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -122,6 +137,7 @@ Resources:
       Code:
         ZipFile: |
           import logging
+          import time
           import boto3
           from botocore.exceptions import ClientError
 
@@ -530,6 +546,140 @@ Resources:
                   'any_rollback':       any_rollback,
               }
 
+          def _handle_snapshot_pitr_db(event):
+              pitr_id = event.get('pitr_target_identifier')
+              if not pitr_id:
+                  raise ValueError("snapshot_pitr_db requires 'pitr_target_identifier'")
+              rds = boto3.client('rds')
+              try:
+                  rds.describe_db_instances(DBInstanceIdentifier=pitr_id)
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'DBInstanceNotFound':
+                      logger.info("[SNAPSHOT_PITR_DB] Instance not found — nothing to snapshot | id=%s", pitr_id)
+                      return {'submitted': False, 'reason': 'not_found'}
+                  raise
+              snapshot_id = f'{pitr_id}-failback-{int(time.time())}'
+              rds.create_db_snapshot(DBSnapshotIdentifier=snapshot_id, DBInstanceIdentifier=pitr_id)
+              logger.info("[SNAPSHOT_PITR_DB] Snapshot started | id=%s | snapshot=%s", pitr_id, snapshot_id)
+              return {'submitted': True, 'snapshot_id': snapshot_id, 'db_instance_identifier': pitr_id}
+
+          def _handle_check_pitr_snapshot_status(event):
+              snapshot_id = event.get('snapshot_id')
+              if not snapshot_id:
+                  raise ValueError("check_pitr_snapshot_status requires 'snapshot_id'")
+              rds = boto3.client('rds')
+              resp = rds.describe_db_snapshots(DBSnapshotIdentifier=snapshot_id)
+              status = resp['DBSnapshots'][0]['Status']
+              complete = status == 'available'
+              failed = status in ('failed', 'incompatible-restore', 'incompatible-parameters')
+              logger.info("[CHECK_PITR_SNAPSHOT] id=%s | status=%s | complete=%s", snapshot_id, status, complete)
+              return {'status': status, 'complete': complete, 'failed': failed, 'snapshot_id': snapshot_id}
+
+          def _handle_delete_pitr_db(event):
+              pitr_id = event.get('pitr_target_identifier')
+              if not pitr_id:
+                  raise ValueError("delete_pitr_db requires 'pitr_target_identifier'")
+              rds = boto3.client('rds')
+              try:
+                  rds.delete_db_instance(DBInstanceIdentifier=pitr_id, SkipFinalSnapshot=True)
+                  logger.info("[DELETE_PITR_DB] Delete submitted | id=%s", pitr_id)
+                  return {'submitted': True, 'db_instance_identifier': pitr_id}
+              except ClientError as e:
+                  code = e.response['Error']['Code']
+                  if code == 'DBInstanceNotFound':
+                      logger.info("[DELETE_PITR_DB] Already deleted | id=%s", pitr_id)
+                      return {'submitted': False, 'reason': 'not_found', 'db_instance_identifier': pitr_id}
+                  if code == 'InvalidDBInstanceState':
+                      logger.info("[DELETE_PITR_DB] Already deleting | id=%s | msg=%s", pitr_id, e.response['Error']['Message'])
+                      return {'submitted': False, 'reason': 'already_deleting', 'db_instance_identifier': pitr_id}
+                  raise
+
+          def _handle_check_pitr_db_deleted(event):
+              pitr_id = event.get('pitr_target_identifier')
+              if not pitr_id:
+                  raise ValueError("check_pitr_db_deleted requires 'pitr_target_identifier'")
+              rds = boto3.client('rds')
+              try:
+                  resp = rds.describe_db_instances(DBInstanceIdentifier=pitr_id)
+                  status = resp['DBInstances'][0]['DBInstanceStatus']
+                  logger.info("[CHECK_PITR_DB_DELETED] id=%s | status=%s", pitr_id, status)
+                  return {'deleted': False, 'status': status}
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'DBInstanceNotFound':
+                      logger.info("[CHECK_PITR_DB_DELETED] Confirmed deleted | id=%s", pitr_id)
+                      return {'deleted': True, 'status': 'DELETED'}
+                  raise
+
+          def _handle_delete_pitr_efs_mount_targets(event):
+              ssm_path = event.get('efs_id_ssm_path')
+              if not ssm_path:
+                  logger.info("[DELETE_PITR_EFS] No efs_id_ssm_path in payload — nothing to clean up.")
+                  return {'submitted': False, 'reason': 'no_ssm_path'}
+              ssm = boto3.client('ssm')
+              try:
+                  efs_id = ssm.get_parameter(Name=ssm_path)['Parameter']['Value']
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'ParameterNotFound':
+                      logger.info("[DELETE_PITR_EFS] No SSM parameter — nothing to clean up | path=%s", ssm_path)
+                      return {'submitted': False, 'reason': 'not_found'}
+                  raise
+              if not efs_id:
+                  return {'submitted': False, 'reason': 'empty_efs_id'}
+              efs = boto3.client('efs')
+              try:
+                  mount_targets = efs.describe_mount_targets(FileSystemId=efs_id).get('MountTargets', [])
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'FileSystemNotFound':
+                      logger.info("[DELETE_PITR_EFS] Filesystem already gone | efs_id=%s", efs_id)
+                      return {'submitted': False, 'reason': 'fs_not_found', 'efs_id': efs_id}
+                  raise
+              for mt in mount_targets:
+                  try:
+                      efs.delete_mount_target(MountTargetId=mt['MountTargetId'])
+                      logger.info("[DELETE_PITR_EFS] Deleting mount target %s | efs_id=%s", mt['MountTargetId'], efs_id)
+                  except ClientError as e:
+                      if e.response['Error']['Code'] != 'MountTargetNotFound':
+                          raise
+              return {'submitted': True, 'efs_id': efs_id}
+
+          def _handle_check_pitr_efs_mount_targets_deleted(event):
+              efs_id = event.get('efs_id')
+              if not efs_id:
+                  raise ValueError("check_pitr_efs_mount_targets_deleted requires 'efs_id'")
+              efs = boto3.client('efs')
+              try:
+                  remaining = efs.describe_mount_targets(FileSystemId=efs_id).get('MountTargets', [])
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'FileSystemNotFound':
+                      return {'deleted': True, 'efs_id': efs_id}
+                  raise
+              deleted = len(remaining) == 0
+              logger.info("[CHECK_PITR_EFS_MT] efs_id=%s | remaining=%d", efs_id, len(remaining))
+              return {'deleted': deleted, 'efs_id': efs_id}
+
+          def _handle_delete_pitr_efs_filesystem(event):
+              efs_id = event.get('efs_id')
+              ssm_path = event.get('efs_id_ssm_path')
+              if not efs_id:
+                  raise ValueError("delete_pitr_efs_filesystem requires 'efs_id'")
+              efs = boto3.client('efs')
+              try:
+                  efs.delete_file_system(FileSystemId=efs_id)
+                  logger.info("[DELETE_PITR_EFS_FS] Deleted | efs_id=%s", efs_id)
+              except ClientError as e:
+                  if e.response['Error']['Code'] != 'FileSystemNotFound':
+                      raise
+                  logger.info("[DELETE_PITR_EFS_FS] Already gone | efs_id=%s", efs_id)
+              if ssm_path:
+                  ssm = boto3.client('ssm')
+                  try:
+                      ssm.delete_parameter(Name=ssm_path)
+                      logger.info("[DELETE_PITR_EFS_FS] Cleared SSM param | path=%s", ssm_path)
+                  except ClientError as e:
+                      if e.response['Error']['Code'] != 'ParameterNotFound':
+                          raise
+              return {'submitted': True, 'efs_id': efs_id}
+
           def handler(event, context):
               action = event.get('action', 'comment').lower()
               if action in ('comment', 'uncomment'):
@@ -544,6 +694,20 @@ Resources:
                   return _handle_check_stack_status(event)
               if action == 'check_both_stacks_status':
                   return _handle_check_both_stacks_status(event)
+              if action == 'snapshot_pitr_db':
+                  return _handle_snapshot_pitr_db(event)
+              if action == 'check_pitr_snapshot_status':
+                  return _handle_check_pitr_snapshot_status(event)
+              if action == 'delete_pitr_db':
+                  return _handle_delete_pitr_db(event)
+              if action == 'check_pitr_db_deleted':
+                  return _handle_check_pitr_db_deleted(event)
+              if action == 'delete_pitr_efs_mount_targets':
+                  return _handle_delete_pitr_efs_mount_targets(event)
+              if action == 'check_pitr_efs_mount_targets_deleted':
+                  return _handle_check_pitr_efs_mount_targets_deleted(event)
+              if action == 'delete_pitr_efs_filesystem':
+                  return _handle_delete_pitr_efs_filesystem(event)
               raise ValueError(f"Unknown action: {action!r}")
 
 ####
@@ -614,7 +778,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failback 4-step sequential orchestration. Routed by 'action' in the input payload.",
+          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failback 4-step sequential orchestration (with optional PITR RDS + EFS cleanup gated on use_pitr), (4) ecs_failback. Routed by 'action' in the input payload.",
           "StartAt": "ValidateAction",
           "States": {
 
@@ -1007,7 +1171,7 @@ Resources:
             },
 
             "FailbackStep2Done": {
-              "Comment": "Fail fast on rollback. Advance to Step 3 when complete. Otherwise loop.",
+              "Comment": "Fail fast on rollback. Advance to PITR cleanup check when complete. Otherwise loop.",
               "Type": "Choice",
               "Choices": [
                 {
@@ -1018,10 +1182,304 @@ Resources:
                 {
                   "Variable": "$.fo_s2_status.update_complete",
                   "BooleanEquals": true,
-                  "Next": "FailbackStep3Uncomment"
+                  "Next": "CheckUsePitr"
                 }
               ],
               "Default": "FailbackStep2Wait"
+            },
+
+            "CheckUsePitr": {
+              "Comment": "PITR CLEANUP — only snapshot/delete the out-of-band PITR DB and EFS when this failback follows a PITR-mode failover (use_pitr=true in the input).",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.use_pitr",
+                  "BooleanEquals": true,
+                  "Next": "SnapshotPitrDb"
+                }
+              ],
+              "Default": "FailbackStep3Uncomment"
+            },
+
+            "SnapshotPitrDb": {
+              "Comment": "PITR CLEANUP 1a — Take a final manual snapshot of the out-of-band PITR RDS instance before deleting it.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "snapshot_pitr_db",
+                "pitr_target_identifier.$": "$.pitr_target_identifier"
+              },
+              "ResultPath": "$.pitr_snapshot_result",
+              "Next": "CheckSnapshotSubmitted",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "CheckSnapshotSubmitted": {
+              "Comment": "If the PITR instance no longer exists there is nothing to snapshot or delete — skip straight to EFS cleanup.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.pitr_snapshot_result.submitted",
+                  "BooleanEquals": true,
+                  "Next": "WaitForPitrSnapshot"
+                }
+              ],
+              "Default": "DeletePitrEfsMountTargets"
+            },
+
+            "WaitForPitrSnapshot": {
+              "Comment": "PITR CLEANUP 1b — Wait for the manual snapshot to complete.",
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckPitrSnapshotStatus"
+            },
+
+            "CheckPitrSnapshotStatus": {
+              "Comment": "PITR CLEANUP 1c — Poll the snapshot for a terminal state.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_pitr_snapshot_status",
+                "snapshot_id.$": "$.pitr_snapshot_result.snapshot_id"
+              },
+              "ResultPath": "$.pitr_snapshot_status",
+              "Next": "PitrSnapshotDone",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "PitrSnapshotDone": {
+              "Comment": "Fail fast if the snapshot failed. Once available, delete the PITR instance. Otherwise keep polling.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.pitr_snapshot_status.failed",
+                  "BooleanEquals": true,
+                  "Next": "FailbackFailed"
+                },
+                {
+                  "Variable": "$.pitr_snapshot_status.complete",
+                  "BooleanEquals": true,
+                  "Next": "DeletePitrDb"
+                }
+              ],
+              "Default": "WaitForPitrSnapshot"
+            },
+
+            "DeletePitrDb": {
+              "Comment": "PITR CLEANUP 1d — Delete the PITR RDS instance now that a final snapshot exists. SkipFinalSnapshot=true to avoid a duplicate automatic snapshot.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "delete_pitr_db",
+                "pitr_target_identifier.$": "$.pitr_target_identifier"
+              },
+              "ResultPath": "$.pitr_delete_result",
+              "Next": "WaitForPitrDbDeleted",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "WaitForPitrDbDeleted": {
+              "Comment": "PITR CLEANUP 1e — Wait for the RDS instance deletion to complete.",
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckPitrDbDeleted"
+            },
+
+            "CheckPitrDbDeleted": {
+              "Comment": "PITR CLEANUP 1f — Poll until the PITR instance is gone.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_pitr_db_deleted",
+                "pitr_target_identifier.$": "$.pitr_target_identifier"
+              },
+              "ResultPath": "$.pitr_delete_status",
+              "Next": "PitrDbDeleteDone",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "PitrDbDeleteDone": {
+              "Comment": "Once the PITR instance is confirmed gone, move on to EFS cleanup. Otherwise keep polling.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.pitr_delete_status.deleted",
+                  "BooleanEquals": true,
+                  "Next": "DeletePitrEfsMountTargets"
+                }
+              ],
+              "Default": "WaitForPitrDbDeleted"
+            },
+
+            "DeletePitrEfsMountTargets": {
+              "Comment": "PITR CLEANUP 2a — Delete mount targets for the restored EFS file system (must happen before the file system itself can be deleted).",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "delete_pitr_efs_mount_targets",
+                "efs_id_ssm_path.$": "$.efs_id_ssm_path"
+              },
+              "ResultPath": "$.efs_mount_targets_result",
+              "Next": "CheckEfsMountTargetsSubmitted",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "CheckEfsMountTargetsSubmitted": {
+              "Comment": "If no restored EFS was ever recorded in SSM (or it's already gone), nothing to clean up — resume the failback sequence.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.efs_mount_targets_result.submitted",
+                  "BooleanEquals": true,
+                  "Next": "WaitForEfsMountTargets"
+                }
+              ],
+              "Default": "FailbackStep3Uncomment"
+            },
+
+            "WaitForEfsMountTargets": {
+              "Comment": "PITR CLEANUP 2b — Wait for mount target deletion to complete.",
+              "Type": "Wait",
+              "Seconds": 20,
+              "Next": "CheckEfsMountTargetsDeleted"
+            },
+
+            "CheckEfsMountTargetsDeleted": {
+              "Comment": "PITR CLEANUP 2c — Poll until all mount targets are gone.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_pitr_efs_mount_targets_deleted",
+                "efs_id.$": "$.efs_mount_targets_result.efs_id"
+              },
+              "ResultPath": "$.efs_mount_targets_status",
+              "Next": "EfsMountTargetsDone",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "EfsMountTargetsDone": {
+              "Comment": "Once all mount targets are gone, delete the file system itself. Otherwise keep polling.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.efs_mount_targets_status.deleted",
+                  "BooleanEquals": true,
+                  "Next": "DeletePitrEfsFilesystem"
+                }
+              ],
+              "Default": "WaitForEfsMountTargets"
+            },
+
+            "DeletePitrEfsFilesystem": {
+              "Comment": "PITR CLEANUP 2d — Delete the restored EFS file system and clear its SSM parameter.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "delete_pitr_efs_filesystem",
+                "efs_id.$": "$.efs_mount_targets_result.efs_id",
+                "efs_id_ssm_path.$": "$.efs_id_ssm_path"
+              },
+              "ResultPath": "$.efs_delete_result",
+              "Next": "FailbackStep3Uncomment",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
             },
 
             "FailbackStep3Uncomment": {
