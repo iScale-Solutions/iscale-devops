@@ -117,7 +117,8 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasCodePipeline: !Equals [!Ref CreateCodePipeline, TRUE]
   HasCreateDeployUser: !Equals [!Ref CreateDeployUser, TRUE]
-  
+  HasReplicationDestination: !Not [!Equals [!Ref ReplicationDestinationBucketArn, '']]
+
 Resources:
 
   CodeDeployApplication:
@@ -326,6 +327,37 @@ Resources:
                   - ec2:CreateTags
                   - ec2:RunInstances
                 Resource: "*"
+
+  DeploymentBucketReplicationRole:
+    Condition: HasReplicationDestination
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3ReplicationPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetReplicationConfiguration
+                Resource:
+                  - !Join ['', ['arn:aws:s3:::', !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'code-deploy']]]]
+                  - !Join ['', ['arn:aws:s3:::', !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'code-deploy']], '/*']]
+              - Effect: Allow
+                Action:
+                  - s3:ReplicateObject
+                  - s3:ReplicateDelete
+                  - s3:ReplicateTags
+                Resource: !Join ['/', [!Ref ReplicationDestinationBucketArn, '*']]
 
   DeploymentBucket:
     Type: AWS::S3::Bucket
