@@ -1,15 +1,37 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: |
-  DR Failback — Orchestrates CloudFormation template patching and parameter updates
-  for the PCHC failback workflow. Comments out or restores LoadBalancerStackName in
-  every *ServerStack resource, sets DeployPaidResources=false, and drives the full
-  4-step failover sequence via Step Functions.
-
-  Event payload:
-    { "app_name": "pchc-tdr-ue2-pesonet", "action": "failback", "network_stack_name": "pchc-tdr-ue2-pesonet-network" }
-    { "app_name": "pchc-tdr-ue2-pesonet", "action": "comment" }
-    { "app_name": "pchc-tdr-ue2-pesonet", "action": "uncomment" }
-    { "app_name": "pchc-tdr-ue2-pesonet", "action": "set_deploy_paid_false" }
+# Event payload (standard EC2/ASG apps — e.g. pesonet20):
+#   { "app_name": "<stack>", "action": "failback", "network_stack_name": "<network-stack>" }
+#   { "app_name": "<stack>", "action": "comment" }
+#   { "app_name": "<stack>", "action": "uncomment" }
+#   { "app_name": "<stack>", "action": "set_deploy_paid_false" }
+# Stack pattern: pchc-<env>-<region>-<app>  e.g. pchc-tdr-ue2-pesonet20
+#
+# Event payload (PITR-mode failover — e.g. ddp, pesonet20, pddts, pddts-eod, pas6, mis):
+# When the prior failover used use_pitr=true, "failback" also snapshots and deletes the
+# out-of-band PITR RDS instance and the AWS-Backup-restored EFS file system. Pass:
+#   {
+#     "app_name":               "<stack>",
+#     "action":                 "failback",
+#     "network_stack_name":     "<network-stack>",
+#     "use_pitr":                true,
+#     "pitr_target_identifier": "<PITR RDS instance identifier created at failover>",
+#     "efs_id_ssm_path":        "<SSM path holding the restored EFS file system ID>"
+#   }
+# Set use_pitr=false (or omit it) to skip the PITR cleanup steps entirely.
+#
+# Event payload (ECS Fargate multi-stack apps — e.g. SmartAPI):
+#   {
+#     "action": "ecs_failback",
+#     "network_stack_name": "<network-stack>",
+#     "prereq_stack_name":  "<prereq-stack>",
+#     "parallel_stacks": [{"stack_name": "<app-stack>"}, {"stack_name": "<portal-stack>"}]
+#   }
+# SmartAPI stacks (TestDR):       pchc-tdr-ue2-smartapi-network, -prereq, -smartapi, -smartportal
+# SmartAPI stacks (ProductionDR): pchc-productiondr-uw2-smartapi-network, -prereq, -smartapi, -smartportal
+Description: >-
+  DR Failback — patches CFN templates and parameters to tear down paid DR resources.
+  Supports standard EC2/ASG apps (comment/uncomment + DeployPaidResources=false) and
+  ECS Fargate multi-stack apps (ecs_failback action). All config passed via payload.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -55,6 +77,11 @@ Parameters:
     Type: String
     Default: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml
 
+  TempTemplateBucket:
+    Description: S3 bucket used to stage patched app templates during failback (steps 1 + 3). Must be in the same region as this stack. Used to bypass the 51,200-byte TemplateBody API limit.
+    Type: String
+    Default: cf-templates-190aa836foqbm-us-east-2
+
 Resources:
 
 ####
@@ -96,15 +123,21 @@ Resources:
       FunctionName: !Sub '${AWS::StackName}'
       Description: >-
         DR Failback Lambda. Actions: comment | uncomment | update_stack | set_deploy_paid_false |
-        set_deploy_paid_false_both | check_stack_status | check_both_stacks_status.
+        set_deploy_paid_false_both | check_stack_status | check_both_stacks_status |
+        snapshot_pitr_db | check_pitr_snapshot_status | delete_pitr_db | check_pitr_db_deleted |
+        delete_pitr_efs_mount_targets | check_pitr_efs_mount_targets_deleted | delete_pitr_efs_filesystem.
         Payload: { "app_name": "pchc-tdr-ue2-pesonet", "action": "<action>" }
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.12
       Timeout: 30
+      Environment:
+        Variables:
+          TEMP_TEMPLATE_BUCKET: !Ref TempTemplateBucket
       Code:
         ZipFile: |
           import logging
+          import time
           import boto3
           from botocore.exceptions import ClientError
 
@@ -294,7 +327,7 @@ Resources:
                           fk, fv = _key(str(kvs[0][0])), kvs[0][1]
                           if isinstance(fv, (dict, list)) and fv:
                               parts.append(f'{p}- {fk}:')
-                              parts.append(_node(fv, d + 1))
+                              parts.append(_node(fv, d + 2))
                           elif isinstance(fv, bool):
                               parts.append(f'{p}- {fk}: {"true" if fv else "false"}')
                           elif fv is None:
@@ -308,7 +341,7 @@ Resources:
                               rks = _key(str(rk))
                               if isinstance(rv, (dict, list)) and rv:
                                   parts.append(f'{cp}{rks}:')
-                                  parts.append(_node(rv, d + 1))
+                                  parts.append(_node(rv, d + 2))
                               elif isinstance(rv, bool):
                                   parts.append(f'{cp}{rks}: {"true" if rv else "false"}')
                               elif rv is None:
@@ -396,6 +429,19 @@ Resources:
               rollback = status in ROLLBACK_STATES
               return {'status': status, 'complete': complete, 'rollback': rollback}
 
+          def _upload_template_to_s3(template_body, stack_name, action):
+              import os
+              region = os.environ.get('AWS_REGION', 'us-east-2')
+              bucket = os.environ.get('TEMP_TEMPLATE_BUCKET', '')
+              if not bucket:
+                  raise ValueError('TEMP_TEMPLATE_BUCKET environment variable not set')
+              key = f'failback/{stack_name}/{action}.yaml'
+              s3 = boto3.client('s3', region_name=region)
+              s3.put_object(Bucket=bucket, Key=key, Body=template_body.encode('utf-8'), ContentType='text/plain')
+              url = f'https://{bucket}.s3.{region}.amazonaws.com/{key}'
+              logger.info("[S3_UPLOAD] Uploaded patched template | bucket=%s | key=%s", bucket, key)
+              return url
+
           def _handle_patch(event, action):
               app_name = _get_app_name(event)
               logger.info("[PATCH] Start | stack=%s | action=%s", app_name, action)
@@ -405,26 +451,24 @@ Resources:
               modified = _patch_cfn_parameter(template_body, param_key='LoadBalancerStackName', comment=(action == 'comment'))
               patched = modified != template_body
               logger.info("[PATCH] Result | patched=%s | stack=%s | action=%s", patched, app_name, action)
-              if patched:
-                  sep = '=' * 72
-                  logger.info("[PATCH] Modified template for %s:\n%s\n%s\n%s", app_name, sep, modified, sep)
-              else:
+              if not patched:
                   logger.info("[PATCH] No changes — already in desired state | stack=%s | action=%s", app_name, action)
-              return {'stack_name': app_name, 'action': action, 'patched': patched, 'modified_template': modified}
+              template_s3_url = _upload_template_to_s3(modified, app_name, action)
+              return {'stack_name': app_name, 'action': action, 'patched': patched, 'template_s3_url': template_s3_url}
 
           def _handle_update_stack(event):
               app_name = _get_app_name(event)
-              template_body = event.get('template_body') or event.get('modified_template')
-              if not template_body:
-                  raise ValueError("update_stack action requires 'template_body' in the event")
-              logger.info("[UPDATE_STACK] Submitting template update | stack=%s", app_name)
+              template_s3_url = event.get('template_s3_url')
+              if not template_s3_url:
+                  raise ValueError("update_stack action requires 'template_s3_url' in the event")
+              logger.info("[UPDATE_STACK] Submitting template update | stack=%s | url=%s", app_name, template_s3_url)
               cfn = boto3.client('cloudformation')
               parameters = [{'ParameterKey': p['ParameterKey'], 'UsePreviousValue': True}
                             for p in _get_current_parameters(cfn, app_name)]
               try:
                   cfn.update_stack(
                       StackName=app_name,
-                      TemplateBody=template_body,
+                      TemplateURL=template_s3_url,
                       Parameters=parameters,
                       Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
                   )
@@ -502,6 +546,140 @@ Resources:
                   'any_rollback':       any_rollback,
               }
 
+          def _handle_snapshot_pitr_db(event):
+              pitr_id = event.get('pitr_target_identifier')
+              if not pitr_id:
+                  raise ValueError("snapshot_pitr_db requires 'pitr_target_identifier'")
+              rds = boto3.client('rds')
+              try:
+                  rds.describe_db_instances(DBInstanceIdentifier=pitr_id)
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'DBInstanceNotFound':
+                      logger.info("[SNAPSHOT_PITR_DB] Instance not found — nothing to snapshot | id=%s", pitr_id)
+                      return {'submitted': False, 'reason': 'not_found'}
+                  raise
+              snapshot_id = f'{pitr_id}-failback-{int(time.time())}'
+              rds.create_db_snapshot(DBSnapshotIdentifier=snapshot_id, DBInstanceIdentifier=pitr_id)
+              logger.info("[SNAPSHOT_PITR_DB] Snapshot started | id=%s | snapshot=%s", pitr_id, snapshot_id)
+              return {'submitted': True, 'snapshot_id': snapshot_id, 'db_instance_identifier': pitr_id}
+
+          def _handle_check_pitr_snapshot_status(event):
+              snapshot_id = event.get('snapshot_id')
+              if not snapshot_id:
+                  raise ValueError("check_pitr_snapshot_status requires 'snapshot_id'")
+              rds = boto3.client('rds')
+              resp = rds.describe_db_snapshots(DBSnapshotIdentifier=snapshot_id)
+              status = resp['DBSnapshots'][0]['Status']
+              complete = status == 'available'
+              failed = status in ('failed', 'incompatible-restore', 'incompatible-parameters')
+              logger.info("[CHECK_PITR_SNAPSHOT] id=%s | status=%s | complete=%s", snapshot_id, status, complete)
+              return {'status': status, 'complete': complete, 'failed': failed, 'snapshot_id': snapshot_id}
+
+          def _handle_delete_pitr_db(event):
+              pitr_id = event.get('pitr_target_identifier')
+              if not pitr_id:
+                  raise ValueError("delete_pitr_db requires 'pitr_target_identifier'")
+              rds = boto3.client('rds')
+              try:
+                  rds.delete_db_instance(DBInstanceIdentifier=pitr_id, SkipFinalSnapshot=True)
+                  logger.info("[DELETE_PITR_DB] Delete submitted | id=%s", pitr_id)
+                  return {'submitted': True, 'db_instance_identifier': pitr_id}
+              except ClientError as e:
+                  code = e.response['Error']['Code']
+                  if code == 'DBInstanceNotFound':
+                      logger.info("[DELETE_PITR_DB] Already deleted | id=%s", pitr_id)
+                      return {'submitted': False, 'reason': 'not_found', 'db_instance_identifier': pitr_id}
+                  if code == 'InvalidDBInstanceState':
+                      logger.info("[DELETE_PITR_DB] Already deleting | id=%s | msg=%s", pitr_id, e.response['Error']['Message'])
+                      return {'submitted': False, 'reason': 'already_deleting', 'db_instance_identifier': pitr_id}
+                  raise
+
+          def _handle_check_pitr_db_deleted(event):
+              pitr_id = event.get('pitr_target_identifier')
+              if not pitr_id:
+                  raise ValueError("check_pitr_db_deleted requires 'pitr_target_identifier'")
+              rds = boto3.client('rds')
+              try:
+                  resp = rds.describe_db_instances(DBInstanceIdentifier=pitr_id)
+                  status = resp['DBInstances'][0]['DBInstanceStatus']
+                  logger.info("[CHECK_PITR_DB_DELETED] id=%s | status=%s", pitr_id, status)
+                  return {'deleted': False, 'status': status}
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'DBInstanceNotFound':
+                      logger.info("[CHECK_PITR_DB_DELETED] Confirmed deleted | id=%s", pitr_id)
+                      return {'deleted': True, 'status': 'DELETED'}
+                  raise
+
+          def _handle_delete_pitr_efs_mount_targets(event):
+              ssm_path = event.get('efs_id_ssm_path')
+              if not ssm_path:
+                  logger.info("[DELETE_PITR_EFS] No efs_id_ssm_path in payload — nothing to clean up.")
+                  return {'submitted': False, 'reason': 'no_ssm_path'}
+              ssm = boto3.client('ssm')
+              try:
+                  efs_id = ssm.get_parameter(Name=ssm_path)['Parameter']['Value']
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'ParameterNotFound':
+                      logger.info("[DELETE_PITR_EFS] No SSM parameter — nothing to clean up | path=%s", ssm_path)
+                      return {'submitted': False, 'reason': 'not_found'}
+                  raise
+              if not efs_id:
+                  return {'submitted': False, 'reason': 'empty_efs_id'}
+              efs = boto3.client('efs')
+              try:
+                  mount_targets = efs.describe_mount_targets(FileSystemId=efs_id).get('MountTargets', [])
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'FileSystemNotFound':
+                      logger.info("[DELETE_PITR_EFS] Filesystem already gone | efs_id=%s", efs_id)
+                      return {'submitted': False, 'reason': 'fs_not_found', 'efs_id': efs_id}
+                  raise
+              for mt in mount_targets:
+                  try:
+                      efs.delete_mount_target(MountTargetId=mt['MountTargetId'])
+                      logger.info("[DELETE_PITR_EFS] Deleting mount target %s | efs_id=%s", mt['MountTargetId'], efs_id)
+                  except ClientError as e:
+                      if e.response['Error']['Code'] != 'MountTargetNotFound':
+                          raise
+              return {'submitted': True, 'efs_id': efs_id}
+
+          def _handle_check_pitr_efs_mount_targets_deleted(event):
+              efs_id = event.get('efs_id')
+              if not efs_id:
+                  raise ValueError("check_pitr_efs_mount_targets_deleted requires 'efs_id'")
+              efs = boto3.client('efs')
+              try:
+                  remaining = efs.describe_mount_targets(FileSystemId=efs_id).get('MountTargets', [])
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'FileSystemNotFound':
+                      return {'deleted': True, 'efs_id': efs_id}
+                  raise
+              deleted = len(remaining) == 0
+              logger.info("[CHECK_PITR_EFS_MT] efs_id=%s | remaining=%d", efs_id, len(remaining))
+              return {'deleted': deleted, 'efs_id': efs_id}
+
+          def _handle_delete_pitr_efs_filesystem(event):
+              efs_id = event.get('efs_id')
+              ssm_path = event.get('efs_id_ssm_path')
+              if not efs_id:
+                  raise ValueError("delete_pitr_efs_filesystem requires 'efs_id'")
+              efs = boto3.client('efs')
+              try:
+                  efs.delete_file_system(FileSystemId=efs_id)
+                  logger.info("[DELETE_PITR_EFS_FS] Deleted | efs_id=%s", efs_id)
+              except ClientError as e:
+                  if e.response['Error']['Code'] != 'FileSystemNotFound':
+                      raise
+                  logger.info("[DELETE_PITR_EFS_FS] Already gone | efs_id=%s", efs_id)
+              if ssm_path:
+                  ssm = boto3.client('ssm')
+                  try:
+                      ssm.delete_parameter(Name=ssm_path)
+                      logger.info("[DELETE_PITR_EFS_FS] Cleared SSM param | path=%s", ssm_path)
+                  except ClientError as e:
+                      if e.response['Error']['Code'] != 'ParameterNotFound':
+                          raise
+              return {'submitted': True, 'efs_id': efs_id}
+
           def handler(event, context):
               action = event.get('action', 'comment').lower()
               if action in ('comment', 'uncomment'):
@@ -516,6 +694,20 @@ Resources:
                   return _handle_check_stack_status(event)
               if action == 'check_both_stacks_status':
                   return _handle_check_both_stacks_status(event)
+              if action == 'snapshot_pitr_db':
+                  return _handle_snapshot_pitr_db(event)
+              if action == 'check_pitr_snapshot_status':
+                  return _handle_check_pitr_snapshot_status(event)
+              if action == 'delete_pitr_db':
+                  return _handle_delete_pitr_db(event)
+              if action == 'check_pitr_db_deleted':
+                  return _handle_check_pitr_db_deleted(event)
+              if action == 'delete_pitr_efs_mount_targets':
+                  return _handle_delete_pitr_efs_mount_targets(event)
+              if action == 'check_pitr_efs_mount_targets_deleted':
+                  return _handle_check_pitr_efs_mount_targets_deleted(event)
+              if action == 'delete_pitr_efs_filesystem':
+                  return _handle_delete_pitr_efs_filesystem(event)
               raise ValueError(f"Unknown action: {action!r}")
 
 ####
@@ -586,7 +778,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failback 4-step sequential orchestration. Routed by 'action' in the input payload.",
+          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failback 4-step sequential orchestration (with optional PITR RDS + EFS cleanup gated on use_pitr), (4) ecs_failback. Routed by 'action' in the input payload.",
           "StartAt": "ValidateAction",
           "States": {
 
@@ -613,6 +805,11 @@ Resources:
                   "Variable": "$.action",
                   "StringEquals": "failback",
                   "Next": "FailbackStep1Comment"
+                },
+                {
+                  "Variable": "$.action",
+                  "StringEquals": "ecs_failback",
+                  "Next": "ECSFailbackParallelAppStacks"
                 }
               ],
               "Default": "InvalidAction"
@@ -621,7 +818,7 @@ Resources:
             "InvalidAction": {
               "Type": "Fail",
               "Error": "InvalidAction",
-              "Cause": "action must be 'comment', 'uncomment', 'set_deploy_paid_false', or 'failback'."
+              "Cause": "action must be 'comment', 'uncomment', 'set_deploy_paid_false', 'failback', or 'ecs_failback'."
             },
 
             "PatchTemplate": {
@@ -677,13 +874,13 @@ Resources:
             },
 
             "ApplyStackUpdate": {
-              "Comment": "PATCH STEP 2 — Submit CloudFormation UpdateStack with the patched template. All parameters preserved via UsePreviousValue.",
+              "Comment": "PATCH STEP 2 — Submit CloudFormation UpdateStack with the patched template via S3 URL. All parameters preserved via UsePreviousValue.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "update_stack",
                 "app_name.$": "$.app_name",
-                "template_body.$": "$.patch_result.modified_template"
+                "template_s3_url.$": "$.patch_result.template_s3_url"
               },
               "ResultPath": "$.update_result",
               "Next": "Complete",
@@ -832,13 +1029,13 @@ Resources:
             },
 
             "FailbackStep1ApplyUpdate": {
-              "Comment": "FAILOVER STEP 1b — Submit UpdateStack with the commented template.",
+              "Comment": "FAILOVER STEP 1b — Submit UpdateStack with the commented template via S3 URL (bypasses 51,200-byte TemplateBody limit).",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "update_stack",
                 "app_name.$": "$.app_name",
-                "template_body.$": "$.fo_s1_patch.modified_template"
+                "template_s3_url.$": "$.fo_s1_patch.template_s3_url"
               },
               "ResultPath": "$.fo_s1_update",
               "Next": "FailbackStep1Wait",
@@ -912,12 +1109,13 @@ Resources:
             },
 
             "FailbackStep2SetDeployPaid": {
-              "Comment": "FAILOVER STEP 2a — Set DeployPaidResources=false on app stack (paid resources down).",
+              "Comment": "FAILOVER STEP 2a — Set DeployPaidResources=false on app stack (paid resources down). preserve_format=false uses UsePreviousTemplate — safe here because Step 1 already wrote the commented YAML to CFN.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "set_deploy_paid_false",
-                "app_name.$": "$.app_name"
+                "app_name.$": "$.app_name",
+                "preserve_format": false
               },
               "ResultPath": "$.fo_s2",
               "Next": "FailbackStep2Wait",
@@ -973,7 +1171,7 @@ Resources:
             },
 
             "FailbackStep2Done": {
-              "Comment": "Fail fast on rollback. Advance to Step 3 when complete. Otherwise loop.",
+              "Comment": "Fail fast on rollback. Advance to PITR cleanup check when complete. Otherwise loop.",
               "Type": "Choice",
               "Choices": [
                 {
@@ -984,10 +1182,304 @@ Resources:
                 {
                   "Variable": "$.fo_s2_status.update_complete",
                   "BooleanEquals": true,
-                  "Next": "FailbackStep3Uncomment"
+                  "Next": "CheckUsePitr"
                 }
               ],
               "Default": "FailbackStep2Wait"
+            },
+
+            "CheckUsePitr": {
+              "Comment": "PITR CLEANUP — only snapshot/delete the out-of-band PITR DB and EFS when this failback follows a PITR-mode failover (use_pitr=true in the input).",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.use_pitr",
+                  "BooleanEquals": true,
+                  "Next": "SnapshotPitrDb"
+                }
+              ],
+              "Default": "FailbackStep3Uncomment"
+            },
+
+            "SnapshotPitrDb": {
+              "Comment": "PITR CLEANUP 1a — Take a final manual snapshot of the out-of-band PITR RDS instance before deleting it.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "snapshot_pitr_db",
+                "pitr_target_identifier.$": "$.pitr_target_identifier"
+              },
+              "ResultPath": "$.pitr_snapshot_result",
+              "Next": "CheckSnapshotSubmitted",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "CheckSnapshotSubmitted": {
+              "Comment": "If the PITR instance no longer exists there is nothing to snapshot or delete — skip straight to EFS cleanup.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.pitr_snapshot_result.submitted",
+                  "BooleanEquals": true,
+                  "Next": "WaitForPitrSnapshot"
+                }
+              ],
+              "Default": "DeletePitrEfsMountTargets"
+            },
+
+            "WaitForPitrSnapshot": {
+              "Comment": "PITR CLEANUP 1b — Wait for the manual snapshot to complete.",
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckPitrSnapshotStatus"
+            },
+
+            "CheckPitrSnapshotStatus": {
+              "Comment": "PITR CLEANUP 1c — Poll the snapshot for a terminal state.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_pitr_snapshot_status",
+                "snapshot_id.$": "$.pitr_snapshot_result.snapshot_id"
+              },
+              "ResultPath": "$.pitr_snapshot_status",
+              "Next": "PitrSnapshotDone",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "PitrSnapshotDone": {
+              "Comment": "Fail fast if the snapshot failed. Once available, delete the PITR instance. Otherwise keep polling.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.pitr_snapshot_status.failed",
+                  "BooleanEquals": true,
+                  "Next": "FailbackFailed"
+                },
+                {
+                  "Variable": "$.pitr_snapshot_status.complete",
+                  "BooleanEquals": true,
+                  "Next": "DeletePitrDb"
+                }
+              ],
+              "Default": "WaitForPitrSnapshot"
+            },
+
+            "DeletePitrDb": {
+              "Comment": "PITR CLEANUP 1d — Delete the PITR RDS instance now that a final snapshot exists. SkipFinalSnapshot=true to avoid a duplicate automatic snapshot.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "delete_pitr_db",
+                "pitr_target_identifier.$": "$.pitr_target_identifier"
+              },
+              "ResultPath": "$.pitr_delete_result",
+              "Next": "WaitForPitrDbDeleted",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "WaitForPitrDbDeleted": {
+              "Comment": "PITR CLEANUP 1e — Wait for the RDS instance deletion to complete.",
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "CheckPitrDbDeleted"
+            },
+
+            "CheckPitrDbDeleted": {
+              "Comment": "PITR CLEANUP 1f — Poll until the PITR instance is gone.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_pitr_db_deleted",
+                "pitr_target_identifier.$": "$.pitr_target_identifier"
+              },
+              "ResultPath": "$.pitr_delete_status",
+              "Next": "PitrDbDeleteDone",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "PitrDbDeleteDone": {
+              "Comment": "Once the PITR instance is confirmed gone, move on to EFS cleanup. Otherwise keep polling.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.pitr_delete_status.deleted",
+                  "BooleanEquals": true,
+                  "Next": "DeletePitrEfsMountTargets"
+                }
+              ],
+              "Default": "WaitForPitrDbDeleted"
+            },
+
+            "DeletePitrEfsMountTargets": {
+              "Comment": "PITR CLEANUP 2a — Delete mount targets for the restored EFS file system (must happen before the file system itself can be deleted).",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "delete_pitr_efs_mount_targets",
+                "efs_id_ssm_path.$": "$.efs_id_ssm_path"
+              },
+              "ResultPath": "$.efs_mount_targets_result",
+              "Next": "CheckEfsMountTargetsSubmitted",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "CheckEfsMountTargetsSubmitted": {
+              "Comment": "If no restored EFS was ever recorded in SSM (or it's already gone), nothing to clean up — resume the failback sequence.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.efs_mount_targets_result.submitted",
+                  "BooleanEquals": true,
+                  "Next": "WaitForEfsMountTargets"
+                }
+              ],
+              "Default": "FailbackStep3Uncomment"
+            },
+
+            "WaitForEfsMountTargets": {
+              "Comment": "PITR CLEANUP 2b — Wait for mount target deletion to complete.",
+              "Type": "Wait",
+              "Seconds": 20,
+              "Next": "CheckEfsMountTargetsDeleted"
+            },
+
+            "CheckEfsMountTargetsDeleted": {
+              "Comment": "PITR CLEANUP 2c — Poll until all mount targets are gone.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "check_pitr_efs_mount_targets_deleted",
+                "efs_id.$": "$.efs_mount_targets_result.efs_id"
+              },
+              "ResultPath": "$.efs_mount_targets_status",
+              "Next": "EfsMountTargetsDone",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
+            "EfsMountTargetsDone": {
+              "Comment": "Once all mount targets are gone, delete the file system itself. Otherwise keep polling.",
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.efs_mount_targets_status.deleted",
+                  "BooleanEquals": true,
+                  "Next": "DeletePitrEfsFilesystem"
+                }
+              ],
+              "Default": "WaitForEfsMountTargets"
+            },
+
+            "DeletePitrEfsFilesystem": {
+              "Comment": "PITR CLEANUP 2d — Delete the restored EFS file system and clear its SSM parameter.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action": "delete_pitr_efs_filesystem",
+                "efs_id.$": "$.efs_mount_targets_result.efs_id",
+                "efs_id_ssm_path.$": "$.efs_id_ssm_path"
+              },
+              "ResultPath": "$.efs_delete_result",
+              "Next": "FailbackStep3Uncomment",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 10,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
             },
 
             "FailbackStep3Uncomment": {
@@ -1018,13 +1510,13 @@ Resources:
             },
 
             "FailbackStep3ApplyUpdate": {
-              "Comment": "FAILOVER STEP 3b — Submit UpdateStack with the uncommented template.",
+              "Comment": "FAILOVER STEP 3b — Submit UpdateStack with the uncommented template via S3 URL (bypasses 51,200-byte TemplateBody limit).",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action": "update_stack",
                 "app_name.$": "$.app_name",
-                "template_body.$": "$.fo_s3_patch.modified_template"
+                "template_s3_url.$": "$.fo_s3_patch.template_s3_url"
               },
               "ResultPath": "$.fo_s3_update",
               "Next": "FailbackStep3Wait",
@@ -1175,6 +1667,158 @@ Resources:
                 }
               ],
               "Default": "FailbackStep4Wait"
+            },
+
+            "ECSFailbackParallelAppStacks": {
+              "Comment": "ECS FAILBACK STEP 1 — Set DeployPaidResources=false on app stacks concurrently (ALB, DNS, ECS tasks down). Must complete before prereq to avoid dangling ImportValue consumers.",
+              "Type": "Map",
+              "ItemsPath": "$.parallel_stacks",
+              "MaxConcurrency": 0,
+              "Iterator": {
+                "StartAt": "SetDeployPaidFalseOne",
+                "States": {
+                  "SetDeployPaidFalseOne": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":       "set_deploy_paid_false",
+                      "stack_name.$": "$.stack_name"
+                    },
+                    "ResultPath": "$.set_result",
+                    "Next": "CheckIfOneSubmitted",
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneFalseFailed", "ResultPath": "$.error"}]
+                  },
+                  "CheckIfOneSubmitted": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {"Variable": "$.set_result.submitted", "BooleanEquals": true, "Next": "WaitOneFalse"}
+                    ],
+                    "Default": "OneFalseComplete"
+                  },
+                  "WaitOneFalse": {
+                    "Type": "Wait",
+                    "Seconds": 30,
+                    "Next": "PollOneFalse"
+                  },
+                  "PollOneFalse": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":       "check_stack_status",
+                      "stack_name.$": "$.stack_name"
+                    },
+                    "ResultPath": "$.poll_result",
+                    "Next": "OneFalseDone",
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneFalseFailed", "ResultPath": "$.error"}]
+                  },
+                  "OneFalseDone": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {"Variable": "$.poll_result.rollback_occurred", "BooleanEquals": true, "Next": "OneFalseFailed"},
+                      {"Variable": "$.poll_result.update_complete",   "BooleanEquals": true, "Next": "OneFalseComplete"}
+                    ],
+                    "Default": "WaitOneFalse"
+                  },
+                  "OneFalseComplete": {
+                    "Type": "Succeed"
+                  },
+                  "OneFalseFailed": {
+                    "Type": "Fail",
+                    "Error": "StackTeardownFailed",
+                    "Cause": "App stack DeployPaidResources=false update failed — check CloudFormation events."
+                  }
+                }
+              },
+              "ResultPath": "$.ecs_parallel_result",
+              "Next": "ECSFailbackPrereq",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackPrereq": {
+              "Comment": "ECS FAILBACK STEP 2 — Set DeployPaidResources=false on prereq stack (DocumentDB torn down). Safe now that app stacks no longer import DocuDBElasticSecurityGroup.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "set_deploy_paid_false",
+                "stack_name.$": "$.prereq_stack_name"
+              },
+              "ResultPath": "$.ecs_prereq_result",
+              "Next": "ECSFailbackPrereqWait",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackPrereqWait": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "ECSFailbackPrereqPoll"
+            },
+
+            "ECSFailbackPrereqPoll": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "check_stack_status",
+                "stack_name.$": "$.prereq_stack_name"
+              },
+              "ResultPath": "$.ecs_prereq_status",
+              "Next": "ECSFailbackPrereqDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackPrereqDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.ecs_prereq_status.rollback_occurred", "BooleanEquals": true, "Next": "FailbackFailed"},
+                {"Variable": "$.ecs_prereq_status.update_complete",   "BooleanEquals": true, "Next": "ECSFailbackNetwork"}
+              ],
+              "Default": "ECSFailbackPrereqWait"
+            },
+
+            "ECSFailbackNetwork": {
+              "Comment": "ECS FAILBACK STEP 3 — Set DeployPaidResources=false on network stack (NAT GW, Jump Host down).",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "set_deploy_paid_false",
+                "stack_name.$": "$.network_stack_name",
+                "template_url": "${NetworkTemplateUrl}"
+              },
+              "ResultPath": "$.ecs_network_result",
+              "Next": "ECSFailbackNetworkWait",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackNetworkWait": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "ECSFailbackNetworkPoll"
+            },
+
+            "ECSFailbackNetworkPoll": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "check_stack_status",
+                "stack_name.$": "$.network_stack_name"
+              },
+              "ResultPath": "$.ecs_network_status",
+              "Next": "ECSFailbackNetworkDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ECSFailbackNetworkDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.ecs_network_status.rollback_occurred", "BooleanEquals": true, "Next": "FailbackFailed"},
+                {"Variable": "$.ecs_network_status.update_complete",   "BooleanEquals": true, "Next": "Complete"}
+              ],
+              "Default": "ECSFailbackNetworkWait"
             },
 
             "FailbackFailed": {

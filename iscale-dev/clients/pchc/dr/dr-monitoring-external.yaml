@@ -1,0 +1,710 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DR Monitoring stack — Route 53 health checks and AWS Health EventBridge for all 10 PCHC apps (us-east-1)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - SNSStackName
+          - LiveRegion
+      - Label:
+          default: Monitoring Configuration
+        Parameters:
+          - HealthCheckInterval
+          - HealthCheckFailureThreshold
+      - Label:
+          default: App Endpoints
+        Parameters:
+          - PesonetEndpoint
+          - PddtsEndpoint
+          - PddtsEodEndpoint
+          - MisEndpoint
+          - CicsEndpoint
+          - DirectDebitEndpoint
+          - Pas6Endpoint
+          - DsappEndpoint
+          - PaygateEndpoint
+          - PhilpassEndpoint
+      - Label:
+          default: Health Check Paths
+        Parameters:
+          - PesonetHealthCheckPath
+          - PddtsHealthCheckPath
+          - PddtsEodHealthCheckPath
+          - MisHealthCheckPath
+          - CicsHealthCheckPath
+          - DirectDebitHealthCheckPath
+          - Pas6HealthCheckPath
+          - DsappHealthCheckPath
+          - PaygateHealthCheckPath
+          - PhilpassHealthCheckPath
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      LiveRegion:
+        default: Live (Primary) Region
+      HealthCheckInterval:
+        default: Health Check Interval (seconds)
+      HealthCheckFailureThreshold:
+        default: Health Check Failure Threshold
+      PesonetEndpoint:
+        default: PESONET Endpoint
+      PddtsEndpoint:
+        default: PDDTS Endpoint
+      PddtsEodEndpoint:
+        default: PDDTS-EOD Endpoint
+      MisEndpoint:
+        default: MIS Endpoint
+      CicsEndpoint:
+        default: CICS Endpoint
+      DirectDebitEndpoint:
+        default: DirectDebit Endpoint
+      Pas6Endpoint:
+        default: PAS6 Endpoint
+      DsappEndpoint:
+        default: DSAPP Endpoint
+      PaygateEndpoint:
+        default: PayGate Endpoint
+      PhilpassEndpoint:
+        default: PhilPass Endpoint
+      PesonetHealthCheckPath:
+        default: PESONET Health Check Path
+      PddtsHealthCheckPath:
+        default: PDDTS Health Check Path
+      PddtsEodHealthCheckPath:
+        default: PDDTS-EOD Health Check Path
+      MisHealthCheckPath:
+        default: MIS Health Check Path
+      CicsHealthCheckPath:
+        default: CICS Health Check Path
+      DirectDebitHealthCheckPath:
+        default: DirectDebit Health Check Path
+      Pas6HealthCheckPath:
+        default: PAS6 Health Check Path
+      DsappHealthCheckPath:
+        default: DSAPP Health Check Path
+      PaygateHealthCheckPath:
+        default: PayGate Health Check Path
+      PhilpassHealthCheckPath:
+        default: PhilPass Health Check Path
+
+Parameters:
+
+  # Resource Configuration
+  Name:
+    Description: Unique name/identifier for this stack's resources
+    Type: String
+    Default: dr-monitoring
+    MinLength: 3
+    MaxLength: 20
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Must only contain lowercase letters and hyphens
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+
+  # Stack Configuration
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: pchc-prd-ue1-sns
+    MinLength: 1
+  LiveRegion:
+    Description: AWS region of the primary live infrastructure being monitored
+    Type: String
+    Default: ap-southeast-1
+    AllowedValues:
+      - ap-southeast-1
+      - us-west-2
+
+  # Monitoring Configuration
+  HealthCheckInterval:
+    Description: Route 53 health check polling interval in seconds
+    Type: Number
+    Default: 10
+    AllowedValues:
+      - 10
+      - 30
+  HealthCheckFailureThreshold:
+    Description: Consecutive failures before Route 53 marks a health check unhealthy
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+
+  # App Endpoints
+  PesonetEndpoint:
+    Description: PESONET application domain (no https://)
+    Type: String
+    Default: pesonet.pchc.com.ph
+  PddtsEndpoint:
+    Description: PDDTS application domain (no https://)
+    Type: String
+    Default: pddts.pchc.com.ph
+  PddtsEodEndpoint:
+    Description: PDDTS-EOD application domain (no https://)
+    Type: String
+    Default: pddts-eod.pchc.com.ph
+  MisEndpoint:
+    Description: MIS application domain (no https://)
+    Type: String
+    Default: mis.pchc.com.ph
+  CicsEndpoint:
+    Description: CICS application domain (no https://)
+    Type: String
+    Default: cics.pchc.com.ph
+  DirectDebitEndpoint:
+    Description: DirectDebit application domain (no https://)
+    Type: String
+    Default: directdebit.pchc.com.ph
+  Pas6Endpoint:
+    Description: PAS6 application domain (no https://)
+    Type: String
+    Default: pas6.pchc.com.ph
+  DsappEndpoint:
+    Description: DSAPP application domain (no https://)
+    Type: String
+    Default: dsapp.pchc.com.ph
+  PaygateEndpoint:
+    Description: PayGate application domain (no https://)
+    Type: String
+    Default: paygate.pchc.com.ph
+  PhilpassEndpoint:
+    Description: PhilPass application domain (no https://)
+    Type: String
+    Default: philpass.pchc.com.ph
+
+  # Health Check Paths
+  PesonetHealthCheckPath:
+    Description: URL path for PESONET health check
+    Type: String
+    Default: /
+  PddtsHealthCheckPath:
+    Description: URL path for PDDTS health check
+    Type: String
+    Default: /
+  PddtsEodHealthCheckPath:
+    Description: URL path for PDDTS-EOD health check
+    Type: String
+    Default: /
+  MisHealthCheckPath:
+    Description: URL path for MIS health check
+    Type: String
+    Default: /
+  CicsHealthCheckPath:
+    Description: URL path for CICS health check
+    Type: String
+    Default: /
+  DirectDebitHealthCheckPath:
+    Description: URL path for DirectDebit health check
+    Type: String
+    Default: /
+  Pas6HealthCheckPath:
+    Description: URL path for PAS6 health check
+    Type: String
+    Default: /
+  DsappHealthCheckPath:
+    Description: URL path for DSAPP health check
+    Type: String
+    Default: /
+  PaygateHealthCheckPath:
+    Description: URL path for PayGate health check
+    Type: String
+    Default: /
+  PhilpassHealthCheckPath:
+    Description: URL path for PhilPass health check
+    Type: String
+    Default: /
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Resources:
+
+##
+# Shared — AWS Health EventBridge
+##
+
+  AWSHealthEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], 'ue1', !Ref Name, 'health-rule']]
+      Description: !Sub 'AWS Health events for ${LiveRegion} service disruptions'
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.health
+        detail-type:
+          - AWS Health Event
+        detail:
+          eventScopeCode:
+            - PUBLIC
+          affectedRegions:
+            - !Ref LiveRegion
+      Targets:
+        - Id: DRMonitoringTopicTarget
+          Arn:
+            Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# PESONET
+##
+
+  PesonetHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref PesonetEndpoint
+        ResourcePath: !Ref PesonetHealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-pesonet-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  PesonetHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'pesonet-r53-alarm']]
+      AlarmDescription: PESONET Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt PesonetHealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# PDDTS
+##
+
+  PddtsHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref PddtsEndpoint
+        ResourcePath: !Ref PddtsHealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-pddts-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  PddtsHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'pddts-r53-alarm']]
+      AlarmDescription: PDDTS Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt PddtsHealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# PDDTS-EOD
+##
+
+  PddtsEodHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref PddtsEodEndpoint
+        ResourcePath: !Ref PddtsEodHealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-pddts-eod-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  PddtsEodHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'pddts-eod-r53-alarm']]
+      AlarmDescription: PDDTS-EOD Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt PddtsEodHealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# MIS
+##
+
+  MisHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref MisEndpoint
+        ResourcePath: !Ref MisHealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-mis-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  MisHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'mis-r53-alarm']]
+      AlarmDescription: MIS Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt MisHealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# CICS
+##
+
+  CicsHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref CicsEndpoint
+        ResourcePath: !Ref CicsHealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-cics-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  CicsHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'cics-r53-alarm']]
+      AlarmDescription: CICS Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt CicsHealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# DirectDebit
+##
+
+  DirectDebitHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref DirectDebitEndpoint
+        ResourcePath: !Ref DirectDebitHealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-directdebit-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  DirectDebitHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'directdebit-r53-alarm']]
+      AlarmDescription: DirectDebit Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt DirectDebitHealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# PAS6
+##
+
+  Pas6HealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref Pas6Endpoint
+        ResourcePath: !Ref Pas6HealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-pas6-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  Pas6HealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'pas6-r53-alarm']]
+      AlarmDescription: PAS6 Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt Pas6HealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# DSAPP
+##
+
+  DsappHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref DsappEndpoint
+        ResourcePath: !Ref DsappHealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-dsapp-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  DsappHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'dsapp-r53-alarm']]
+      AlarmDescription: DSAPP Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt DsappHealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# PayGate
+##
+
+  PaygateHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref PaygateEndpoint
+        ResourcePath: !Ref PaygateHealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-paygate-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  PaygateHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'paygate-r53-alarm']]
+      AlarmDescription: PayGate Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt PaygateHealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+##
+# PhilPass
+##
+
+  PhilpassHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref PhilpassEndpoint
+        ResourcePath: !Ref PhilpassHealthCheckPath
+        RequestInterval: !Ref HealthCheckInterval
+        FailureThreshold: !Ref HealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub ['${OrgName}-${Env}-${Name}-philpass-health-check', {Env: !FindInMap [EnvShort, !Ref EnvName, Name]}]
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: Environment
+          Value: !Ref EnvName
+
+  PhilpassHealthCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !Ref Name, 'philpass-r53-alarm']]
+      AlarmDescription: PhilPass Route 53 health check is failing
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !GetAtt PhilpassHealthCheck.HealthCheckId
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref HealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
