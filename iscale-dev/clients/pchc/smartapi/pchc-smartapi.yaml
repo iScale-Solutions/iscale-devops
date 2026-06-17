@@ -45,6 +45,10 @@ Metadata:
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
+      - Label:
+          default: Disaster Recovery
+        Parameters:
+          - DeployPaidResources
 
     ParameterLabels:
       Name:
@@ -85,6 +89,8 @@ Metadata:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
 
 Parameters:
   Name:
@@ -105,10 +111,14 @@ Parameters:
     Type: String
     Default: Staging
     AllowedValues:
-      - Production #Prod
-      - Staging #Pre-production
-      - Development #Regular day to day commit / deplay
+      - Production
+      - Staging
+      - Development
       - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
@@ -177,9 +187,9 @@ Parameters:
     Type: String
     Default: arn:aws:acm:us-west-2:050821737631:certificate/715bd527-40f0-4b1c-9da6-5880131ac2a9
   MinContainers:
-    Description: Minimum running containers. 
+    Description: Minimum running containers.
     Type: Number
-    Default: 2
+    Default: 0
   MaxContainers:
     Description: Maximum running containers. 
     Type: Number
@@ -207,6 +217,16 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
+  DeployPaidResources:
+    Description: |
+      true (default): Deploy all paid resources — ALB, DNS, and connect to DocumentDB. Normal operation.
+      false: DR standby mode — suppress ALB and DNS. ECS service stays deployed with 0 containers.
+      DR failover: set back to true to activate ALB, DNS, and full ECS service.
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
 
 Mappings: 
   Fn::Transform:
@@ -220,6 +240,12 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasSubDomainName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsDR: !Or
+    - !Equals [!Ref EnvName, ProductionDR]
+    - !Equals [!Ref EnvName, StagingDR]
+    - !Equals [!Ref EnvName, DevelopmentDR]
+    - !Equals [!Ref EnvName, TestDR]
 
 
 Resources:
@@ -247,6 +273,7 @@ Resources:
         TargetType: ip
         HealthCheckPath: /api/health
         IdleTimeout: 60
+        DeployPaidResources: !Ref DeployPaidResources
 
 # ###
 # # Document DB Section - decom, already moved to prereq
@@ -304,7 +331,7 @@ Resources:
                   - !Join ['', ['arn:aws:s3:::', !Ref EnvBucket]]
                   - !Join ['', ["arn:aws:s3:::", !Ref EnvBucket, '/*']]
               - Effect: Allow
-                Action: 
+                Action:
                   - ssmmessages:CreateControlChannel
                   - ssmmessages:CreateDataChannel
                   - ssmmessages:OpenControlChannel
@@ -314,18 +341,24 @@ Resources:
                   - ec2:AuthorizeSecurityGroupIngress
                   - ecr:GetAuthorizationToken
                 Resource: "*"
-              - Effect: Allow
-                Action:
-                  - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
-                  - elasticloadbalancing:RegisterInstancesWithLoadBalancer
-                Resource:
-                  - !GetAtt ELBStack.Outputs.LoadBalancerArn
-              - Effect: Allow
-                Action:
-                  - elasticloadbalancing:DeregisterTargets
-                  - elasticloadbalancing:RegisterTargets
-                Resource:
-                  - !GetAtt ELBStack.Outputs.ApplicationTargetGroup
+              - !If
+                - IsDeployPaidResources
+                - Effect: Allow
+                  Action:
+                    - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
+                    - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+                  Resource:
+                    - !GetAtt ELBStack.Outputs.LoadBalancerArn
+                - !Ref 'AWS::NoValue'
+              - !If
+                - IsDeployPaidResources
+                - Effect: Allow
+                  Action:
+                    - elasticloadbalancing:DeregisterTargets
+                    - elasticloadbalancing:RegisterTargets
+                  Resource:
+                    - !GetAtt ELBStack.Outputs.ApplicationTargetGroup
+                - !Ref 'AWS::NoValue'
               - Effect: Allow
                 Action:
                   - logs:CreateLogStream
@@ -451,12 +484,12 @@ Resources:
       DeploymentConfiguration:
         MinimumHealthyPercent: 50
         MaximumPercent: 200
-      DesiredCount: 2
+      DesiredCount: !If [IsDR, 0, 2]
       # This may need to be adjusted if the container takes a while to start up
       EnableExecuteCommand: true
       HealthCheckGracePeriodSeconds: 30
       LaunchType: FARGATE
-      NetworkConfiguration: 
+      NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
           Subnets:
@@ -466,13 +499,15 @@ Resources:
                 !Sub "${NetworkStackName}-PrivateSubnetId2"
           SecurityGroups:
             - !Ref ContainerSecurityGroup0
-      LoadBalancers:
-        - ContainerName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, container]]
-          ContainerPort: !Ref ContainerPort
-          TargetGroupArn:
-            Fn::GetAtt:
-              - ELBStack
-              - Outputs.ApplicationTargetGroup
+      LoadBalancers: !If
+        - IsDeployPaidResources
+        - - ContainerName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, container]]
+            ContainerPort: !Ref ContainerPort
+            TargetGroupArn:
+              Fn::GetAtt:
+                - ELBStack
+                - Outputs.ApplicationTargetGroup
+        - !Ref 'AWS::NoValue'
 
   # Container security group
   ContainerSecurityGroup0:
@@ -485,7 +520,7 @@ Resources:
           !Sub "${NetworkStackName}-VpcId"
       SecurityGroupIngress:
         - FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort  
+          ToPort: !Ref ContainerPort
           IpProtocol: tcp
           # CidrIp: 0.0.0.0/0 # change secgroup of load balancer
           SourceSecurityGroupId:
@@ -495,6 +530,7 @@ Resources:
 
   # Create ingress to allow ContainerSecurityGroup to docudb secg
   AllowECSToDocumentDB:
+    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from ECS to Document DB
@@ -584,6 +620,7 @@ Resources:
 
   # Add DNS record for the api end point
   DNSRecord:
+    Condition: IsDeployPaidResources
     DependsOn:
       - ELBStack
     Type: AWS::Route53::RecordSetGroup
@@ -681,6 +718,7 @@ Resources:
 
 Outputs:
   ApplicationLoadBalancerDNSName:
+    Condition: IsDeployPaidResources
     Description: DNS name of the Application Load Balancer
     Value:
       Fn::GetAtt:
@@ -688,6 +726,7 @@ Outputs:
         - Outputs.DNSName
 
   Endpoint:
+    Condition: IsDeployPaidResources
     Description: Endpoint URL
     Value: !Join ['', ['https://', !Ref DNSRecord]]
 

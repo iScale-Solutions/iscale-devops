@@ -23,6 +23,10 @@ Metadata:
           - ShardCapacity
           - ShardCount
           - ShardInstanceCount
+      - Label:
+          default: Disaster Recovery
+        Parameters:
+          - DeployPaidResources
 
     ParameterLabels:
       Name:
@@ -33,6 +37,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
 
 Parameters:
   Name:
@@ -59,10 +65,14 @@ Parameters:
     Type: String
     Default: Staging
     AllowedValues:
-      - Production #Prod
-      - Staging #Pre-production
-      - Development #Regular day to day commit / deplay
-      - Test 
+      - Production
+      - Staging
+      - Development
+      - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
   NetworkStackName:
     Description: The name of the network stack.
     Type: String
@@ -96,7 +106,17 @@ Parameters:
     Description: 'The number of replica instances applying to all shards in the cluster. A shardInstanceCount value of 1 means there is one writer instance, and any additional instances are replicas that can be used for reads and to improve availability.'
     Type: Number
     Default: 1
-  
+  DeployPaidResources:
+    Description: |
+      true (default): Deploy all paid resources — DocumentDB and S3 buckets. Normal operation for all environments.
+      false: DR standby mode — suppress paid resources to minimize idle cost. Only ECR repositories stay deployed.
+      DR failover: set back to true to restore DocumentDB from a cross-region snapshot.
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
 
 Mappings: 
   Fn::Transform:
@@ -109,6 +129,10 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsNotProdAndDeployPaidResources: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
 
 Resources:
 
@@ -228,6 +252,7 @@ Resources:
 ###
 
   DocumentDBStack:
+    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/docdb-database.yaml
@@ -246,7 +271,7 @@ Resources:
 # allow jumpserver to docuDB
 
   AllowJumphostToDocumentDB:
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from Jumphost to Document DB
@@ -285,20 +310,22 @@ Outputs:
     Value: !Ref DataS3Bucket
     Export:
       Name: !Sub ${AWS::StackName}-S3Name
-  
+
   S3SmartPortalName:
     Description: Endpoint URL
     Value: !Ref DataS3BucketSmartPortal
     Export:
       Name: !Sub ${AWS::StackName}-S3SmartPortalName
-  
+
   DocumentDBStackName:
+    Condition: IsDeployPaidResources
     Description: DocumentDB stack name
     Value: !Ref DocumentDBStack
     Export:
       Name: !Sub ${AWS::StackName}-DocumentDBStackName
-  
+
   DocuDBElasticSecurityGroup:
+    Condition: IsDeployPaidResources
     Description: DocumentDB elastic security group
     Value: !GetAtt DocumentDBStack.Outputs.DocuDBElasticSecurityGroup
     Export:
