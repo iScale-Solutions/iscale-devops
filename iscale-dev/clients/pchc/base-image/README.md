@@ -73,8 +73,29 @@ bootstrapped out-of-band and are *not* created here:
 
 ## Tag / SSM conventions produced by the lifecycle Lambda
 
-- AMI `Name` tags: `PCHC_<PlatformTag>_Latest` / `_Previous`
-  (ARM AL2023 uses `PCHC_AL2023_arm64_Latest` / `_Previous`).
-- SSM parameters: `/image_Builder/<PlatformTag>/base/latest` and `/previous`
-  (ARM: `/image_Builder/<PlatformTag>/arm64/base/latest`).
-- `<PlatformTag>` is derived from the OS (e.g. `AL2023`, `RHEL8`, `Ubuntu22`, `Windows2022`).
+The same lifecycle Lambda serves **both** pipeline templates
+(`pchc-base-image.yaml` and `pchc-application-images.yaml`) off the one SNS topic.
+To keep each pipeline isolated, it derives a **per-pipeline key** from the pipeline
+name in the SNS event (`sourcePipelineName`, e.g. `pchc-base-mis`) by stripping the
+`<org>-base-` prefix → `mis`. Without this, every AL2023-based app pipeline would
+collide on the same tag / SSM path and deregister each other's AMIs.
+
+- **App pipelines** (`pchc-base-<app>`):
+  - AMI `Name` tags: `PCHC_<app>_Latest` / `_Previous` (e.g. `PCHC_mis_Latest`).
+  - SSM parameters: `/image_Builder/<app>/base/latest` and `/previous`
+    (e.g. `/image_Builder/mis/base/latest`).
+- **Base AL2023 image** (`pchc-base-amazon-linux2023`) — special-cased to keep its
+  OS/arch key so app recipes can consume it as their `ParentImage`:
+  - AMI `Name` tags: `PCHC_AL2023_Latest` / `_Previous`
+    (ARM uses `PCHC_AL2023_arm64_Latest` / `_Previous`).
+  - SSM parameters: `/image_Builder/AL2023/base/latest` and `/previous`
+    (ARM: `/image_Builder/AL2023/arm64/base/latest`).
+
+| Pipeline | SSM parameter | AMI `Name` tag |
+|----------|---------------|----------------|
+| `pchc-base-amazon-linux2023` | `/image_Builder/AL2023/base/latest` | `PCHC_AL2023_Latest` |
+| `pchc-base-mis` | `/image_Builder/mis/base/latest` | `PCHC_mis_Latest` |
+| `pchc-base-maws` | `/image_Builder/maws/base/latest` | `PCHC_maws_Latest` |
+| `pchc-base-dd` | `/image_Builder/dd/base/latest` | `PCHC_dd_Latest` |
+
+(…and so on for every recipe in `pchc-application-images.yaml` — no per-app config needed.)

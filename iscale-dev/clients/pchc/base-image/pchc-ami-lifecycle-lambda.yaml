@@ -222,16 +222,28 @@ Resources:
               is_al2023_arm = platform_tag == f'AL{os_ver_str}' and 'arm' in arm_hints
               logger.info('ARM detection: platform_tag=%s arm_hints=%s is_al2023_arm=%s', platform_tag, arm_hints, is_al2023_arm)
 
-              if is_al2023_arm:
-                  tag_latest   = f'PCHC_{platform_tag}_arm64_Latest'
-                  tag_previous = f'PCHC_{platform_tag}_arm64_Previous'
-                  ssm_latest   = f'/image_Builder/{platform_tag}/arm64/base/latest'
-                  ssm_previous = f'/image_Builder/{platform_tag}/arm64/base/previous'
+              # Per-pipeline key — derived from the pipeline name in the SNS event
+              # (e.g. 'pchc-base-mis' -> 'mis'). This isolates each pipeline's AMI tags
+              # and SSM parameters; without it every AL2023-based app pipeline would
+              # collide on the same PCHC_AL2023_* tag and /image_Builder/AL2023/* path
+              # and deregister each other's AMIs during rotation.
+              pipeline_key = get_pipeline_key(message_json)
+              logger.info('Pipeline key: %s', pipeline_key)
+
+              # The base AL2023 image keeps its OS/arch key so app pipelines can consume
+              # /image_Builder/AL2023/base/latest as their ParentImage.
+              if pipeline_key in (None, 'amazon-linux2023', 'base-amazon-linux2023'):
+                  arch_seg = '/arm64' if is_al2023_arm else ''
+                  tag_arch = '_arm64' if is_al2023_arm else ''
+                  tag_latest   = f'PCHC_{platform_tag}{tag_arch}_Latest'
+                  tag_previous = f'PCHC_{platform_tag}{tag_arch}_Previous'
+                  ssm_latest   = f'/image_Builder/{platform_tag}{arch_seg}/base/latest'
+                  ssm_previous = f'/image_Builder/{platform_tag}{arch_seg}/base/previous'
               else:
-                  tag_latest   = f'PCHC_{platform_tag}_Latest'
-                  tag_previous = f'PCHC_{platform_tag}_Previous'
-                  ssm_latest   = f'/image_Builder/{platform_tag}/base/latest'
-                  ssm_previous = f'/image_Builder/{platform_tag}/base/previous'
+                  tag_latest   = f'PCHC_{pipeline_key}_Latest'
+                  tag_previous = f'PCHC_{pipeline_key}_Previous'
+                  ssm_latest   = f'/image_Builder/{pipeline_key}/base/latest'
+                  ssm_previous = f'/image_Builder/{pipeline_key}/base/previous'
 
               # Build a (region, account_id) -> AMI ID map.
               # With TargetAccountIds each account gets its own copy with a unique AMI ID.
@@ -422,6 +434,22 @@ Resources:
               except ClientError:
                   logger.exception('Failed to tag AMI %s with %s', ami_id, name_value)
                   raise
+
+          # Pipeline identification
+          def get_pipeline_name(message_json):
+              """e.g. 'pchc-base-mis' — prefer the pipeline fields, fall back to the image ARN."""
+              name = message_json.get('sourcePipelineName')
+              if name:
+                  return name
+              arn = message_json.get('sourcePipelineArn') or message_json.get('imagePipelineArn', '')
+              return arn.rsplit('/', 1)[-1] if arn else None
+
+          def get_pipeline_key(message_json):
+              """e.g. 'mis' — strips the '<org>-base-' prefix from 'pchc-base-mis'."""
+              name = get_pipeline_name(message_json)
+              if not name:
+                  return None
+              return name.split('-base-', 1)[-1] if '-base-' in name else name
 
           # Detect OS
           def get_platform_tag_name(platform: str, os_version: str, os_name_full: str) -> str:
