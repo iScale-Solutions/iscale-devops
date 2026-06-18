@@ -40,6 +40,8 @@ Metadata:
             - SnapshotIdentifier
             - DBMasterUserPassword
             - EnableCrossRegionBackupReplication
+            - DRRegion
+            - EnableCodeDeployReplication
             - SourceDbInstanceArn
             - BackupReplicationRetentionPeriod
             - LiveSecretArn
@@ -83,6 +85,10 @@ Metadata:
         default: DB Master Password (DR failover only — leave blank for normal)
       EnableCrossRegionBackupReplication:
         default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
+      DRRegion:
+        default: DR Region (AWS region name — required when EnableCodeDeployReplication is true)
+      EnableCodeDeployReplication:
+        default: Enable CodeDeploy Artifact Replication to DR region (live stack only — leave false for DR stacks)
       SourceDbInstanceArn:
         default: Source DB Instance ARN (live region — required when replication is enabled)
       BackupReplicationRetentionPeriod:
@@ -213,6 +219,17 @@ Parameters:
     AllowedValues:
       - 'true'
       - 'false'
+  DRRegion:
+    Description: AWS region name of the DR destination (e.g. us-east-2). Required when EnableCodeDeployReplication is true.
+    Type: String
+    Default: ''
+  EnableCodeDeployReplication:
+    Description: Set to true on the live stack to enable CRR of CodeDeploy artifacts to the DR region bucket. Must be false on DR stacks.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
   SourceDbInstanceArn:
     Description: |
       ARN of the live region RDS DB instance to replicate from.
@@ -275,6 +292,7 @@ Conditions:
     - !Equals [!Ref EnvName, ProductionDR]
   IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
   IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
+  IsEnableCodeDeployReplication: !Equals [!Ref EnableCodeDeployReplication, 'true']
   IsDRAndEnableCrossRegionBackupReplication: !And
     - Condition: IsDR
     - Condition: IsEnableCrossRegionBackupReplication
@@ -379,6 +397,13 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+        ReplicationDestinationBucketArn: !If
+          - IsEnableCodeDeployReplication
+          - !Sub
+            - 'arn:aws:s3:::${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-code-deploy'
+            - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+              DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+          - ''
 
   CacheStack:
     Condition: IsDeployPaidResources
@@ -530,6 +555,13 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+        ReplicationDestinationBucketArn: !If
+          - IsEnableCodeDeployReplication
+          - !Sub
+            - 'arn:aws:s3:::${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-sidek-code-deploy'
+            - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+              DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+          - ''
 
   SidekiqServerStack:
     DependsOn:
