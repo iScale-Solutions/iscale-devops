@@ -40,8 +40,8 @@ Metadata:
           - SnapshotIdentifier
           - DBMasterUserPassword
           - EnableCrossRegionBackupReplication
-          - DRRegion
-          - EnableCodeDeployReplication
+          - AppCRRBucketArn
+          - SidekiqCRRBucketArn
           - SourceDbInstanceArn
           - BackupReplicationRetentionPeriod
           - LiveSecretArn
@@ -86,10 +86,10 @@ Metadata:
         default: DB Master Password (DR failover only — leave blank for normal)
       EnableCrossRegionBackupReplication:
         default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
-      DRRegion:
-        default: DR Region (AWS region name — required when EnableCodeDeployReplication is true)
-      EnableCodeDeployReplication:
-        default: Enable CodeDeploy Artifact Replication to DR region (live stack only — leave false for DR stacks)
+      AppCRRBucketArn:
+        default: App CodeDeploy CRR Destination Bucket ARN (SSM parameter path — set by deploy-dr-foundation)
+      SidekiqCRRBucketArn:
+        default: Sidekiq CodeDeploy CRR Destination Bucket ARN (SSM parameter path — set by deploy-dr-foundation)
       SourceDbInstanceArn:
         default: Source DB Instance ARN (live region — required when replication is enabled)
       BackupReplicationRetentionPeriod:
@@ -220,17 +220,14 @@ Parameters:
     AllowedValues:
       - 'true'
       - 'false'
-  DRRegion:
-    Description: AWS region name of the DR destination (e.g. us-east-2). Required when EnableCodeDeployReplication is true.
-    Type: String
-    Default: ''
-  EnableCodeDeployReplication:
-    Description: Set to true on the live stack to enable CRR of CodeDeploy artifacts to the DR region bucket. Must be false on DR stacks.
-    Type: String
-    Default: 'false'
-    AllowedValues:
-      - 'true'
-      - 'false'
+  AppCRRBucketArn:
+    Description: SSM parameter path holding the ARN of the DR CodeDeploy artifacts bucket for the app server. Written by deploy-dr-foundation after L2 deploys. Leave at default path — value is managed via SSM, not this parameter.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /pchc/pas6/dr/app-replication-destination-bucket-arn
+  SidekiqCRRBucketArn:
+    Description: SSM parameter path holding the ARN of the DR CodeDeploy artifacts bucket for the Sidekiq server. Written by deploy-dr-foundation after L2 deploys. Leave at default path — value is managed via SSM, not this parameter.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /pchc/pas6/dr/sidekiq-replication-destination-bucket-arn
   SourceDbInstanceArn:
     Description: |
       ARN of the live region RDS DB instance to replicate from.
@@ -297,7 +294,6 @@ Conditions:
   # SnapshotIdentifier (cross-region snapshot ARN) and DBMasterUserPassword to restore the DB.
   IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
   IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
-  IsEnableCodeDeployReplication: !Equals [!Ref EnableCodeDeployReplication, 'true']
   IsDRAndEnableCrossRegionBackupReplication: !And
     - Condition: IsDR
     - Condition: IsEnableCrossRegionBackupReplication
@@ -490,13 +486,7 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        ReplicationDestinationBucketArn: !If
-          - IsEnableCodeDeployReplication
-          - !Sub
-            - 'arn:aws:s3:::${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-app-code-deploy'
-            - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
-              DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
-          - ''
+        ReplicationDestinationBucketArn: !Ref AppCRRBucketArn
 
   CacheStack:
     # Set IsDeployPaidResources=false (i.e. DR env) to suppress. See conditions for failover instructions.
@@ -663,13 +653,7 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        ReplicationDestinationBucketArn: !If
-          - IsEnableCodeDeployReplication
-          - !Sub
-            - 'arn:aws:s3:::${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-sidekiq-code-deploy'
-            - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
-              DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
-          - ''
+        ReplicationDestinationBucketArn: !Ref SidekiqCRRBucketArn
 
   SidekiqServerStack:
     DependsOn:
