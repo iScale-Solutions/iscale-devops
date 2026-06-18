@@ -108,7 +108,7 @@ jobs:
             --no-fail-on-empty-changeset
       
     # ── L2: App stack (standby — DeployPaidResources=false) ──────────────
-    
+
       - name: Deploy App stack (standby)
         run: |
           APP="${{ inputs.app }}"
@@ -124,3 +124,31 @@ jobs:
             --parameter-overrides $PARAMS DeployPaidResources=false \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
+    
+    # ── Enable CRR from live region ───────────────────────────────────────
+
+      - name: Update Code Deploy Artifact CRR SSM parameter in live region
+        if: steps.cfg.outputs.has_codedeploy == 'true'
+        run: |
+          APP="${{ inputs.app }}"
+          ENV="${{ inputs.target_env }}"
+          CFG=$(cat dr-config/${APP}.json)
+          APP_STACK="${{ steps.cfg.outputs.app_stack }}"
+
+          SSM_PARAM=$(echo "$CFG" | jq -r ".${ENV}.crr_ssm_param")
+
+          # Get the DR artifacts bucket ARN from L2 stack outputs
+          BUCKET_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$APP_STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='DeploymentBucketArn'].OutputValue" \
+            --output text)
+
+          # Write the ARN into the SSM parameter in the live (primary) region
+          aws ssm put-parameter \
+            --name "$SSM_PARAM" \
+            --value "$BUCKET_ARN" \
+            --type String \
+            --overwrite \
+            --region ap-southeast-1
+
+          echo "CRR SSM parameter '$SSM_PARAM' updated → $BUCKET_ARN"
