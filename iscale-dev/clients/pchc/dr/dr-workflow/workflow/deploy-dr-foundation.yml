@@ -172,3 +172,60 @@ jobs:
         with:
           role-to-assume: ${{ secrets.DR_DEPLOY_ROLE_ARN }}
           aws-region: ap-southeast-1
+      
+      - name: Trigger and wait for S3 Batch Replication
+        run: |
+          APP="${{ inputs.app }}"
+          ENV="${{ inputs.target_env }}"
+          CFG=$(cat dr-config/${APP}.json)
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          STACKS=$(echo "$CFG" | jq -c ".${ENV}.codedeploy_stacks[]")
+
+          while IFS= read -r STACK_CFG; do
+            SOURCE_BUCKET=$(echo "$STACK_CFG" | jq -r ".source_bucket")
+            DEST_BUCKET=$(echo "$STACK_CFG"   | jq -r ".artifacts_bucket")
+
+            echo "Starting Batch Replication: $SOURCE_BUCKET → $DEST_BUCKET"
+
+            JOB_ID=$(aws s3control create-job \
+              --account-id "$ACCOUNT_ID" \
+              --operation '{"S3ReplicateObject":{}}' \
+              --manifest-generator "{
+                \"S3JobManifestGenerator\": {
+                  \"SourceBucket\": \"arn:aws:s3:::${SOURCE_BUCKET}\",
+                  \"EnableManifestOutput\": false,
+                  \"Filter\": { \"EligibleForReplication\": true },
+                  \"GeneratedManifestEncryption\": { \"SSES3\": {} }
+                }
+              }" \
+              --report '{"Enabled":false}' \
+              --priority 10 \
+              --role-arn "${{ secrets.S3_BATCH_ROLE_ARN }}" \
+              --region ap-southeast-1 \
+              --query "JobId" \
+              --output text)
+
+            echo "Job created: $JOB_ID — waiting for completion..."
+
+            while true; do
+              STATUS=$(aws s3control describe-job \
+                --account-id "$ACCOUNT_ID" \
+                --job-id "$JOB_ID" \
+                --region ap-southeast-1 \
+                --query "Job.Status" \
+                --output text)
+
+              echo "Status: $STATUS"
+
+              if [ "$STATUS" = "Complete" ]; then
+                echo "Batch Replication complete: $SOURCE_BUCKET → $DEST_BUCKET"
+                break
+              elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+                echo "ERROR: Batch Replication job $JOB_ID $STATUS"
+                exit 1
+              fi
+
+              sleep 30
+            done
+          done <<< "$STACKS"
