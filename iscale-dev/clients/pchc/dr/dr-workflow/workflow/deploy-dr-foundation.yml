@@ -231,26 +231,7 @@ jobs:
             done
           done <<< "$STACKS"
   
-  configure-codedeploy:
-    name: Configure Code Deploy — ${{ inputs.app }} / ${{ inputs.target_env }}
-    needs: replicate-artifacts
-    if: needs.deploy-dr-foundation.outputs.has_codedeploy == 'true'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      
-      - name: Configure AWS credentials (live region)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.DR_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ needs.deploy-dr-foundation.outputs.region }}
-    
-    # ── CodeDeploy configuration ───────────────────────────────────────────────────
-
-      - name: Pre-flight — Verify DR artifacts buckets have content
-        if: needs.deploy-dr-foundation.outputs.has_codedeploy == 'true'
+      - name: Verify DR artifacts buckets have content
         run: |
           APP="${{ inputs.app }}"
           ENV="${{ inputs.target_env }}"
@@ -276,8 +257,19 @@ jobs:
           done <<< "$STACKS"
 
           [ "$FAILED" -eq 0 ] || exit 1
-
-      - name: Deploy CodeDeploy artifact
-        needs: replicate-artifacts
-        if: needs.deploy-dr-foundation.outputs.has_codedeploy == 'true'
-        runs-on: ubuntu-latest
+  
+  configure-codedeploy:
+    name: Configure Code Deploy — ${{ inputs.app }} / ${{ inputs.target_env }}
+    needs: [deploy-dr-foundation, replicate-artifacts]
+    if: needs.deploy-dr-foundation.outputs.has_codedeploy == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials (DR region)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DR_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ needs.deploy-dr-foundation.outputs.region }}
