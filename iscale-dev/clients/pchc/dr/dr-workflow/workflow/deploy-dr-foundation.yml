@@ -273,3 +273,47 @@ jobs:
         with:
           role-to-assume: ${{ secrets.DR_DEPLOY_ROLE_ARN }}
           aws-region: ${{ needs.deploy-dr-foundation.outputs.region }}
+
+      - name: Register CodeDeploy revision
+        if: steps.cfg.outputs.has_codedeploy == 'true'
+        run: |
+          APP="${{ inputs.app }}"
+          ENV="${{ inputs.target_env }}"
+          APP_STACK="${{ steps.cfg.outputs.app_stack }}"
+          CFG=$(cat dr-config/${APP}.json)
+
+          STACKS=$(echo "$CFG" | jq -c ".${ENV}.codedeploy_stacks[]")
+
+          while IFS= read -r STACK_CFG; do
+            NESTED=$(echo "$STACK_CFG"  | jq -r ".nested_resource")
+            BUCKET=$(echo "$STACK_CFG"  | jq -r ".artifacts_bucket")
+            KEY=$(echo "$STACK_CFG"     | jq -r ".artifact_key")
+
+            # Resolve nested stack name from parent stack resources
+            NESTED_STACK=$(aws cloudformation list-stack-resources \
+              --stack-name "$APP_STACK" \
+              --query "StackResourceSummaries[?LogicalResourceId=='${NESTED}'].PhysicalResourceId" \
+              --output text)
+
+            APP_NAME=$(aws cloudformation describe-stacks \
+              --stack-name "$NESTED_STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='CodeDeployApplicationName'].OutputValue" \
+              --output text)
+
+            GROUP_NAME=$(aws cloudformation describe-stacks \
+              --stack-name "$NESTED_STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='CodeDeployDeploymentGroupName'].OutputValue" \
+              --output text)
+
+            echo "Seeding: $APP_NAME / $GROUP_NAME from s3://$BUCKET/$KEY"
+
+            DEPLOYMENT_ID=$(aws deploy create-deployment \
+              --application-name "$APP_NAME" \
+              --deployment-group-name "$GROUP_NAME" \
+              --s3-location bucket="$BUCKET",key="$KEY",bundleType=zip \
+              --description "DR foundation seed — ${{ github.run_id }}" \
+              --query "deploymentId" \
+              --output text)
+
+            echo "Created deployment: $DEPLOYMENT_ID (0 instances in standby — expected)"
+          done <<< "$STACKS"
