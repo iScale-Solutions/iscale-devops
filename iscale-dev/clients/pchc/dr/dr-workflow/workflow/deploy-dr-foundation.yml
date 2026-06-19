@@ -317,3 +317,29 @@ jobs:
 
             echo "Created deployment: $DEPLOYMENT_ID (0 instances in standby — expected)"
           done <<< "$STACKS"
+    
+      - name: Notify success
+        if: success()
+        run: |
+          SNS_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "${{ steps.cfg.outputs.sns_stack }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" \
+            --output text)
+
+          aws sns publish \
+            --topic-arn "$SNS_ARN" \
+            --subject "DR Foundation Ready — ${{ inputs.app }} / ${{ inputs.target_env }}" \
+            --message "deploy-dr-foundation completed for ${{ inputs.app }} (${{ inputs.target_env }}). L1 and L2 stacks are deployed and artifacts confirmed in DR region. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          SNS_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "${{ steps.cfg.outputs.sns_stack }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" \
+            --output text)
+
+          aws sns publish \
+            --topic-arn "$SNS_ARN" \
+            --subject "DR Foundation FAILED — ${{ inputs.app }} / ${{ inputs.target_env }}" \
+            --message "deploy-dr-foundation FAILED for ${{ inputs.app }} (${{ inputs.target_env }}). Check the run for details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
