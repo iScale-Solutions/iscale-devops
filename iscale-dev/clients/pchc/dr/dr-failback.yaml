@@ -122,11 +122,8 @@ Resources:
     Properties:
       FunctionName: !Sub '${AWS::StackName}'
       Description: >-
-        DR Failback Lambda. Actions: comment | uncomment | update_stack | set_deploy_paid_false |
-        set_deploy_paid_false_both | check_stack_status | check_both_stacks_status |
-        snapshot_pitr_db | check_pitr_snapshot_status | delete_pitr_db | check_pitr_db_deleted |
-        delete_pitr_efs_mount_targets | check_pitr_efs_mount_targets_deleted | delete_pitr_efs_filesystem.
-        Payload: { "app_name": "pchc-tdr-ue2-pesonet", "action": "<action>" }
+        DR Failback Lambda. Supports failback, ecs_failback, comment, uncomment,
+        set_deploy_paid_false, check_stack_status, and PITR/EFS cleanup actions.
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.12
@@ -631,6 +628,13 @@ Resources:
               except ClientError as e:
                   if e.response['Error']['Code'] == 'FileSystemNotFound':
                       logger.info("[DELETE_PITR_EFS] Filesystem already gone | efs_id=%s", efs_id)
+                      ssm = boto3.client('ssm')
+                      try:
+                          ssm.delete_parameter(Name=ssm_path)
+                          logger.info("[DELETE_PITR_EFS] Cleared stale SSM param | path=%s", ssm_path)
+                      except ClientError as ssm_err:
+                          if ssm_err.response['Error']['Code'] != 'ParameterNotFound':
+                              raise
                       return {'submitted': False, 'reason': 'fs_not_found', 'efs_id': efs_id}
                   raise
               for mt in mount_targets:
@@ -778,7 +782,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failback 4-step sequential orchestration (with optional PITR RDS + EFS cleanup gated on use_pitr), (4) ecs_failback. Routed by 'action' in the input payload.",
+          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failback sequential orchestration — Step1 comment, PITR cleanup (use_pitr=true: snapshot+delete PITR RDS then delete restored EFS), Step2 DeployPaidResources=false, Step3 uncomment, Step4 network DeployPaidResources=false, (4) ecs_failback. Routed by 'action' in the input payload.",
           "StartAt": "ValidateAction",
           "States": {
 
@@ -1091,7 +1095,7 @@ Resources:
             },
 
             "FailbackStep1Done": {
-              "Comment": "Fail fast on rollback. Advance to Step 2 when complete. Otherwise loop.",
+              "Comment": "Fail fast on rollback. Advance to PITR cleanup check when complete. Otherwise loop.",
               "Type": "Choice",
               "Choices": [
                 {
@@ -1102,7 +1106,7 @@ Resources:
                 {
                   "Variable": "$.fo_s1_status.update_complete",
                   "BooleanEquals": true,
-                  "Next": "FailbackStep2SetDeployPaid"
+                  "Next": "CheckUsePitr"
                 }
               ],
               "Default": "FailbackStep1Wait"
@@ -1171,7 +1175,7 @@ Resources:
             },
 
             "FailbackStep2Done": {
-              "Comment": "Fail fast on rollback. Advance to PITR cleanup check when complete. Otherwise loop.",
+              "Comment": "Fail fast on rollback. Advance to Step 3 uncomment when complete. Otherwise loop.",
               "Type": "Choice",
               "Choices": [
                 {
@@ -1182,14 +1186,14 @@ Resources:
                 {
                   "Variable": "$.fo_s2_status.update_complete",
                   "BooleanEquals": true,
-                  "Next": "CheckUsePitr"
+                  "Next": "FailbackStep3Uncomment"
                 }
               ],
               "Default": "FailbackStep2Wait"
             },
 
             "CheckUsePitr": {
-              "Comment": "PITR CLEANUP — only snapshot/delete the out-of-band PITR DB and EFS when this failback follows a PITR-mode failover (use_pitr=true in the input).",
+              "Comment": "PITR CLEANUP — runs BEFORE DeployPaidResources=false so the PITR RDS and restored EFS are removed before CFN tries to modify shared security groups. Gate: use_pitr=true in the input.",
               "Type": "Choice",
               "Choices": [
                 {
@@ -1198,7 +1202,7 @@ Resources:
                   "Next": "SnapshotPitrDb"
                 }
               ],
-              "Default": "FailbackStep3Uncomment"
+              "Default": "FailbackStep2SetDeployPaid"
             },
 
             "SnapshotPitrDb": {
@@ -1395,7 +1399,7 @@ Resources:
             },
 
             "CheckEfsMountTargetsSubmitted": {
-              "Comment": "If no restored EFS was ever recorded in SSM (or it's already gone), nothing to clean up — resume the failback sequence.",
+              "Comment": "If no restored EFS was ever recorded in SSM (or it's already gone), nothing to clean up — proceed to DeployPaidResources=false.",
               "Type": "Choice",
               "Choices": [
                 {
@@ -1404,7 +1408,7 @@ Resources:
                   "Next": "WaitForEfsMountTargets"
                 }
               ],
-              "Default": "FailbackStep3Uncomment"
+              "Default": "FailbackStep2SetDeployPaid"
             },
 
             "WaitForEfsMountTargets": {
@@ -1464,7 +1468,7 @@ Resources:
                 "efs_id_ssm_path.$": "$.efs_id_ssm_path"
               },
               "ResultPath": "$.efs_delete_result",
-              "Next": "FailbackStep3Uncomment",
+              "Next": "FailbackStep2SetDeployPaid",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],
