@@ -416,11 +416,14 @@ def _scale_ecs_service(event):
     in the DR ECR repo, then update the service to desired_count.
     cluster_name and service_name are read from CFN stack outputs so
     the state machine doesn't need to hard-code them.
+    ecr_repo and desired_count are optional — old payloads without
+    them skip the image swap and default desired_count to 2.
     """
+    inp           = event.get('input', event)
     region        = os.environ['AWS_REGION']
-    stack_name    = event.get('stack_name', '')
-    ecr_repo      = event.get('ecr_repo', '')
-    desired_count = int(event.get('desired_count', 2))
+    stack_name    = inp.get('stack_name', '')
+    ecr_repo      = inp.get('ecr_repo', '')
+    desired_count = int(inp.get('desired_count', 2))
 
     cf           = boto3.client('cloudformation', region_name=region)
     cluster_name = _get_stack_output(cf, stack_name, 'ECSClusterName')
