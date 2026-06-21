@@ -475,7 +475,8 @@ def _scale_ecs_service(event):
 
 
 def _get_latest_ecr_image(region, repo_uri):
-    """Return URI of the most recently pushed tagged image in an ECR repo."""
+    """Return URI of the most recently pushed git-SHA-tagged image in an ECR repo."""
+    import re
     registry = repo_uri.split('/')[0]
     repo     = '/'.join(repo_uri.split('/')[1:])
     ecr      = boto3.client('ecr', region_name=region)
@@ -486,10 +487,14 @@ def _get_latest_ecr_image(region, repo_uri):
     if not images:
         raise Exception(f'No tagged images in ECR repo: {repo}')
     images.sort(key=lambda x: x.get('imagePushedAt', 0), reverse=True)
-    latest = images[0]
-    tags   = [t for t in latest.get('imageTags', []) if t != 'latest']
-    tag    = tags[0] if tags else 'latest'
-    return f'{registry}/{repo}:{tag}'
+    sha_re = re.compile(r'^[0-9a-f]{40}$')
+    for image in images:
+        sha_tags = [t for t in image.get('imageTags', []) if sha_re.match(t)]
+        if sha_tags:
+            tag = sha_tags[0]
+            logger.info(f'Latest git-SHA image: {repo}:{tag}')
+            return f'{registry}/{repo}:{tag}'
+    raise Exception(f'No git-SHA-tagged images found in ECR repo: {repo}')
 
 
 # ── helpers ───────────────────────────────────────────────────────────
