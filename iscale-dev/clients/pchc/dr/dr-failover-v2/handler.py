@@ -32,6 +32,7 @@ def handler(event, context):
     if action == 'update_stack':              return _update_stack_action(event)
     if action == 'check_stack_status':        return _check_stack_status(event)
     if action == 'notify':                    return _notify(event)
+    if action == 'scale_ecs_service':         return _scale_ecs_service(event)
     raise ValueError(f'Unknown action: {action!r}')
 
 
@@ -405,6 +406,87 @@ def _notify(event):
     except Exception:
         logger.warning('SNS publish failed', exc_info=True)
     return {'notified': True}
+
+
+# ── scale_ecs_service ─────────────────────────────────────────────────
+
+def _scale_ecs_service(event):
+    """
+    Register a new ECS task definition revision using the latest image
+    in the DR ECR repo, then update the service to desired_count.
+    cluster_name and service_name are read from CFN stack outputs so
+    the state machine doesn't need to hard-code them.
+    """
+    region        = os.environ['AWS_REGION']
+    stack_name    = event.get('stack_name', '')
+    ecr_repo      = event.get('ecr_repo', '')
+    desired_count = int(event.get('desired_count', 2))
+
+    cf           = boto3.client('cloudformation', region_name=region)
+    cluster_name = _get_stack_output(cf, stack_name, 'ECSClusterName')
+    service_name = _get_stack_output(cf, stack_name, 'EcsServiceName')
+    if not cluster_name or not service_name:
+        raise ValueError(
+            f'ECSClusterName or EcsServiceName output missing from stack: {stack_name}'
+        )
+
+    ecs = boto3.client('ecs', region_name=region)
+    svc = ecs.describe_services(cluster=cluster_name, services=[service_name])['services'][0]
+    td  = ecs.describe_task_definition(taskDefinition=svc['taskDefinition'])['taskDefinition']
+
+    new_image = _get_latest_ecr_image(region, ecr_repo) if ecr_repo else None
+    if new_image:
+        logger.info(f'Latest DR ECR image: {new_image}')
+
+    keep = {
+        'family', 'taskRoleArn', 'executionRoleArn', 'networkMode',
+        'containerDefinitions', 'volumes', 'placementConstraints',
+        'requiresCompatibilities', 'cpu', 'memory',
+        'pidMode', 'ipcMode', 'proxyConfiguration', 'inferenceAccelerators',
+        'ephemeralStorage', 'runtimePlatform',
+    }
+    new_td = {k: v for k, v in td.items() if k in keep and v is not None}
+    if new_image:
+        for c in new_td.get('containerDefinitions', []):
+            c['image'] = new_image
+
+    new_td_arn = ecs.register_task_definition(**new_td)['taskDefinition']['taskDefinitionArn']
+    logger.info(f'Registered task definition: {new_td_arn}')
+
+    ecs.update_service(
+        cluster=cluster_name,
+        service=service_name,
+        taskDefinition=new_td_arn,
+        desiredCount=desired_count,
+        forceNewDeployment=True,
+    )
+    logger.info(f'Service updated: {service_name} desiredCount={desired_count}')
+    return {
+        'stack_name':          stack_name,
+        'cluster_name':        cluster_name,
+        'service_name':        service_name,
+        'task_definition_arn': new_td_arn,
+        'desired_count':       desired_count,
+        'image_uri':           new_image or 'unchanged',
+    }
+
+
+def _get_latest_ecr_image(region, repo_uri):
+    """Return URI of the most recently pushed tagged image in an ECR repo."""
+    registry = repo_uri.split('/')[0]
+    repo     = '/'.join(repo_uri.split('/')[1:])
+    ecr      = boto3.client('ecr', region_name=region)
+    images   = ecr.describe_images(
+        repositoryName=repo,
+        filter={'tagStatus': 'TAGGED'},
+    ).get('imageDetails', [])
+    if not images:
+        raise Exception(f'No tagged images in ECR repo: {repo}')
+    images.sort(key=lambda x: x.get('imagePushedAt', 0), reverse=True)
+    latest = images[0]
+    tags   = [t for t in latest.get('imageTags', []) if t != 'latest']
+    tag    = tags[0] if tags else 'latest'
+    return f'{registry}/{repo}:{tag}'
 
 
 # ── helpers ───────────────────────────────────────────────────────────
