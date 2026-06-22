@@ -113,6 +113,30 @@ jobs:
             echo "Resolve the stack before attempting failover."
             exit 1
           fi
+      
+      - name: Verify automated backups exist (PITR path)
+        if: steps.cfg.outputs.use_pitr == 'true'
+        run: |
+          DB_ID="${{ steps.cfg.outputs.db_instance_identifier }}"
+
+          if [ -z "$DB_ID" ]; then
+            echo "SKIP: db_instance_identifier not set for this app — skipping backup check."
+            exit 0
+          fi
+
+          BACKUP_STATUS=$(aws rds describe-db-instance-automated-backups \
+            --db-instance-identifier "$DB_ID" \
+            --query "DBInstanceAutomatedBackups[?Status=='replicating' || Status=='retained'].Status" \
+            --output text)
+
+          if [ -z "$BACKUP_STATUS" ]; then
+            echo "ERROR: No replicating or retained automated backups found for '$DB_ID'."
+            echo "Cross-region backup replication may not be active or may not have completed"
+            echo "its first cycle. Check EnableCrossRegionBackupReplication on the live app stack."
+            exit 1
+          fi
+
+          echo "Automated backups available for '$DB_ID': $BACKUP_STATUS"
 
   failover:
     name: DR Failover
