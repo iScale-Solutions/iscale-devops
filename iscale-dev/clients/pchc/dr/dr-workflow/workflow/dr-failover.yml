@@ -81,6 +81,38 @@ jobs:
         with:
           role-to-assume: ${{ secrets.DR_DEPLOY_ROLE_ARN }}
           aws-region: ${{ steps.cfg.outputs.region }}
+      
+      - name: Verify network stack is healthy
+        run: |
+          STACK="${{ steps.cfg.outputs.network_stack }}"
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --query "Stacks[0].StackStatus" \
+            --output text)
+
+          echo "Network stack status: $STATUS"
+
+          if [[ "$STATUS" != "CREATE_COMPLETE" && "$STATUS" != "UPDATE_COMPLETE" ]]; then
+            echo "ERROR: Network stack '$STACK' is not in a healthy state ($STATUS)."
+            echo "Resolve the stack before attempting failover."
+            exit 1
+          fi
+        
+      - name: Verify app stack is healthy
+        run: |
+          STACK="${{ steps.cfg.outputs.app_stack }}"
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --query "Stacks[0].StackStatus" \
+            --output text)
+
+          echo "App stack status: $STATUS"
+
+          if [[ "$STATUS" != "CREATE_COMPLETE" && "$STATUS" != "UPDATE_COMPLETE" ]]; then
+            echo "ERROR: App stack '$STACK' is not in a healthy state ($STATUS)."
+            echo "Resolve the stack before attempting failover."
+            exit 1
+          fi
 
   failover:
     name: DR Failover
