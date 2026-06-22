@@ -286,3 +286,31 @@ jobs:
 
           echo "execution_arn=$EXECUTION_ARN" >> "$GITHUB_OUTPUT"
           echo "Failover execution started: $EXECUTION_ARN"
+      
+      - name: Monitor failover execution
+        run: |
+          EXECUTION_ARN="${{ steps.start.outputs.execution_arn }}"
+          CONSOLE_URL="https://${{ steps.cfg.outputs.region }}.console.aws.amazon.com/states/home?region=${{ steps.cfg.outputs.region }}#/executions/details/${EXECUTION_ARN}"
+
+          echo "Monitoring: $EXECUTION_ARN"
+          echo "Console: $CONSOLE_URL"
+
+          while true; do
+            STATUS=$(aws stepfunctions describe-execution \
+              --execution-arn "$EXECUTION_ARN" \
+              --query "status" \
+              --output text)
+
+            echo "Status: $STATUS"
+
+            if [ "$STATUS" = "SUCCEEDED" ]; then
+              echo "Failover execution SUCCEEDED."
+              exit 0
+            elif [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "TIMED_OUT" ] || [ "$STATUS" = "ABORTED" ]; then
+              echo "ERROR: Failover execution $STATUS."
+              echo "Check the Step Functions console for details: $CONSOLE_URL"
+              exit 1
+            fi
+
+            sleep 60
+          done
