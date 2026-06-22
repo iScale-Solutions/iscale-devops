@@ -214,3 +214,75 @@ jobs:
 
           echo "PITR subnet group:    ${PITR_SUBNET_GROUP:-not set}"
           echo "PITR security group:  ${PITR_SG_ID:-not set}"
+      
+      - name: Get state machine ARN
+        id: sfn
+        run: |
+          FAILOVER_ENGINE="${{ steps.cfg.outputs.failover_engine_stack }}"
+
+          STATE_MACHINE_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$FAILOVER_ENGINE" \
+            --query "Stacks[0].Outputs[?OutputKey=='StateMachineArn'].OutputValue" \
+            --output text)
+
+          echo "state_machine_arn=$STATE_MACHINE_ARN" >> "$GITHUB_OUTPUT"
+          echo "State machine ARN resolved."
+
+      - name: Start DR failover execution
+        id: start
+        run: |
+          APP="${{ inputs.app }}"
+          ENV="${{ inputs.target_env }}"
+
+          INPUT=$(jq -n \
+            --arg  app_name                     "${{ steps.cfg.outputs.app_name }}" \
+            --arg  org_name                     "${{ steps.cfg.outputs.org_name }}" \
+            --argjson use_pitr                  "${{ steps.cfg.outputs.use_pitr }}" \
+            --arg  network_stack_name           "${{ steps.cfg.outputs.network_stack }}" \
+            --arg  app_stack_name               "${{ steps.cfg.outputs.app_stack }}" \
+            --arg  network_template_url         "${{ steps.cfg.outputs.network_template }}" \
+            --arg  db_instance_identifier       "${{ steps.cfg.outputs.db_instance_identifier }}" \
+            --arg  dr_db_secret_arn             "" \
+            --arg  pitr_target_identifier       "${{ steps.cfg.outputs.pitr_target_identifier }}" \
+            --arg  pitr_endpoint_ssm_path       "${{ steps.cfg.outputs.pitr_endpoint_ssm_path }}" \
+            --arg  pitr_subnet_group            "${{ steps.pitr.outputs.pitr_subnet_group }}" \
+            --arg  pitr_security_group_id       "${{ steps.pitr.outputs.pitr_security_group_id }}" \
+            --arg  snapshot_identifier          "" \
+            --arg  db_master_password           "" \
+            --arg  redshift_cluster_identifier  "${{ steps.cfg.outputs.redshift_cluster_identifier }}" \
+            --arg  redshift_snapshot_identifier "" \
+            --arg  efs_backup_vault_name        "${{ steps.cfg.outputs.efs_backup_vault_name }}" \
+            --arg  efs_id_ssm_path              "${{ steps.cfg.outputs.efs_id_ssm_path }}" \
+            --arg  backup_role_arn              "" \
+            --arg  sns_topic_arn                "" \
+            '{
+              app_name:                    $app_name,
+              org_name:                    $org_name,
+              use_pitr:                    $use_pitr,
+              network_stack_name:          $network_stack_name,
+              app_stack_name:              $app_stack_name,
+              network_template_url:        $network_template_url,
+              db_instance_identifier:      $db_instance_identifier,
+              dr_db_secret_arn:            $dr_db_secret_arn,
+              pitr_target_identifier:      $pitr_target_identifier,
+              pitr_endpoint_ssm_path:      $pitr_endpoint_ssm_path,
+              pitr_subnet_group:           $pitr_subnet_group,
+              pitr_security_group_id:      $pitr_security_group_id,
+              snapshot_identifier:         $snapshot_identifier,
+              db_master_password:          $db_master_password,
+              redshift_cluster_identifier: $redshift_cluster_identifier,
+              redshift_snapshot_identifier:$redshift_snapshot_identifier,
+              efs_backup_vault_name:       $efs_backup_vault_name,
+              efs_id_ssm_path:             $efs_id_ssm_path,
+              backup_role_arn:             $backup_role_arn,
+              sns_topic_arn:               $sns_topic_arn
+            }')
+
+          EXECUTION_ARN=$(aws stepfunctions start-execution \
+            --state-machine-arn "${{ steps.sfn.outputs.state_machine_arn }}" \
+            --input "$INPUT" \
+            --query "executionArn" \
+            --output text)
+
+          echo "execution_arn=$EXECUTION_ARN" >> "$GITHUB_OUTPUT"
+          echo "Failover execution started: $EXECUTION_ARN"
