@@ -143,3 +143,52 @@ jobs:
     needs: pre-flight
     runs-on: ubuntu-latest
     timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load app config
+        id: cfg
+        run: |
+          APP="${{ inputs.app }}"
+          ENV="${{ inputs.target_env }}"
+          CFG=$(cat dr-config/${APP}.json)
+
+          REGION=$(echo "$CFG"               | jq -r ".${ENV}.region")
+          APP_STACK=$(echo "$CFG"            | jq -r ".${ENV}.app_stack_name")
+          NETWORK_STACK=$(echo "$CFG"        | jq -r ".${ENV}.network_stack_name")
+          NETWORK_TEMPLATE=$(echo "$CFG"     | jq -r ".${ENV}.network_template_url")
+          FAILOVER_ENGINE=$(echo "$CFG"      | jq -r ".failover_engine_stack")
+          ORG_NAME=$(echo "$CFG"             | jq -r ".org_name")
+          APP_NAME="${{ inputs.app }}"
+          USE_PITR=$(echo "$CFG"             | jq -r ".${ENV}.use_pitr")
+          DB_INSTANCE_ID=$(echo "$CFG"       | jq -r ".${ENV}.db_instance_identifier // \"\"")
+          PITR_TARGET=$(echo "$CFG"          | jq -r ".${ENV}.pitr_target_identifier // \"\"")
+          PITR_SSM=$(echo "$CFG"             | jq -r ".${ENV}.pitr_endpoint_ssm_path // \"\"")
+          EFS_VAULT=$(echo "$CFG"            | jq -r ".${ENV}.efs_backup_vault_name // \"\"")
+          EFS_SSM=$(echo "$CFG"              | jq -r ".${ENV}.efs_id_ssm_path // \"\"")
+          RS_CLUSTER=$(echo "$CFG"           | jq -r ".${ENV}.redshift_cluster_identifier // \"\"")
+
+          {
+            echo "region=$REGION"
+            echo "app_stack=$APP_STACK"
+            echo "network_stack=$NETWORK_STACK"
+            echo "network_template=$NETWORK_TEMPLATE"
+            echo "failover_engine_stack=$FAILOVER_ENGINE"
+            echo "org_name=$ORG_NAME"
+            echo "app_name=$APP_NAME"
+            echo "use_pitr=$USE_PITR"
+            echo "db_instance_identifier=$DB_INSTANCE_ID"
+            echo "pitr_target_identifier=$PITR_TARGET"
+            echo "pitr_endpoint_ssm_path=$PITR_SSM"
+            echo "efs_backup_vault_name=$EFS_VAULT"
+            echo "efs_id_ssm_path=$EFS_SSM"
+            echo "redshift_cluster_identifier=$RS_CLUSTER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DR_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ steps.cfg.outputs.region }}
