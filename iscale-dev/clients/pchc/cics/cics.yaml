@@ -1,6 +1,11 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: CICS Resources
 
+# Info
+# /dev/sda1 is the root volume of Windows AMIs
+# need to use existing AMI to retain consistency (for baked windows ami).
+# ami need to copy to other regions for base ami
+
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -31,7 +36,6 @@ Metadata:
           - SIOSInstanceAMI
           - InstanceType
           - RDPPort
-          - SecondInstance
       - Label:
           default: Scheduler Configuration
         Parameters:
@@ -42,9 +46,19 @@ Metadata:
         Parameters:
           - ADPassword
       - Label:
-          default: Is this stack a Main or Disaster Recovery/Backup ?
+          default: Disaster Recovery
         Parameters:
-          - DisasterRecoveryRegion
+          - DeployPaidResources
+          - SnapshotIdentifier
+          - DBMasterUserPassword
+          - EnableCrossRegionBackupReplication
+          - AppCRRBucketArn
+          - SidekiqCRRBucketArn
+          - SourceDbInstanceArn
+          - BackupReplicationRetentionPeriod
+          - LiveSecretArn
+          - IsPITRMode
+          - PITRDBEndpoint
 
     ParameterLabels:
       Name:
@@ -75,8 +89,8 @@ Metadata:
         default: Network Stack Name
       RDPPort:
         default: RDP Port Number
-      SecondInstance:
-        default: Deploy Second Instance
+      # SIOSInstanceAMI:
+      #   default: SIOS Instance AMI
       SNSStackName:
         default: SNS Topic Stack Name
       ClientDomainName:
@@ -85,8 +99,28 @@ Metadata:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
-      DisasterRecoveryRegion:
-        default: Set to "True" if this stack is deployed in Disaster Recovery Region / Backup Region. False if Main region.
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      SnapshotIdentifier:
+        default: DB Snapshot Identifier (DR failover restore — leave blank for normal)
+      DBMasterUserPassword:
+        default: DB Master Password (DR failover only — leave blank for normal)
+      EnableCrossRegionBackupReplication:
+        default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
+      AppCRRBucketArn:
+        default: App CodeDeploy CRR Destination Bucket ARN (SSM parameter path — set by deploy-dr-foundation)
+      SidekiqCRRBucketArn:
+        default: Sidekiq CodeDeploy CRR Destination Bucket ARN (SSM parameter path — set by deploy-dr-foundation)
+      SourceDbInstanceArn:
+        default: Source DB Instance ARN (live region — required when replication is enabled)
+      BackupReplicationRetentionPeriod:
+        default: Backup Retention Period in DR region (days)
+      LiveSecretArn:
+        default: Live Region Secret ARN (DR standby only — required for secrets sync)
+      IsPITRMode:
+        default: PITR Mode (set by dr-failover-v2 only — do not change manually)
+      PITRDBEndpoint:
+        default: PITR DB Endpoint (set by dr-failover-v2 only — do not change manually)
 
 Parameters:
   Name:
@@ -137,10 +171,12 @@ Parameters:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
     Default: ami-0526b9747c2c87a0b #Default Windows 2019 base server
+    # ami-03edf490ad235d721 for UAT oregon
   InstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
-    Default: ami-0d694fc7ea154072a #Default Windows 2019 base server
+    Default: ami-0d694fc7ea154072a #Default Windows 2019 base 
+    # ami-03edf490ad235d721 for UAT oregon, baked base windows
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -173,13 +209,6 @@ Parameters:
     Default: 3389
     MinValue: 1
     MaxValue: 65535
-  SecondInstance:
-    Description: Whether to deploy a second instance for high availability.
-    Type: String
-    Default: true
-    AllowedValues:
-      - true
-      - false
   SIOSInstanceAMI:
     Description: Instance AMI ID
     Type: AWS::EC2::Image::Id
@@ -197,13 +226,89 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
-  DisasterRecoveryRegion:
-    Description: Set to "True" if this stack is deployed in Disaster Recovery Region / Backup Region
+  DeployPaidResources:
+    Description: |
+      true (default): Deploy all paid resources — DB, Cache, LBs, and App Servers. Normal operation for all environments.
+      false: DR standby mode — suppress all paid resources to minimize idle cost. Only CodeDeploy infra stays alive.
+      DR failover: set back to true and provide SnapshotIdentifier to restore DB from the cross-region backup.
     Type: String
-    Default: false
+    Default: 'true'
     AllowedValues:
-      - true
-      - false
+      - 'true'
+      - 'false'
+  SnapshotIdentifier:
+    Description: |
+      (DR Failover only) ARN of the RDS snapshot to restore the database from.
+      Obtain by copying the latest automated backup from the live region into the DR region before failover.
+      Leave blank for normal fresh DB creation — existing deployments are unaffected.
+    Type: String
+    Default: ''
+  DBMasterUserPassword:
+    Description: |
+      (DR Failover only) Master user password of the source database.
+      Provide this during snapshot restore so the Secrets Manager secret stays in sync with the restored DB credentials.
+      Leave blank for auto-generated password — existing deployments are unaffected.
+    Type: String
+    Default: ''
+    NoEcho: true
+  EnableCrossRegionBackupReplication:
+    Description: |
+      Set to true to enable cross-region automated backup replication for the DB.
+      Deploy with this enabled in the DR region stack, pointing SourceDbInstanceArn to the live DB.
+      Replicates daily snapshots + transaction logs — enables PITR with ~5 minute RPO in the DR region.
+      Default false — existing deployments are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  AppCRRBucketArn:
+    Description: SSM parameter path holding the ARN of the DR CodeDeploy artifacts bucket for the app server. Written by deploy-dr-foundation after L2 deploys. Leave at default path — value is managed via SSM, not this parameter.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /pchc/pas6/dr/app-replication-destination-bucket-arn
+  SidekiqCRRBucketArn:
+    Description: SSM parameter path holding the ARN of the DR CodeDeploy artifacts bucket for the Sidekiq server. Written by deploy-dr-foundation after L2 deploys. Leave at default path — value is managed via SSM, not this parameter.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /pchc/pas6/dr/sidekiq-replication-destination-bucket-arn
+  SourceDbInstanceArn:
+    Description: |
+      ARN of the live region RDS DB instance to replicate from.
+      Required when EnableCrossRegionBackupReplication=true.
+      Format: arn:aws:rds:<live-region>:<account-id>:db:<db-identifier>
+      Obtain from the live stack DBStack output: DBInstanceARN.
+    Type: String
+    Default: ''
+  BackupReplicationRetentionPeriod:
+    Description: Number of days to retain replicated backups in the DR region (1-35)
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+  LiveSecretArn:
+    Description: |
+      ARN of the live region Secrets Manager secret to replicate from.
+      Obtain from the live stack Secrets Manager console.
+      Only required when deploying in DR (ProductionDR) — leave blank for normal deployments.
+    Type: String
+    Default: ''
+  IsPITRMode:
+    Description: |
+      Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
+      When true, DBStack is suppressed (DB was restored externally via PITR) and all DB references
+      resolve from PITRDBEndpoint and the pre-deployed DBStandbySecurityGroup instead of DBStack outputs.
+      Default false — live stacks and snapshot-based failover are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  PITRDBEndpoint:
+    Description: |
+      Endpoint of the PITR-restored RDS instance. Written to SSM and Secrets Manager by the
+      dr-failover Step Functions machine before the app stack update. Only used when IsPITRMode=true.
+      Leave blank for all other deployments — existing stacks are unaffected.
+    Type: String
+    Default: ''
 
 Mappings:
   Fn::Transform:
@@ -216,7 +321,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
-  IsDeploySecondInstance: !Equals [!Ref SecondInstance, 'true']
+  HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
   IsDR: !Or
     - !Equals [!Ref EnvName, ProductionDR]
     - !Equals [!Ref EnvName, StagingDR]
@@ -225,11 +330,47 @@ Conditions:
   IsProdOrProductionDR: !Or
     - Condition: IsProd
     - !Equals [!Ref EnvName, ProductionDR]
-  IsNotDr: !Not [Condition: IsDR]
-  HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
-  IsDisasterRecoveryRegion: !Equals [!Ref DisasterRecoveryRegion, 'true'] # if this is a DR region
-  IsMainRegion: !Equals [!Ref DisasterRecoveryRegion, 'false'] # if this is the main region
-  IsProdAndMainRegion:  !And [Condition: IsProd, Condition: IsMainRegion]
+  # IsDeployPaidResources is driven by the explicit DeployPaidResources parameter (default true).
+  # DR standby: set DeployPaidResources=false to suppress DB, Cache, LBs, and App Servers.
+  # TO ACTIVATE FAILOVER: update the stack with DeployPaidResources=true and provide
+  # SnapshotIdentifier (cross-region snapshot ARN) and DBMasterUserPassword to restore the DB.
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsMainRegion: !Not [Condition: IsDR]
+  IsProdAndMainRegion: !And
+    - Condition: IsProd
+    - Condition: IsMainRegion
+  IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
+  IsDRAndEnableCrossRegionBackupReplication: !And
+    - Condition: IsDR
+    - Condition: IsEnableCrossRegionBackupReplication
+  IsNotProdAndDeployPaidResources: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
+  IsNotProdAndDeployPaidResourcesAndNotDR: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
+    - !Not [Condition: IsDR]
+  IsProdOrProductionDRAndDeployPaidResources: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResources
+  IsDashboardDeployed: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResources
+  IsPITRMode: !Equals [!Ref IsPITRMode, 'true']
+  # DBStack and its dependents are suppressed when PITR mode is active — DB was restored externally.
+  IsDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsDeployPaidResources
+    - !Not [{Condition: IsPITRMode}]
+  IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
+  IsDashboardDeployedAndNotPITR: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
+  IsSFTPDeployed: !Or
+    - Condition: IsProd
+    - !Equals [!Ref EnvName, ProductionDR]
+    - !Equals [!Ref EnvName, TestDR]
 
 Resources:
 
@@ -238,6 +379,7 @@ Resources:
   ##
 
   ELBStack:
+    Condition: DeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/loadbalancer.yaml
@@ -250,13 +392,6 @@ Resources:
         InstancePort: 443
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        UseCustomSubnets: true
-        CustomSubnet1: 
-          Fn::ImportValue:
-            !Sub '${NetworkStackName}-PublicSubnetId1'
-        CustomSubnet2:
-          Fn::ImportValue:
-            !Sub '${NetworkStackName}-PublicSubnetId3'
 
 ####
 # SFTP Section
@@ -275,9 +410,10 @@ Resources:
         Hostname: sftp-cics
         UseDefaultSecGroup: FALSE
         EndpointType: VPC_INTERNET
-        DeployPaidResources: false
-  
+        DeployPaidResources: !Ref DeployPaidResources
+
   AllowSFTP1:
+    Condition: DeployPaidResources
     DependsOn:
       - FTPStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -290,6 +426,7 @@ Resources:
       CidrIp: 165.225.112.0/23
   
   AllowSFTP2:
+    Condition: DeployPaidResources
     DependsOn:
       - FTPStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -302,6 +439,7 @@ Resources:
       CidrIp: 165.225.116.0/23
   
   AllowSFTP3:
+    Condition: DeployPaidResources
     DependsOn:
       - FTPStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -314,6 +452,7 @@ Resources:
       CidrIp: 119.92.188.2/32
 
   AllowSFTP4:
+    Condition: DeployPaidResources
     DependsOn:
       - FTPStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -326,6 +465,7 @@ Resources:
       CidrIp: 120.89.33.200/32
 
   AllowSFTP5:
+    Condition: DeployPaidResources
     DependsOn:
       - FTPStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -338,6 +478,7 @@ Resources:
       CidrIp: 120.89.33.198/32
 
   AllowSFTP6:
+    Condition: DeployPaidResources
     DependsOn:
       - FTPStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -350,6 +491,7 @@ Resources:
       CidrIp: 119.92.188.14/32
 
   AllowSFTP7:
+    Condition: DeployPaidResources
     DependsOn:
       - FTPStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -362,6 +504,7 @@ Resources:
       CidrIp: 120.89.49.14/32
 
   AllowSFTP8:
+    Condition: DeployPaidResources
     DependsOn:
       - FTPStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -375,6 +518,7 @@ Resources:
 
 ###
 # Transfer S3 buckets
+# not needed in uat DR
 ###
 
   Xfer1S3Bucket:
@@ -579,6 +723,7 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   CICSAPPSVR1Instance:
+    # UAT OK
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref SIOSInstanceAMI
@@ -586,6 +731,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref CICSAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -651,7 +799,8 @@ Resources:
 ###
 
   CICSAPPSVR2Instance:
-    Condition: IsDeploySecondInstance
+    # UAT OK
+    Condition: IsMainRegion
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref SIOSInstanceAMI
@@ -659,6 +808,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref CICSAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -681,7 +833,7 @@ Resources:
           SecondaryPrivateIpAddressCount: 2
           SubnetId:
             Fn::ImportValue:
-              !Sub '${NetworkStackName}-PrivateSubnetId2'
+              !Sub '${NetworkStackName}-PrivateSubnetId3'
       SsmAssociations:
         - DocumentName: !Ref EC2JoinADSSMDocument
           AssociationParameters:
@@ -776,13 +928,17 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   GLBLSCPSVR1Instance:
+    # UAT OK
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !Ref InstanceAMI
+      ImageId: !Ref InstanceAMI # ami-03edf490ad235d721 UAT
       InstanceType: c5.2xlarge
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref GLBLSCPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -837,7 +993,8 @@ Resources:
 ###
 
   GLBLSCPSVR2Instance:
-    Condition: IsDeploySecondInstance
+    # UAT OK
+    Condition: IsMainRegion
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -845,6 +1002,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref GLBLSCPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -865,12 +1025,9 @@ Resources:
                 - !Join ['.', [!Join ['-', [!Ref OrgName, !Ref Name]], !FindInMap [EnvShort, !Ref EnvName, Name]]]
             - Key: dnsIpAddresses
               Value: !GetAtt [ActiveDirectory, DnsIpAddresses]
-      SubnetId: !If
-        - IsDisasterRecoveryRegion
-        - Fn::ImportValue:
-            !Sub '${NetworkStackName}-PrivateSubnetId2'
-        - Fn::ImportValue:
-            !Sub '${NetworkStackName}-PrivateSubnetId3'
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId3'
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, GLBLSCPSVR2]]
@@ -954,6 +1111,7 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   IWEBAPPSVR1Instance:
+    # UAT OK
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -961,6 +1119,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref IWEBAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1015,7 +1176,8 @@ Resources:
 ###
 
   IWEBAPPSVR2Instance:
-    Condition: IsDeploySecondInstance
+    # UAT OK
+    Condition: IsMainRegion
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -1023,6 +1185,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref IWEBAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1043,12 +1208,9 @@ Resources:
                 - !Join ['.', [!Join ['-', [!Ref OrgName, !Ref Name]], !FindInMap [EnvShort, !Ref EnvName, Name]]]
             - Key: dnsIpAddresses
               Value: !GetAtt [ActiveDirectory, DnsIpAddresses]
-      SubnetId: !If
-        - IsDisasterRecoveryRegion
-        - Fn::ImportValue:
-            !Sub '${NetworkStackName}-PrivateSubnetId2'
-        - Fn::ImportValue:
-            !Sub '${NetworkStackName}-PrivateSubnetId3'
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId3'
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBAPPSVR2]]
@@ -1075,7 +1237,9 @@ Resources:
         - Name: InstanceId
           Value: !Ref IWEBAPPSVR2Instance
 
+# allow connection from ELB
   AllowELBIntoCIWEBAPPSVR:
+    Condition: DeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from ELB
@@ -1142,6 +1306,7 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   CICSWITSVRInstance:
+    # UAT OK
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -1149,6 +1314,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref CICSWITSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1266,13 +1434,17 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   CICSFEAPPSVRInstance1:
+    # UAT OK
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !If [IsTest, !Ref FEInstanceAMI, !Ref SIOSInstanceAMI]
+      ImageId: !If [IsTest, !Ref FEInstanceAMI, !Ref SIOSInstanceAMI] # verify prod ami
       InstanceType: c5d.4xlarge
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref CICSFEAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1327,14 +1499,18 @@ Resources:
 ###
 
   CICSFEAPPSVRInstance2:
-    Condition: IsDeploySecondInstance
+    # UAT OK
+    Condition: IsMainRegion
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !If [IsTest, !Ref FEInstanceAMI, !Ref SIOSInstanceAMI]
+      ImageId: !If [IsTest, !Ref FEInstanceAMI, !Ref SIOSInstanceAMI] # verify prod ami
       InstanceType: c5d.4xlarge
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref CICSFEAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1355,12 +1531,9 @@ Resources:
           GroupSet:
             - !Ref CICSFEAPPSVRSecurityGroup
           SecondaryPrivateIpAddressCount: 2
-          SubnetId: !If
-            - IsDisasterRecoveryRegion
-            - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId2'
-            - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId3'
+          SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId3'
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSFEAPPSVR2]]
@@ -1444,6 +1617,7 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   IWEBFEAPPSVRInstance1:
+    # UAT OK
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref FEInstanceAMI
@@ -1451,6 +1625,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref IWEBFEAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1467,6 +1644,9 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR1]]
 
+  # Proper way of adding additional EBS volume to an existing EC2 instance
+  # is to create the volume and then attach it to the instance. This is to prevent
+  # instance replacement. (modifying BlockDeviceMappings will cause instance replacement)
   IWEBFEAPPSVR1EBS1:
     Type: AWS::EC2::Volume
     Properties: 
@@ -1512,7 +1692,7 @@ Resources:
 ###
 
   IWEBFEAPPSVRInstance2:
-    Condition: IsDeploySecondInstance
+    Condition: IsMainRegion
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref FEInstanceAMI
@@ -1520,6 +1700,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref IWEBFEAPPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1529,19 +1712,17 @@ Resources:
             VolumeType: gp3
       SecurityGroupIds:
         - !Ref IWEBFEAPPSVRSecurityGroup
-      SubnetId: !If
-        - IsDisasterRecoveryRegion
-        - Fn::ImportValue:
-            !Sub '${NetworkStackName}-PrivateSubnetId2'
-        - Fn::ImportValue:
-            !Sub '${NetworkStackName}-PrivateSubnetId3'
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId3'
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR2]]
 
   IWEBFEAPPSVR2EBS1:
+    Condition: IsMainRegion
     Type: AWS::EC2::Volume
-    Properties: 
+    Properties:
       Size: 50
       Encrypted: true
       VolumeType: gp3
@@ -1551,6 +1732,7 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFEAPPSVR2EBS1]]
   
   IWEBFEAPPSVR2EBS1Mountpoint:
+    Condition: IsMainRegion
     Type: AWS::EC2::VolumeAttachment
     Properties:
       InstanceId: !Ref IWEBFEAPPSVRInstance2
@@ -1579,7 +1761,9 @@ Resources:
         - Name: InstanceId
           Value: !Ref IWEBFEAPPSVRInstance2
 
+# allow connection from ELB
   AllowELBIntoCIWEBFEAPPSVR:
+    Condition: DeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from ELB
@@ -1725,6 +1909,7 @@ Resources:
       CidrIp: 120.89.33.198/32
 
   PCHJUMPSVRInstance:
+    # UAT OK
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -1732,6 +1917,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref PCHJUMPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1795,13 +1983,17 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, CICSAPPSVR, Opeator, Security, Group]]
 
   PCHJUMPSVROperatorInstance:
+    # UAT OK
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !Ref FEInstanceAMI #Instance AMI no longer there
+      ImageId: !Ref FEInstanceAMI
       InstanceType: t3.medium
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref PCHJUMPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1863,7 +2055,6 @@ Resources:
 ###
 
   BKUPSVREC2Role:
-    Condition: IsProd
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -1881,14 +2072,13 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
   BKUPSVRInstanceProfile:
-    Condition: IsProd
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
         - !Ref BKUPSVREC2Role
 
   BKUPSVRInstance:
-    Condition: IsProd
+    # UAT OK
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref InstanceAMI
@@ -1896,6 +2086,9 @@ Resources:
       DisableApiTermination: !Ref DeletionProtection
       IamInstanceProfile: !Ref BKUPSVRInstanceProfile
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -1938,7 +2131,7 @@ Resources:
           Description: Allow all traffic on on all ports from inside VPC
 
   HighCPUBKUPSVRAlarm:
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BKUPSVR, high, cpu]]
@@ -1971,16 +2164,11 @@ Resources:
       ShortName: !Join ['-', [!Ref OrgName, !Ref Name]]
       Edition: Standard
       VpcSettings:
-        SubnetIds: !If
-          - IsDisasterRecoveryRegion
-          - - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId1'
-            - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId2'
-          - - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId1'
-            - Fn::ImportValue:
-                !Sub '${NetworkStackName}-PrivateSubnetId3'
+        SubnetIds:
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId1'
+          - Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId3'
         VpcId:
           Fn::ImportValue:
             !Sub '${NetworkStackName}-VpcId'
@@ -2060,7 +2248,6 @@ Resources:
                   - !Join ['', [!GetAtt ArchiveS3Bucket.Arn, '/*']]
 
   SQLServerOptionGroup:
-    # Condition: IsMainRegion
     Type: AWS::RDS::OptionGroup
     Properties:
       EngineName: sqlserver-se
@@ -2075,24 +2262,8 @@ Resources:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
   
-  # SQLServerOptionGroup2:
-  #   # Condition: IsMainRegion
-  #   Type: AWS::RDS::OptionGroup
-  #   Properties:
-  #     EngineName: sqlserver-ee
-  #     MajorEngineVersion: '15.00'
-  #     OptionGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cics2]]
-  #     OptionConfigurations:
-  #       - OptionName: SQLSERVER_BACKUP_RESTORE
-  #         OptionSettings:
-  #           - Name: IAM_ROLE_ARN
-  #             Value: !GetAtt SQLServerBackupRestoreIAMRole.Arn
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-
   DBStack: # some settings were manually updated in Console since we cannot update the whole template yet (outdated AMIs of windows EC2, need to be replaced for this stack to update)
-    Condition: IsDeployPaidResources
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -2119,70 +2290,9 @@ Resources:
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
-        # for DR failover, restore from the provided snapshot and use the provided
-        # master password to keep Secrets Manager secret in sync with the restored credentials
         SnapshotIdentifier: !Ref SnapshotIdentifier
         MasterUserPassword: !Ref DBMasterUserPassword
         ExistingSecretArn: !If [IsDR, !Ref DRDBSecret, '']
-
-  # DBStack2:
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
-  #     Parameters:
-  #       Name: cics2
-  #       DatabaseName: !Join ['',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name], db2]]
-  #       AllocatedStorage: 2000
-  #       BackupRetentionPeriod: !If [IsProd, 30, 7]
-  #       DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
-  #       Domain: !Ref ActiveDirectory
-  #       EnableEnhancedMonitoring: !If [IsProd, true, false]
-  #       # EnablePerformanceInsights: !If [IsProd, true, false]
-  #       EnvName: !Ref EnvName
-  #       Engine: sqlserver-ee
-  #       EngineVersion: 15.00.4236.7.v1
-  #       Family: sqlserver-ee-15.0
-  #       InstanceType: db.m5.2xlarge
-  #       # MasterUser: admin
-  #       MultiAz: true
-  #       NetworkStackName: !Ref NetworkStackName
-  #       NetworkType: Private
-  #       OptionGroupName: !Ref SQLServerOptionGroup2
-  #       Port: 1433
-  #       OrgName: !Ref OrgName
-  #       SNSStackName: !Ref SNSStackName
-  #       StorageEncrypted: true
-        # SnapshotIdentifier: !If
-        #   - IsTest
-        #   - arn:aws:rds:us-west-2:050821737631:snapshot:cics-snapshot-20231214 # uat cics DB snapshot
-          # - arn:aws:rds:us-west-2:050821737631:snapshot:cics-snapshot-20231214 # prod cics DB snapshot, update if needed
-
-  # DBSubnetGroup2: # this will be created in DR region, select this as the destination subnet group of DB replication
-  #   Condition: IsDisasterRecoveryRegion
-  #   Type: AWS::RDS::DBSubnetGroup
-  #   Properties:
-  #     DBSubnetGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cics2]]
-  #     DBSubnetGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cics2]]
-  #     SubnetIds: 
-  #       - Fn::ImportValue:
-  #           !Sub '${NetworkStackName}-InternalSubnetId1'
-  #       - Fn::ImportValue:
-  #           !Sub '${NetworkStackName}-InternalSubnetId2'
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-
-  # DIsasterRecoveryDBSecurityGroup:
-  #   Condition: IsDisasterRecoveryRegion
-  #   Type: AWS::EC2::SecurityGroup
-  #   Properties:
-  #     VpcId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-VpcId'
-  #     GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cics2-db, Security, Group]]
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cics2-db, Security, Group]]
 
 ####
 # Disaster Recovery
@@ -2205,7 +2315,7 @@ Resources:
       Description: !Sub 'DR placeholder secret for ${OrgName} ${Name} — values synced from the live region secret by the secrets-sync Lambda before failover.'
       SecretString: !Sub |
         {
-          "DB_ROOT_USER": "admin",
+          "DB_ROOT_USER": "root",
           "DB_ROOT_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
           "DB_NAME": "${Name}db",
           "DB_USER": "${Name}",
@@ -2219,6 +2329,10 @@ Resources:
           Value: !Ref EnvName
         - Key: Organization
           Value: !Ref OrgName
+        - Key: DRSync
+          Value: 'true'
+        - Key: SourceSecretArn
+          Value: !Ref LiveSecretArn
 
   # Pre-deployed DB subnet group for PITR restore in DR standby.
   # Uses -dr suffix to avoid naming conflict with DBStack's own subnet group at failover.
@@ -2231,22 +2345,24 @@ Resources:
       SubnetIds:
         - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
         - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId3'
       Tags:
         - Key: Name
           Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
 
   # Pre-deployed DB security group for PITR restore in DR standby.
   # App server stacks can add ingress rules to this SG at restore time.
-  DBStandbySecurityGroup:
-    Condition: IsDR
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
-      VpcId:
-        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
-      Tags:
-        - Key: Name
-          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+  # no need ?
+  # DBStandbySecurityGroup:
+  #   Condition: IsDR
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+  #     VpcId:
+  #       Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
 
   # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
   # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
@@ -2264,7 +2380,7 @@ Resources:
         BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
 
   AllowCICSAPPSVRIntoDB:
-    # Condition: IsMainRegion
+    Condition: IsDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -2277,7 +2393,7 @@ Resources:
       SourceSecurityGroupId: !Ref CICSAPPSVRSecurityGroup
 
   AllowGLBLSCPSVRIntoDB:
-    # Condition: IsMainRegion
+    Condition: IsDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -2290,7 +2406,7 @@ Resources:
       SourceSecurityGroupId: !Ref GLBLSCPSVRSecurityGroup
   
   AllowBKUPSVRIntoDB:
-    # Condition: IsMainRegion
+    Condition: IsDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -2302,88 +2418,9 @@ Resources:
       ToPort: 1433
       SourceSecurityGroupId: !Ref BKUPSVRSecurityGroup
 
-# Secgroup for CICS2 DB (SQL Enterprise)
-
-  AllowCICSAPPSVRIntoDB2:
-    # Condition: IsMainRegion
-    DependsOn:
-      - DBStack2
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from CICSAPPSVR
-      IpProtocol: TCP
-      GroupId: !GetAtt [DBStack2, Outputs.SecurityGroupId]
-      FromPort: 1433
-      ToPort: 1433
-      SourceSecurityGroupId: !Ref CICSAPPSVRSecurityGroup
-
-  AllowGLBLSCPSVRIntoDB2:
-    # Condition: IsMainRegion
-    DependsOn:
-      - DBStack2
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from GLBLSCPSVR
-      IpProtocol: TCP
-      GroupId: !GetAtt [DBStack2, Outputs.SecurityGroupId]
-      FromPort: 1433
-      ToPort: 1433
-      SourceSecurityGroupId: !Ref GLBLSCPSVRSecurityGroup
-  
-  AllowBKUPSVRIntoDB2:
-    # Condition: IsMainRegion
-    DependsOn:
-      - DBStack2
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow connection from BKUPSVR
-      IpProtocol: TCP
-      GroupId: !GetAtt [DBStack2, Outputs.SecurityGroupId]
-      FromPort: 1433
-      ToPort: 1433
-      SourceSecurityGroupId: !Ref BKUPSVRSecurityGroup      
-
-# Secgroup for DB Replica in DR
-
-  # AllowCICSAPPSVRIntoDBDR:
-  #   Condition: IsDisasterRecoveryRegion
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     Description: Allow connection from CICSAPPSVR
-  #     IpProtocol: TCP
-  #     GroupId: !Ref DIsasterRecoveryDBSecurityGroup
-  #     FromPort: 1433
-  #     ToPort: 1433
-  #     SourceSecurityGroupId: !Ref CICSAPPSVRSecurityGroup
-
-  # AllowGLBLSCPSVRIntoDBDR:
-  #   Condition: IsDisasterRecoveryRegion
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     Description: Allow connection from GLBLSCPSVR
-  #     IpProtocol: TCP
-  #     GroupId: !Ref DIsasterRecoveryDBSecurityGroup
-  #     FromPort: 1433
-  #     ToPort: 1433
-  #     SourceSecurityGroupId: !Ref GLBLSCPSVRSecurityGroup
-  
-  # AllowBKUPSVRIntoDBDR:
-  #   Condition: IsDisasterRecoveryRegion
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     Description: Allow connection from BKUPSVR
-  #     IpProtocol: TCP
-  #     GroupId: !Ref DIsasterRecoveryDBSecurityGroup
-  #     FromPort: 1433
-  #     ToPort: 1433
-  #     SourceSecurityGroupId: !Ref BKUPSVRSecurityGroup
-
-###
-# Target Group
-###
-
+# Target group
   CICSListenerRule:
-    # Condition: IsMainRegion
+    Condition: DeployPaidResources
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       Actions:
@@ -2415,15 +2452,18 @@ Resources:
       Targets:
         - Id: !Ref IWEBAPPSVR1Instance
           Port: 443
-        - Id: !Ref IWEBAPPSVR2Instance
-          Port: 443
+        - !If
+          - IsMainRegion
+          - Id: !Ref IWEBAPPSVR2Instance
+            Port: 443
+          - !Ref AWS::NoValue
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
   SlowTargetResponseTimeCloudWatchAlarm:
     Type: AWS::CloudWatch::Alarm
-    Condition: IsProd
+    Condition: IsProdOrProductionDRAndDeployPaidResources
     Properties:
       MetricName: TargetResponseTime
       Namespace: AWS/ApplicationELB
@@ -2447,7 +2487,7 @@ Resources:
 
   TargetGroupHealthyHostCountAlarm:
     Type: AWS::CloudWatch::Alarm
-    Condition: IsProd
+    Condition: IsProdOrProductionDRAndDeployPaidResources
     Properties:
       MetricName: HealthyHostCount
       Namespace: AWS/ApplicationELB
@@ -2474,7 +2514,7 @@ Resources:
 ##
 
   DBFEStack:
-    Condition: IsDeployPaidResources
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -2501,9 +2541,12 @@ Resources:
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
+        SnapshotIdentifier: !Ref SnapshotIdentifier
+        MasterUserPassword: !Ref DBMasterUserPassword
+        ExistingSecretArn: !If [IsDR, !Ref DRDBSecret, '']
 
   AllowCICSFEAPPSVRIntoDB:
-    Condition: IsDeployPaidResources
+    Condition: IsDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBFEStack
     Type: AWS::EC2::SecurityGroupIngress
@@ -2514,85 +2557,6 @@ Resources:
       FromPort: 1433
       ToPort: 1433
       SourceSecurityGroupId: !Ref CICSFEAPPSVRSecurityGroup
-
-####
-# Disaster Recovery
-# All resources below are deployed ONLY when EnvName is a DR variant (ProductionDR, StagingDR, etc.).
-# These resources are always-on in the DR region at zero/minimal cost.
-# They pre-provision the infrastructure needed to activate the environment at failover time.
-####
-
-  # Placeholder Secrets Manager secret for DB credentials in the DR region.
-  # Created at DR stack deploy time with placeholder values.
-  # The secrets-sync Lambda overwrites the values whenever the live region secret rotates,
-  # ensuring correct credentials are available before failover is triggered.
-  # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
-  # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
-  DRDBFESecret:
-    Condition: IsDR
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe]]
-      Description: !Sub 'DR placeholder secret for ${OrgName} cicsfe — values synced from the live region secret by the secrets-sync Lambda before failover.'
-      SecretString: !Sub |
-        {
-          "DB_ROOT_USER": "admin",
-          "DB_ROOT_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
-          "DB_NAME": "${Name}db",
-          "DB_USER": "${Name}",
-          "DB_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
-          "MAGENTO_ADMIN_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE"
-        }
-      Tags:
-        - Key: Name
-          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe]]
-        - Key: Environment
-          Value: !Ref EnvName
-        - Key: Organization
-          Value: !Ref OrgName
-
-  # Pre-deployed DB subnet group for PITR restore in DR standby.
-  # Uses -dr suffix to avoid naming conflict with DBStack's own subnet group at failover.
-  DBFEStandbySubnetGroup:
-    Condition: IsDR
-    Type: AWS::RDS::DBSubnetGroup
-    Properties:
-      DBSubnetGroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
-      DBSubnetGroupName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
-      SubnetIds:
-        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
-        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
-      Tags:
-        - Key: Name
-          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
-
-  # Pre-deployed DB security group for PITR restore in DR standby.
-  # App server stacks can add ingress rules to this SG at restore time.
-  DBFEStandbySecurityGroup:
-    Condition: IsDR
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
-      VpcId:
-        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
-      Tags:
-        - Key: Name
-          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
-
-  # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
-  # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
-  # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
-  DBFEReplicationStack:
-    Condition: IsDRAndEnableCrossRegionBackupReplication
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-replication.yaml
-      Parameters:
-        Name: cicsfe
-        OrgName: !Ref OrgName
-        EnvName: !Ref EnvName
-        SourceDbInstanceArn: !Ref SourceDbInstanceArn
-        BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
 
 ###
 # S3 Buckets
@@ -2671,7 +2635,7 @@ Resources:
 ###
 
   ALBDNSRecord:
-    # Condition: IsMainRegion
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::Route53::RecordSetGroup
     Properties:
       HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']] 
@@ -2690,7 +2654,7 @@ Resources:
                 - Outputs.DNSName
 
   BackupStack:
-    # Condition: IsProdAndMainRegion
+    Condition: IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBStack
     Type: AWS::CloudFormation::Stack
@@ -2705,16 +2669,16 @@ Resources:
           - - Fn::GetAtt:
               - DBStack
               - Outputs.DBInstanceARN
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSAPPSVR1Instance]]]]  
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSAPPSVR2Instance]]]]  
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref GLBLSCPSVR1Instance]]]]  
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref GLBLSCPSVR2Instance]]]]  
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref IWEBAPPSVR1Instance]]]]  
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref IWEBAPPSVR2Instance]]]]
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSWITSVRInstance]]]]  
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref PCHJUMPSVRInstance]]]]  
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSFEAPPSVRInstance1]]]]  
-            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSFEAPPSVRInstance2]]]]
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSAPPSVR1Instance]]]]
+            - !If [IsDeployPaidResources, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSAPPSVR2Instance]]]], !Ref 'AWS::NoValue']
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref GLBLSCPSVR1Instance]]]]
+            - !If [IsDeployPaidResources, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref GLBLSCPSVR2Instance]]]], !Ref 'AWS::NoValue']
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref IWEBAPPSVR1Instance]]]]
+            - !If [IsDeployPaidResources, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref IWEBAPPSVR2Instance]]]], !Ref 'AWS::NoValue']
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSWITSVRInstance]]]]
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref PCHJUMPSVRInstance]]]]
+            - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSFEAPPSVRInstance1]]]]
+            - !If [IsDeployPaidResources, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSFEAPPSVRInstance2]]]], !Ref 'AWS::NoValue']
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
         DailyExpiration: 60 #60 days requirement
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
@@ -2725,6 +2689,7 @@ Resources:
 ###
 
   FileServerStack:
+    Condition: IsMainRegion
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/nfs-windows-fsx.yaml
@@ -2733,14 +2698,14 @@ Resources:
         EnvName: !Ref EnvName
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
-        IWEBAPPSVRSecurityGroup: !GetAtt CICSFEAPPSVRSecurityGroup.GroupId
+        SourceSecurityGroup: !GetAtt CICSFEAPPSVRSecurityGroup.GroupId
 
 ###
 # Dashboard
 ###
 
   Dashboard:
-    Condition: IsProdAndMainRegion
+    Condition: IsProd
     Type: AWS::CloudWatch::Dashboard
     Properties:
       DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
@@ -3017,29 +2982,29 @@ Outputs:
 
 #Required for VPC Peering connections
 
-  DBPort:
-    # Condition: IsMainRegion
-    Description: DB Server Security Group
-    Value: !GetAtt [DBStack, Outputs.DBInstancePort]
-    Export:
-      Name: !Sub '${AWS::StackName}-DBPort'
+  # DBPort:
+  #   # Condition: IsMainRegion
+  #   Description: DB Server Security Group
+  #   Value: !GetAtt [DBStack, Outputs.DBInstancePort]
+  #   Export:
+  #     Name: !Sub '${AWS::StackName}-DBPort'
 
-  DBSecurityGroup:
-    # Condition: IsMainRegion
-    Description: DB Server Security Group
-    Value: !GetAtt [DBStack, Outputs.SecurityGroupId]
-    Export:
-      Name: !Sub '${AWS::StackName}-DBSecurityGroup'
+  # DBSecurityGroup:
+  #   # Condition: IsMainRegion
+  #   Description: DB Server Security Group
+  #   Value: !GetAtt [DBStack, Outputs.SecurityGroupId]
+  #   Export:
+  #     Name: !Sub '${AWS::StackName}-DBSecurityGroup'
   
-  DBSecurityGroup2:
-    # Condition: IsMainRegion
-    Description: CICS DB2 Server Security Group
-    Value: !GetAtt [DBStack2, Outputs.SecurityGroupId]
-    Export:
-      Name: !Sub '${AWS::StackName}-DBSecurityGroup2'
+  # DBSecurityGroup2:
+  #   # Condition: IsMainRegion
+  #   Description: Old CICS DB2 Server Security Group, delete soon
+  #   Value: !GetAtt [DBStack, Outputs.SecurityGroupId]
+  #   Export:
+  #     Name: !Sub '${AWS::StackName}-DBSecurityGroup2'
 
-  CICSAPPSVRSecurityGroup:
-    Description: App Servers Security Group
-    Value: !GetAtt CICSAPPSVRSecurityGroup.GroupId
-    Export:
-      Name: !Sub '${AWS::StackName}-CICSAPPSVRSecurityGroup'
+  # CICSAPPSVRSecurityGroup:
+  #   Description: App Servers Security Group
+  #   Value: !GetAtt CICSAPPSVRSecurityGroup.GroupId
+  #   Export:
+  #     Name: !Sub '${AWS::StackName}-CICSAPPSVRSecurityGroup'

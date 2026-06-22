@@ -1,0 +1,342 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Generic ECR cross-region image sync. Deploy in the live (source) region only.
+  On every successful ECR push matching SourceRepoPrefix, EventBridge triggers CodeBuild
+  to pull, retag, and push the image to the mapped DR region repo — preserving existing
+  DR repo names and ECS task definition references.
+  Supports N repo pairs via comma-separated SourceRepos / DRRepos parameters.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - Name
+          - OrgName
+      - Label:
+          default: Source ECR Repositories (live region)
+        Parameters:
+          - SourceRepos
+          - SourceRepoPrefix
+      - Label:
+          default: DR ECR Repositories (destination)
+        Parameters:
+          - DRRegion
+          - DRAccountId
+          - DRRepos
+      - Label:
+          default: Build Configuration
+        Parameters:
+          - LogRetentionDays
+
+    ParameterLabels:
+      Name:
+        default: Sync Name (used in resource naming, e.g. smartapi, cics)
+      OrgName:
+        default: Organization Name
+      SourceRepos:
+        default: Source ECR Repo Names (comma-separated, live region)
+      SourceRepoPrefix:
+        default: Source Repo Prefix (EventBridge filter — narrows which ECR push events trigger the sync)
+      DRRegion:
+        default: DR Region
+      DRAccountId:
+        default: DR Account ID (leave empty = same account)
+      DRRepos:
+        default: DR ECR Repo Names (comma-separated, same order as SourceRepos)
+      LogRetentionDays:
+        default: CloudWatch Log Retention (days)
+
+Parameters:
+  Name:
+    Description: >-
+      Short identifier for this sync instance. Used in resource names (CodeBuild project,
+      IAM roles, log group). Must be unique per account if deploying multiple sync stacks.
+    Type: String
+    MinLength: 2
+    MaxLength: 30
+  OrgName:
+    Description: Organization name prefix. Used to scope IAM policies to org-owned ECR repos.
+    Type: String
+    Default: pchc
+  SourceRepos:
+    Description: >-
+      Comma-separated list of ECR repository names in the live region to sync.
+      Order must match DRRepos exactly.
+      Example: pchc-prd-ase1-smartapi-prereq-ecr,pchc-prd-ase1-smartportal-prereq-ecr
+    Type: String
+  SourceRepoPrefix:
+    Description: >-
+      Repository name prefix used by the EventBridge rule to filter ECR push events.
+      Set this to the common prefix shared by all SourceRepos to avoid triggering the
+      sync on unrelated pushes. Example: pchc-prd-ase1-smartapi
+    Type: String
+  DRRegion:
+    Description: AWS region where the DR ECR repositories live.
+    Type: String
+    Default: us-east-2
+  DRAccountId:
+    Description: >-
+      AWS account ID of the DR ECR repositories.
+      Leave empty to use the same account as the source.
+    Type: String
+    Default: ''
+  DRRepos:
+    Description: >-
+      Comma-separated list of existing ECR repository names in the DR region.
+      Order must match SourceRepos exactly.
+      Example: pchc-tdr-ue2-smartapi-prereq-ecr,pchc-tdr-ue2-smartportal-prereq-ecr
+    Type: String
+  LogRetentionDays:
+    Description: Number of days to retain CodeBuild CloudWatch logs.
+    Type: Number
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+
+Conditions:
+  HasSameAccount: !Equals [!Ref DRAccountId, '']
+
+Resources:
+
+###
+# IAM - CodeBuild service role
+###
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${OrgName}-${Name}-ecr-sync-codebuild-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECRSyncPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: ECRAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: STSCallerIdentity
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: '*'
+              - Sid: ECRSourcePull
+                Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${OrgName}-*'
+              - Sid: ECRDRPush
+                Effect: Allow
+                Action:
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:BatchCheckLayerAvailability
+                Resource: !Sub
+                  - 'arn:aws:ecr:${DRRegion}:${AccountId}:repository/${OrgName}-*'
+                  - AccountId: !If [HasSameAccount, !Ref 'AWS::AccountId', !Ref DRAccountId]
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${OrgName}-${Name}-ecr-sync*'
+
+###
+# IAM - EventBridge role to start CodeBuild
+###
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${OrgName}-${Name}-ecr-sync-eventbridge-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartCodeBuild
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: codebuild:StartBuild
+                Resource: !GetAtt ECRSyncProject.Arn
+
+###
+# CloudWatch Logs
+###
+
+  CodeBuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${OrgName}-${Name}-ecr-sync'
+      RetentionInDays: !Ref LogRetentionDays
+
+###
+# CodeBuild - ECR sync project
+###
+
+  ECRSyncProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildLogGroup
+    Properties:
+      Name: !Sub '${OrgName}-${Name}-ecr-sync'
+      Description: >-
+        ECR cross-region sync. Pulls from live ECR, retags, pushes to DR region.
+        SOURCE_REPO and IMAGE_TAG overridden at runtime by EventBridge.
+        SOURCE_REPOS/DR_REPOS are comma-separated repo mapping pairs.
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: SOURCE_REGION
+            Value: !Ref 'AWS::Region'
+          - Name: DR_REGION
+            Value: !Ref DRRegion
+          - Name: DR_ACCOUNT_ID
+            Value: !If [HasSameAccount, !Ref 'AWS::AccountId', !Ref DRAccountId]
+          - Name: SOURCE_REPOS
+            Value: !Ref SourceRepos
+          - Name: DR_REPOS
+            Value: !Ref DRRepos
+          # Overridden at runtime by the EventBridge input transformer
+          - Name: SOURCE_REPO
+            Value: placeholder
+          - Name: IMAGE_TAG
+            Value: placeholder
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - |
+                  set -e
+
+                  echo "=== ECR Sync ==="
+                  echo "Source repo  : $SOURCE_REPO"
+                  echo "Image tag    : $IMAGE_TAG"
+                  echo "Source region: $SOURCE_REGION"
+                  echo "DR region    : $DR_REGION"
+
+                  # Resolve DR repo from comma-separated mapping via Python (sh-compatible)
+                  DR_REPO=$(python3 -c "import os; s=os.environ['SOURCE_REPOS'].split(','); d=os.environ['DR_REPOS'].split(','); print(dict(zip(s,d)).get(os.environ['SOURCE_REPO'],''))")
+
+                  if [ -z "$DR_REPO" ]; then
+                    echo "No DR mapping defined for $SOURCE_REPO -- skipping."
+                    exit 0
+                  fi
+
+                  SOURCE_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                  SOURCE_URI="$SOURCE_ACCOUNT_ID.dkr.ecr.$SOURCE_REGION.amazonaws.com/$SOURCE_REPO:$IMAGE_TAG"
+                  DR_URI="$DR_ACCOUNT_ID.dkr.ecr.$DR_REGION.amazonaws.com/$DR_REPO:$IMAGE_TAG"
+
+                  echo "Source URI   : $SOURCE_URI"
+                  echo "DR URI       : $DR_URI"
+
+                  echo "Logging in to source ECR ($SOURCE_REGION)..."
+                  aws ecr get-login-password --region "$SOURCE_REGION" \
+                    | docker login --username AWS --password-stdin \
+                        "$SOURCE_ACCOUNT_ID.dkr.ecr.$SOURCE_REGION.amazonaws.com"
+
+                  echo "Logging in to DR ECR ($DR_REGION)..."
+                  aws ecr get-login-password --region "$DR_REGION" \
+                    | docker login --username AWS --password-stdin \
+                        "$DR_ACCOUNT_ID.dkr.ecr.$DR_REGION.amazonaws.com"
+
+                  echo "Pulling $SOURCE_URI..."
+                  docker pull "$SOURCE_URI"
+
+                  echo "Retagging to $DR_URI..."
+                  docker tag "$SOURCE_URI" "$DR_URI"
+
+                  echo "Pushing $DR_URI..."
+                  docker push "$DR_URI"
+
+                  echo "Sync complete: $SOURCE_REPO:$IMAGE_TAG -> $DR_REPO:$IMAGE_TAG ($DR_REGION)"
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref CodeBuildLogGroup
+
+###
+# EventBridge - trigger on successful ECR push matching SourceRepoPrefix
+###
+
+  ECRPushEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${OrgName}-${Name}-ecr-sync-on-push'
+      Description: >-
+        Triggers ECR sync CodeBuild on every successful image push to repos matching
+        SourceRepoPrefix. The buildspec resolves the exact DR repo from the SOURCE_REPOS/DR_REPOS
+        mapping and exits cleanly if no mapping is found.
+      EventPattern:
+        source:
+          - aws.ecr
+        detail-type:
+          - ECR Image Action
+        detail:
+          action-type:
+            - PUSH
+          result:
+            - SUCCESS
+          repository-name:
+            - prefix: !Ref SourceRepoPrefix
+      State: ENABLED
+      Targets:
+        - Id: ECRSyncCodeBuildTarget
+          Arn: !GetAtt ECRSyncProject.Arn
+          RoleArn: !GetAtt EventBridgeRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              repo: '$.detail.repository-name'
+              tag: '$.detail.image-tag'
+            InputTemplate: >-
+              {
+                "environmentVariablesOverride": [
+                  {"name": "SOURCE_REPO", "value": "<repo>", "type": "PLAINTEXT"},
+                  {"name": "IMAGE_TAG",   "value": "<tag>",  "type": "PLAINTEXT"}
+                ]
+              }
+
+Outputs:
+
+  ECRSyncProjectName:
+    Description: CodeBuild project name for the ECR sync
+    Value: !Ref ECRSyncProject
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRSyncProjectName'
+
+  ECRSyncProjectArn:
+    Description: CodeBuild project ARN for the ECR sync
+    Value: !GetAtt ECRSyncProject.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRSyncProjectArn'
+
+  ECRPushEventRuleArn:
+    Description: EventBridge rule ARN that watches for ECR pushes and triggers the sync
+    Value: !GetAtt ECRPushEventRule.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRPushEventRuleArn'
