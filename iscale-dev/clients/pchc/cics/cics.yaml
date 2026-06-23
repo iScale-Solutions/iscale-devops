@@ -5,6 +5,9 @@ Description: CICS Resources
 # /dev/sda1 is the root volume of Windows AMIs
 # need to use existing AMI to retain consistency (for baked windows ami).
 # ami need to copy to other regions for base ami
+# ami-03edf490ad235d721 for FEInstanceAMI and InstanceAMI in UAT oregon
+# ami-01eb060a977d0ea0c for FEInstanceAMI and InstanceAMI in UAT Ohio
+# ami-031ec57adc6a10b99 for SIOSInstanceAMI in UAT oregon
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -52,13 +55,15 @@ Metadata:
           - SnapshotIdentifier
           - DBMasterUserPassword
           - EnableCrossRegionBackupReplication
-          - AppCRRBucketArn
-          - SidekiqCRRBucketArn
           - SourceDbInstanceArn
           - BackupReplicationRetentionPeriod
           - LiveSecretArn
           - IsPITRMode
-          - PITRDBEndpoint
+          # for second DB cicsfe
+          - SnapshotIdentifierFe
+          - DBFEMasterUserPassword
+          - SourceDbFeInstanceArn
+          - LiveSecretArn2
 
     ParameterLabels:
       Name:
@@ -89,8 +94,6 @@ Metadata:
         default: Network Stack Name
       RDPPort:
         default: RDP Port Number
-      # SIOSInstanceAMI:
-      #   default: SIOS Instance AMI
       SNSStackName:
         default: SNS Topic Stack Name
       ClientDomainName:
@@ -107,10 +110,6 @@ Metadata:
         default: DB Master Password (DR failover only — leave blank for normal)
       EnableCrossRegionBackupReplication:
         default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
-      AppCRRBucketArn:
-        default: App CodeDeploy CRR Destination Bucket ARN (SSM parameter path — set by deploy-dr-foundation)
-      SidekiqCRRBucketArn:
-        default: Sidekiq CodeDeploy CRR Destination Bucket ARN (SSM parameter path — set by deploy-dr-foundation)
       SourceDbInstanceArn:
         default: Source DB Instance ARN (live region — required when replication is enabled)
       BackupReplicationRetentionPeriod:
@@ -119,8 +118,14 @@ Metadata:
         default: Live Region Secret ARN (DR standby only — required for secrets sync)
       IsPITRMode:
         default: PITR Mode (set by dr-failover-v2 only — do not change manually)
-      PITRDBEndpoint:
-        default: PITR DB Endpoint (set by dr-failover-v2 only — do not change manually)
+      SnapshotIdentifierFe:
+        default: FE DB Snapshot Identifier (DR failover restore — leave blank for normal)
+      DBFEMasterUserPassword:
+        default: FE DB Master Password (DR failover only — leave blank for normal)
+      SourceDbFeInstanceArn:
+        default: Source FE DB Instance ARN (live region — required when replication is enabled)
+      LiveSecretArn2:
+        default: Live Region FE Secret ARN (DR standby only — required for secrets sync)
 
 Parameters:
   Name:
@@ -262,14 +267,6 @@ Parameters:
     AllowedValues:
       - 'true'
       - 'false'
-  AppCRRBucketArn:
-    Description: SSM parameter path holding the ARN of the DR CodeDeploy artifacts bucket for the app server. Written by deploy-dr-foundation after L2 deploys. Leave at default path — value is managed via SSM, not this parameter.
-    Type: AWS::SSM::Parameter::Value<String>
-    Default: /pchc/pas6/dr/app-replication-destination-bucket-arn
-  SidekiqCRRBucketArn:
-    Description: SSM parameter path holding the ARN of the DR CodeDeploy artifacts bucket for the Sidekiq server. Written by deploy-dr-foundation after L2 deploys. Leave at default path — value is managed via SSM, not this parameter.
-    Type: AWS::SSM::Parameter::Value<String>
-    Default: /pchc/pas6/dr/sidekiq-replication-destination-bucket-arn
   SourceDbInstanceArn:
     Description: |
       ARN of the live region RDS DB instance to replicate from.
@@ -302,11 +299,35 @@ Parameters:
     AllowedValues:
       - 'true'
       - 'false'
-  PITRDBEndpoint:
+  # for second DB cicsfe
+  SnapshotIdentifierFe:
     Description: |
-      Endpoint of the PITR-restored RDS instance. Written to SSM and Secrets Manager by the
-      dr-failover Step Functions machine before the app stack update. Only used when IsPITRMode=true.
-      Leave blank for all other deployments — existing stacks are unaffected.
+      (DR Failover only) ARN of the RDS snapshot to restore the FE database (cicsfe) from.
+      Obtain by copying the latest automated backup from the live region into the DR region before failover.
+      Leave blank for normal fresh DB creation — existing deployments are unaffected.
+    Type: String
+    Default: ''
+  DBFEMasterUserPassword:
+    Description: |
+      (DR Failover only) Master user password of the source FE database (cicsfe).
+      Provide this during snapshot restore so the Secrets Manager secret stays in sync with the restored DB credentials.
+      Leave blank for auto-generated password — existing deployments are unaffected.
+    Type: String
+    Default: ''
+    NoEcho: true
+  SourceDbFeInstanceArn:
+    Description: |
+      ARN of the live region FE RDS DB instance (cicsfe) to replicate from.
+      Required when EnableCrossRegionBackupReplication=true.
+      Format: arn:aws:rds:<live-region>:<account-id>:db:<db-identifier>
+      Obtain from the live stack DBFEStack output: DBInstanceARN.
+    Type: String
+    Default: ''
+  LiveSecretArn2:
+    Description: |
+      ARN of the live region FE Secrets Manager secret (cicsfe) to replicate from.
+      Obtain from the live stack Secrets Manager console.
+      Only required when deploying in DR (ProductionDR) — leave blank for normal deployments.
     Type: String
     Default: ''
 
@@ -2541,11 +2562,82 @@ Resources:
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
-        SnapshotIdentifier: !Ref SnapshotIdentifier
-        MasterUserPassword: !Ref DBMasterUserPassword
-        ExistingSecretArn: !If [IsDR, !Ref DRDBSecret, '']
+        SnapshotIdentifier: !Ref SnapshotIdentifierFe
+        MasterUserPassword: !Ref DBFEMasterUserPassword
+        ExistingSecretArn: !If [IsDR, !Ref DRDBFESecret, '']
 
-  AllowCICSFEAPPSVRIntoDB:
+####
+# Disaster Recovery
+# All resources below are deployed ONLY when EnvName is a DR variant (ProductionDR, StagingDR, etc.).
+# These resources are always-on in the DR region at zero/minimal cost.
+# They pre-provision the infrastructure needed to activate the environment at failover time.
+####
+
+  # Placeholder Secrets Manager secret for DB credentials in the DR region.
+  # Created at DR stack deploy time with placeholder values.
+  # The secrets-sync Lambda overwrites the values whenever the live region secret rotates,
+  # ensuring correct credentials are available before failover is triggered.
+  # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
+  # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
+  DRDBFESecret:
+    Condition: IsDR
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe]]
+      Description: !Sub 'DR placeholder secret for ${OrgName} ${Name} — values synced from the live region secret by the secrets-sync Lambda before failover.'
+      SecretString: !Sub |
+        {
+          "DB_ROOT_USER": "root",
+          "DB_ROOT_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "DB_NAME": "${Name}db",
+          "DB_USER": "${Name}",
+          "DB_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "MAGENTO_ADMIN_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE"
+        }
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: DRSync
+          Value: 'true'
+        - Key: SourceSecretArn
+          Value: !Ref LiveSecretArn2
+
+  # Pre-deployed DB subnet group for PITR restore in DR standby.
+  # Uses -dr suffix to avoid naming conflict with DBStack's own subnet group at failover.
+  DBFEStandbySubnetGroup:
+    Condition: IsDR
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
+      DBSubnetGroupName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId3'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
+
+  # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
+  # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
+  # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
+  DBFEReplicationStack:
+    Condition: IsDRAndEnableCrossRegionBackupReplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-replication.yaml
+      Parameters:
+        Name: cicsfe
+        OrgName: !Ref OrgName
+        EnvName: !Ref EnvName
+        SourceDbInstanceArn: !Ref SourceDbFeInstanceArn
+        BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
+  
+  AllowCICSFEAPPSVRIntoDBFE:
     Condition: IsDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBFEStack
@@ -2670,15 +2762,15 @@ Resources:
               - DBStack
               - Outputs.DBInstanceARN
             - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSAPPSVR1Instance]]]]
-            - !If [IsDeployPaidResources, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSAPPSVR2Instance]]]], !Ref 'AWS::NoValue']
+            - !If [IsMainRegion, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSAPPSVR2Instance]]]], !Ref 'AWS::NoValue']
             - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref GLBLSCPSVR1Instance]]]]
-            - !If [IsDeployPaidResources, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref GLBLSCPSVR2Instance]]]], !Ref 'AWS::NoValue']
+            - !If [IsMainRegion, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref GLBLSCPSVR2Instance]]]], !Ref 'AWS::NoValue']
             - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref IWEBAPPSVR1Instance]]]]
-            - !If [IsDeployPaidResources, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref IWEBAPPSVR2Instance]]]], !Ref 'AWS::NoValue']
+            - !If [IsMainRegion, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref IWEBAPPSVR2Instance]]]], !Ref 'AWS::NoValue']
             - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSWITSVRInstance]]]]
             - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref PCHJUMPSVRInstance]]]]
             - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSFEAPPSVRInstance1]]]]
-            - !If [IsDeployPaidResources, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSFEAPPSVRInstance2]]]], !Ref 'AWS::NoValue']
+            - !If [IsMainRegion, !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref CICSFEAPPSVRInstance2]]]], !Ref 'AWS::NoValue']
         BackupTime: !If [IsProd, !Ref 'AWS::NoValue', 1] #Default backup time else 1AM UTC for dev
         DailyExpiration: 60 #60 days requirement
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
