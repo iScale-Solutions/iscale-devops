@@ -178,8 +178,9 @@ jobs:
           EFS_VAULT=$(echo "$CFG"            | jq -r ".${ENV}.efs_backup_vault_name // \"\"")
           EFS_SSM=$(echo "$CFG"              | jq -r ".${ENV}.efs_id_ssm_path // \"\"")
           RS_CLUSTER=$(echo "$CFG"           | jq -r ".${ENV}.redshift_cluster_identifier // \"\"")
+          SNS_TOPIC_ARN=$(echo "$CFG"        | jq -r ".${ENV}.sns_topic_arn")
 
-          for VAR_NAME in REGION APP_STACK NETWORK_STACK NETWORK_TEMPLATE FAILOVER_ENGINE ORG_NAME USE_PITR; do
+          for VAR_NAME in REGION APP_STACK NETWORK_STACK NETWORK_TEMPLATE FAILOVER_ENGINE ORG_NAME USE_PITR SNS_TOPIC_ARN; do
             VAL="${!VAR_NAME}"
             if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then
               echo "ERROR: Required config field '$VAR_NAME' is missing or null in dr-config/${APP}.json for env '${ENV}'"
@@ -202,6 +203,7 @@ jobs:
             echo "efs_backup_vault_name=$EFS_VAULT"
             echo "efs_id_ssm_path=$EFS_SSM"
             echo "redshift_cluster_identifier=$RS_CLUSTER"
+            echo "sns_topic_arn=$SNS_TOPIC_ARN"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
@@ -312,7 +314,7 @@ jobs:
             --arg  efs_backup_vault_name        "${{ steps.cfg.outputs.efs_backup_vault_name }}" \
             --arg  efs_id_ssm_path              "${{ steps.cfg.outputs.efs_id_ssm_path }}" \
             --arg  backup_role_arn   "${{ steps.sfn.outputs.backup_role_arn }}" \
-            --arg  sns_topic_arn                "" \
+            --arg  sns_topic_arn                "${{ steps.cfg.outputs.sns_topic_arn }}" \
             '{
               app_name:                    $app_name,
               org_name:                    $org_name,
@@ -377,12 +379,7 @@ jobs:
       - name: Notify success
         if: steps.monitor.outcome == 'success'
         run: |
-          SNS_ARN=""  # TODO: source sns_topic_arn from GitHub Secrets or config
-
-          if [ -z "$SNS_ARN" ]; then
-            echo "No SNS topic ARN available — skipping notification."
-            exit 0
-          fi
+          SNS_ARN="${{ steps.cfg.outputs.sns_topic_arn }}"
 
           aws sns publish \
             --topic-arn "$SNS_ARN" \
@@ -392,12 +389,7 @@ jobs:
       - name: Notify failure
         if: steps.monitor.outcome == 'failure' || steps.monitor.outcome == 'cancelled'
         run: |
-          SNS_ARN=""  # TODO: source sns_topic_arn from GitHub Secrets or config
-
-          if [ -z "$SNS_ARN" ]; then
-            echo "No SNS topic ARN available — skipping notification."
-            exit 0
-          fi
+          SNS_ARN="${{ steps.cfg.outputs.sns_topic_arn }}"
 
           MSG="DR failover FAILED for ${{ inputs.app }} (${{ inputs.target_env }}). Check the run and Step Functions console for details."
           if [ "${{ steps.monitor.outcome }}" = "cancelled" ]; then
