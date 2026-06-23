@@ -239,8 +239,19 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='StateMachineArn'].OutputValue" \
             --output text)
 
+          [[ "$STATE_MACHINE_ARN" =~ ^arn:aws:states: ]] || {
+            echo "ERROR: StateMachineArn not resolved from $FAILOVER_ENGINE"
+            exit 1
+          }
+
+          BACKUP_ROLE_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$FAILOVER_ENGINE" \
+            --query "Stacks[0].Outputs[?OutputKey=='BackupRestoreRoleArn'].OutputValue" \
+            --output text)
+
           echo "state_machine_arn=$STATE_MACHINE_ARN" >> "$GITHUB_OUTPUT"
-          echo "State machine ARN resolved."
+          echo "backup_role_arn=$BACKUP_ROLE_ARN"     >> "$GITHUB_OUTPUT"
+          echo "State machine ARN and backup role ARN resolved."
 
       - name: Start DR failover execution
         id: start
@@ -267,7 +278,7 @@ jobs:
             --arg  redshift_snapshot_identifier "" \
             --arg  efs_backup_vault_name        "${{ steps.cfg.outputs.efs_backup_vault_name }}" \
             --arg  efs_id_ssm_path              "${{ steps.cfg.outputs.efs_id_ssm_path }}" \
-            --arg  backup_role_arn              "" \
+            --arg  backup_role_arn   "${{ steps.sfn.outputs.backup_role_arn }}" \
             --arg  sns_topic_arn                "" \
             '{
               app_name:                    $app_name,
