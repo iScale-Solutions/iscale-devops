@@ -323,6 +323,7 @@ jobs:
           echo "Failover execution started: $EXECUTION_ARN"
       
       - name: Monitor failover execution
+        id: monitor
         run: |
           EXECUTION_ARN="${{ steps.start.outputs.execution_arn }}"
           CONSOLE_URL="https://${{ steps.cfg.outputs.region }}.console.aws.amazon.com/states/home?region=${{ steps.cfg.outputs.region }}#/executions/details/${EXECUTION_ARN}"
@@ -351,7 +352,7 @@ jobs:
           done
     
       - name: Notify success
-        if: success()
+        if: steps.monitor.outcome == 'success'
         run: |
           SNS_ARN=""  # TODO: source sns_topic_arn from GitHub Secrets or config
 
@@ -366,7 +367,7 @@ jobs:
             --message "DR failover completed for ${{ inputs.app }} (${{ inputs.target_env }}). Network stack and app stack are UPDATE_COMPLETE. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Notify failure
-        if: failure()
+        if: steps.monitor.outcome == 'failure' || steps.monitor.outcome == 'cancelled'
         run: |
           SNS_ARN=""  # TODO: source sns_topic_arn from GitHub Secrets or config
 
@@ -375,7 +376,12 @@ jobs:
             exit 0
           fi
 
+          MSG="DR failover FAILED for ${{ inputs.app }} (${{ inputs.target_env }}). Check the run and Step Functions console for details."
+          if [ "${{ steps.monitor.outcome }}" = "cancelled" ]; then
+            MSG="DR failover monitor was cancelled (job timeout). The Step Functions execution may still be running. Check: https://${{ steps.cfg.outputs.region }}.console.aws.amazon.com/states/home"
+          fi
+
           aws sns publish \
             --topic-arn "$SNS_ARN" \
             --subject "DR Failover FAILED — ${{ inputs.app }} / ${{ inputs.target_env }}" \
-            --message "DR failover FAILED for ${{ inputs.app }} (${{ inputs.target_env }}). Check the run and Step Functions console for details. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --message "$MSG Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
