@@ -47,6 +47,9 @@ Metadata:
             - LiveSecretArn
             - IsPITRMode
             - PITRDBEndpoint
+            - ExternalEFSId
+            - BackupVaultEncryptionKeyArn
+            - HourlyEFSDRRetentionDays
 
     ParameterLabels:
       Name:
@@ -99,6 +102,12 @@ Metadata:
         default: PITR Mode (set by dr-failover-v2 only — do not change manually)
       PITRDBEndpoint:
         default: PITR DB Endpoint (set by dr-failover-v2 only — do not change manually)
+      ExternalEFSId:
+        default: External EFS ID (DR failover only — set by dr-failover before stack update)
+      BackupVaultEncryptionKeyArn:
+        default: Backup Vault KMS Key ARN (DR region CMK replica — leave blank for default key)
+      HourlyEFSDRRetentionDays:
+        default: Hourly EFS DR Retention (days to retain hourly EFS copies in DR vault)
 
 Parameters:
   Name:
@@ -269,6 +278,25 @@ Parameters:
       Leave blank for all other deployments — existing stacks are unaffected.
     Type: String
     Default: ''
+  ExternalEFSId:
+    Description: |
+      (DR Failover only) ID of the EFS file system restored from cross-region backup.
+      Written by dr-failover before the stack update. Leave blank for normal operation.
+    Type: String
+    Default: ''
+  BackupVaultEncryptionKeyArn:
+    Description: |
+      ARN of the KMS CMK replica in this region used to encrypt the DRBackupVault.
+      Required for cross-region EFS backup copies to be immediately decryptable at restore.
+      Leave blank to use the default AWS Backup managed key.
+    Type: String
+    Default: ''
+  HourlyEFSDRRetentionDays:
+    Description: Number of days to retain hourly EFS backup copies in the DR vault (1-35)
+    Type: Number
+    Default: 14
+    MinValue: 1
+    MaxValue: 35
 
 Mappings:
   Fn::Transform:
@@ -319,6 +347,23 @@ Conditions:
   IsDashboardDeployedAndNotPITR: !And
     - Condition: IsProdOrProductionDR
     - Condition: IsDeployPaidResourcesAndNotPITR
+  IsNotProdAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResourcesAndNotPITR
+  IsProdOrTestOrDR: !Or
+    - Condition: IsProd
+    - Condition: IsTest
+    - Condition: IsDR
+  IsProdOrTestOrDRAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrTestOrDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
+  IsProdOrTest: !Or
+    - Condition: IsProd
+    - Condition: IsTest
+  IsProdOrTestAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrTest
+    - Condition: IsDeployPaidResourcesAndNotPITR
+  IsBackupEncryptionKeyProvided: !Not [!Equals [!Ref BackupVaultEncryptionKeyArn, '']]
 
 Resources:
 
@@ -459,6 +504,8 @@ Resources:
           - IsDeployPaidResources
           - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
           - ''
+        ExternalEFSID: !If [IsDR, !Ref ExternalEFSId, '']
+        ExternalEFSSecurityGroup: !If [IsDR, !GetAtt EFSStandbySecurityGroup.GroupId, '']
         InstanceAMI: !Ref InstanceAMI
         InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
         InstancePort: 80
@@ -520,23 +567,23 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   AllowJumpHostIntoDB:
-    Condition: IsDeployPaidResourcesAndNotPITR
+    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from jump host
       IpProtocol: TCP
-      GroupId:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.SecurityGroupId
-      FromPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
-      ToPort:
-        Fn::GetAtt:
-          - DBStack
-          - Outputs.DBInstancePort
+      GroupId: !If
+        - IsPITRMode
+        - !GetAtt DBStandbySecurityGroup.GroupId
+        - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+      FromPort: !If
+        - IsPITRMode
+        - 3306
+        - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+      ToPort: !If
+        - IsPITRMode
+        - 3306
+        - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
       SourceSecurityGroupId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
@@ -652,7 +699,7 @@ Resources:
             - Outputs.CodeDeployDeploymentGroupName
 
   BackupStack:
-    Condition: IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR
+    Condition: IsProdOrTestAndDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBStack
       - ServerStack
@@ -675,6 +722,16 @@ Resources:
         DailyExpiration: 60 #60 days requirement
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
         MonthlyExpiration: 3650 # 10 years
+        EnableHourlyBackup: !If [IsProdOrTest, 'true', 'false']
+        HourlyBackupARNList:
+          Fn::GetAtt: [ServerStack, Outputs.AppServerEFSArn]
+        EnableCrossRegionBackup: 'true'
+        CrossRegionBackupVaultArn: !Sub
+          - 'arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-vault'
+          - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+            DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+        EncryptionKeyArn: !Ref BackupVaultEncryptionKeyArn
+        HourlyDRRetentionDays: !Ref HourlyEFSDRRetentionDays
 
   Dashboard:
     Condition: IsDashboardDeployedAndNotPITR
@@ -934,7 +991,22 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
-  
+
+  EFSStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs, standby]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
   DBReplicationStack:
     Condition: IsDRAndEnableCrossRegionBackupReplication
     Type: AWS::CloudFormation::Stack
@@ -946,7 +1018,20 @@ Resources:
         EnvName: !Ref EnvName
         SourceDbInstanceArn: !Ref SourceDbInstanceArn
         BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
-          
+
+  DRBackupVault:
+    Condition: IsDR
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+      EncryptionKeyArn: !If [IsBackupEncryptionKeyProvided, !Ref BackupVaultEncryptionKeyArn, !Ref 'AWS::NoValue']
+      BackupVaultTags:
+        Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
 Outputs:
 
   DeploymentUserGroup:
@@ -1004,3 +1089,10 @@ Outputs:
     Value: !GetAtt DBStandbySecurityGroup.GroupId
     Export:
       Name: !Sub '${AWS::StackName}-DBStandbySecurityGroupId'
+
+  EFSStandbySecurityGroupId:
+    Condition: IsDR
+    Description: Pre-deployed EFS security group for DR restore mount targets
+    Value: !GetAtt EFSStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-EFSStandbySecurityGroupId'
