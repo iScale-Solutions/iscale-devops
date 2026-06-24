@@ -528,6 +528,25 @@ Resources:
         - Key: Name
           Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
 
+  # Pre-deployed EFS security group for the DR region.
+  # Allows NFS (2049) inbound from app server SGs — appserver-basic2.yaml (via appserver.yaml include)
+  # adds the ingress rules automatically when UseExternalEFS=true (ExternalEFSID is non-empty).
+  # Also used as the mount target SG when the Lambda creates mount targets for the restored EFS.
+  EFSStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs, standby]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
   # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
   # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
   # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
@@ -1066,6 +1085,13 @@ Outputs:
     Value: !GetAtt DBStandbySecurityGroup.GroupId
     Export:
       Name: !Sub '${AWS::StackName}-DBStandbySecurityGroupId'
+
+  EFSStandbySecurityGroupId:
+    Condition: IsDR
+    Description: Pre-deployed EFS security group — pass as efs_security_group_id in the dr-failover state machine input
+    Value: !GetAtt EFSStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-EFSStandbySecurityGroupId'
 
   DeploymentUserGroup:
     Description: Add the BitBucket user into this group
