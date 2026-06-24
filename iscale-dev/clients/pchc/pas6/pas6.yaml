@@ -45,9 +45,12 @@ Metadata:
           - SourceDbInstanceArn
           - BackupReplicationRetentionPeriod
           - LiveSecretArn
+          - DRRegion
           - IsPITRMode
           - PITRDBEndpoint
-
+          - ExternalEFSId
+          - BackupVaultEncryptionKeyArn
+          - HourlyEFSDRRetentionDays
 
     ParameterLabels:
       Name:
@@ -100,6 +103,14 @@ Metadata:
         default: PITR Mode (set by dr-failover-v2 only — do not change manually)
       PITRDBEndpoint:
         default: PITR DB Endpoint (set by dr-failover-v2 only — do not change manually)
+      DRRegion:
+        default: DR AWS Region (backup copy destination)
+      ExternalEFSId:
+        default: Restored EFS ID (written by dr-failover Step Functions before stack update — DR only)
+      BackupVaultEncryptionKeyArn:
+        default: KMS CMK ARN for EFS backup vault encryption (multi-region key replica required in DR region)
+      HourlyEFSDRRetentionDays:
+        default: Days to retain hourly EFS backup copies in DR vault (must span full incremental chain)
 
 Parameters:
   Name:
@@ -267,6 +278,45 @@ Parameters:
       Leave blank for all other deployments — existing stacks are unaffected.
     Type: String
     Default: ''
+  DRRegion:
+    Description: AWS region of the DR stack — used to construct the DR backup vault ARN for cross-region EFS copy
+    Type: String
+    Default: 'us-east-2'
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-1
+      - us-west-2
+      - ap-southeast-1
+      - ap-southeast-2
+  ExternalEFSId:
+    Description: |
+      ID of the AWS Backup-restored EFS file system in the DR region.
+      Written to SSM and set here by the dr-failover Step Functions machine before the app stack update.
+      When set, AppServerStack skips EFS creation and mounts this file system instead.
+      Default '' — live stacks always create their own EFS and are completely unaffected.
+    Type: String
+    Default: ''
+  BackupVaultEncryptionKeyArn:
+    Description: |
+      ARN of the KMS CMK used to encrypt the backup vault and every EFS recovery point stored in it.
+      Must be a multi-region key: the primary key in the live region encrypts the source vault and all
+      recovery points (daily baseline + hourly incrementals). The replica key in the DR region
+      encrypts the DRBackupVault so cross-region copy actions produce recovery points that are immediately
+      decryptable at DR restore time — no key import or manual re-encryption step required.
+      Leave blank to use the default AWS-managed aws/backup key.
+    Type: String
+    Default: ''
+  HourlyEFSDRRetentionDays:
+    Description: |
+      Number of days to retain hourly EFS backup copies in the DR vault.
+      Hourly copies are the high-frequency incremental recovery points for Option B (< 1 hour RPO).
+      Daily copies serve as the long-term baseline; hourly copies layer on top.
+      Must be >= 2 (minimum for incremental chain integrity) and <= 35 (AWS Backup maximum).
+    Type: Number
+    Default: 14
+    MinValue: 2
+    MaxValue: 35
 
 Mappings:
   Fn::Transform:
