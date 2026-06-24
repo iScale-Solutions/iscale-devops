@@ -849,7 +849,7 @@ Resources:
         Organization: !Ref OrgName
 
   BackupStack:
-    Condition: IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR
+    Condition: IsProdOrTestAndDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBStack
       - AppServerStack
@@ -872,6 +872,24 @@ Resources:
         DailyExpiration: 60 #60 days
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
         MonthlyExpiration: 3650 # 10 years
+        # Hourly incremental plan targets EFS only — RDS does not support AWS Backup incremental.
+        # Each hourly recovery point contains the complete EFS state (AWS Backup resolves the
+        # incremental chain internally); restoring from the latest hourly always gives full data.
+        EnableHourlyBackup: !If [IsProdOrTest, 'true', 'false']
+        HourlyBackupARNList:
+          Fn::GetAtt: [AppServerStack, Outputs.AppServerEFSArn]
+        # TODO: scope back to !If [IsProd, 'true', 'false'] once cross-region backup is validated in all environments
+        EnableCrossRegionBackup: 'true'
+        CrossRegionBackupVaultArn: !Sub
+          - 'arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-vault'
+          - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+            DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+        # KMS CMK for the source backup vault — must match the key used for DRBackupVault so
+        # cross-region copies are immediately decryptable in the DR region without key re-import.
+        EncryptionKeyArn: !Ref BackupVaultEncryptionKeyArn
+        # Retain 14 days of hourly EFS copies in DR — within this window restore to any hour (Option B).
+        # Beyond 14 days fall back to the daily baseline copies retained for 30 days.
+        HourlyDRRetentionDays: !Ref HourlyEFSDRRetentionDays
 
   Dashboard:
     Condition: IsDashboardDeployedAndNotPITR
