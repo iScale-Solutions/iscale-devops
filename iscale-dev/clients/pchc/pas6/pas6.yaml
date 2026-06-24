@@ -827,7 +827,24 @@ Resources:
           Fn::GetAtt:
             - SidekiqDeployStack
             - Outputs.CodeDeployDeploymentGroupName
-
+  
+  # Always-on vault in the DR region — exists independently of DeployPaidResources so the live region's
+  # CopyActions have a destination even during cold standby. Excluded from BackupStack to avoid naming conflicts at failover.
+  # EncryptionKeyArn must be the REPLICA of the multi-region CMK in this region (us-west-2) so that
+  # cross-region EFS backup copies (daily baseline + hourly incrementals) are encrypted with a key that
+  # is immediately available for decryption at DR restore time.
+  DRBackupVault:
+    Condition: IsDR
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+      EncryptionKeyArn: !If [IsBackupEncryptionKeyProvided, !Ref BackupVaultEncryptionKeyArn, !Ref 'AWS::NoValue']
+      BackupVaultTags:
+        Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
 
   BackupStack:
     Condition: IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR
