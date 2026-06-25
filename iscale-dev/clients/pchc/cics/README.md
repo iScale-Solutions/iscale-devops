@@ -14,6 +14,8 @@ This README exists to give Claude (and future readers) enough context to safely 
 | [cics-dr-vpc-peering.yaml](cics-dr-vpc-peering.yaml) | Cross-region VPC peering between the main CICS region and the DR region. Deployed twice — once as **Requester** (main) and once as **Accepter** (DR). |
 | [cics-vpn.yaml](cics-vpn.yaml) | AWS Client VPN endpoint peered into the CICS VPC. |
 | [cics-lambda-cron.yaml](cics-lambda-cron.yaml) | Standalone Lambda (Python 3.9) on a CRON schedule that queries the CICS RDS instance. Has its own VPC SG and S3 bucket. |
+| [cics-dr-failover.yaml](cics-dr-failover.yaml) | **CICS-dedicated DR failover engine** (Step Functions + Lambda). Forked from `dr/dr-failover-v2.yaml`: dual-DB (cics + cicsfe) PITR/snapshot restore + Route53 cutover, single app stack, no EFS/AMI/Redshift/ECS machinery. |
+| [CICS-DR-FAILOVER.md](CICS-DR-FAILOVER.md) | Runbook for `cics-dr-failover.yaml` — flow, **state machine input payload**, pre-flight, and trigger steps. |
 
 ---
 
@@ -34,7 +36,7 @@ The main template provisions an HA Windows-on-AWS CICS environment. Resource gro
    - **PCHJUMPSVR** + **PCHJUMPSVROperator** — Bastion / jump hosts with EIPs and external ingress rules from Aperta, PCHC office, and "Noel" CIDRs.
    - **BKUPSVR** — Backup server.
 5. **Active Directory** — `ActiveDirectory` (AWS Managed AD) + `EC2JoinADSSMDocument` (joins instances on launch via `SsmAssociations`).
-6. **RDS** — `DBStack`, `DBStack2` (nested), `DBSubnetGroup2` (DR), and `DIsasterRecoveryDBSecurityGroup` (typo preserved — do **not** rename, it would replace the SG). `SQLServerOptionGroup` + `SQLServerOptionGroup2` for native backup/restore.
+6. **RDS** — `DBStack` (nested, `common/database.yaml`) is the main CICS DB. `SQLServerBackupRestoreIAMRole` + `SQLServerOptionGroup` enable native SQL Server backup/restore against the archive bucket. DR-only resources (`Condition: IsDR`): `DRDBSecret` (placeholder Secrets Manager secret synced from the live region by the secrets-sync Lambda), `DBStandbySubnetGroup` (pre-provisioned for PITR restore), and `DBReplicationStack` (cross-region backup replication, only when `EnableCrossRegionBackupReplication=true`). The FE DB has the parallel `DBFEStack` / `DRDBFESecret` / `DBFEStandbySubnetGroup` / `DBFEReplicationStack` set (see §9).
 7. **Routing into RDS** — `AllowCICSAPPSVRIntoDB`, `AllowGLBLSCPSVRIntoDB`, `AllowBKUPSVRIntoDB` and DB2/DR variants.
 8. **ELB wiring** — `CICSListenerRule`, `CICSTargetGroup`, `SlowTargetResponseTimeCloudWatchAlarm`, `TargetGroupHealthyHostCountAlarm`.
 9. **FE DB stack** — `DBFEStack` + `AllowCICSFEAPPSVRIntoDB`.
@@ -52,14 +54,13 @@ The main template provisions an HA Windows-on-AWS CICS environment. Resource gro
   - `s3://iscale-dev-cloudformation/include/mappings.yaml` — `EnvShort`, `RegionShort`, AMI lookup tables.
   - `s3://iscale-dev-cloudformation/include/conditions.yaml` — provides `IsProd`, `IsTest`, etc.
 - **Nested stack templates** live at `https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/*.yaml` (loadbalancer, sftp, vpc-peering, vpn, rds, backup, fileserver).
-- **DR awareness**: `DisasterRecoveryRegion` parameter drives `IsDisasterRecoveryRegion` / `IsMainRegion` / `IsProdAndMainRegion`. Many resources (DB exports, subnet picks) are gated on these — preserve the gating when editing.
+- **DR awareness**: DR is driven by the **`EnvName`** parameter, not a region parameter. The DR variants (`ProductionDR`, `StagingDR`, `DevelopmentDR`, `TestDR`) set the `IsDR` condition; `IsMainRegion` is its inverse (`!Not [IsDR]`), and `IsProdAndMainRegion` combines `IsProd` + `IsMainRegion`. Many resources (second-AZ instances, DB ingress, FileServer, Dashboard) are gated on these — preserve the gating when editing. Cold-standby suppression is a separate axis: `DeployPaidResources=false` drops all paid resources (`IsDeployPaidResources`), and `IsPITRMode=true` suppresses `DBStack` when the DB was restored externally (`IsDeployPaidResourcesAndNotPITR`).
 - **Cross-stack imports** assume `NetworkStackName` (default `pchc-dev-ase1-network`) and `SNSStackName` are deployed first.
 
 ---
 
 ## When editing — gotchas
 
-- **`DIsasterRecoveryDBSecurityGroup`** is misspelled in the source. Renaming it triggers a replace; leave it alone unless you intend that.
 - **`Xfer1–4` S3 buckets** are gated on `Condition: IsTest` — they only exist in Test env. The IAM policy on `CICSAPPSVREC2Role` still references their ARNs unconditionally; that's intentional (IAM allows wildcarding non-existent resources).
 - **AMIs are hard-coded** to `ami-0d694fc7ea154072a` / `ami-0526b9747c2c87a0b` / `ami-06b2f14c1d8417d36` (Windows 2019 + SIOS Marketplace). The `DBStack` comment at line 2071 notes: *"some settings were manually updated in Console since we cannot update the whole template yet (outdated AMIs of windows EC2, need to be replaced for this stack to update)"* — be cautious about full-stack updates.
 - **SFTP allow-list CIDRs** (`AllowSFTP1`–`8`) are office/carrier IPs maintained by hand. If adding/removing, keep the `Description` field meaningful — that's the only audit trail.
