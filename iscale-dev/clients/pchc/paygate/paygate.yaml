@@ -44,6 +44,12 @@ Metadata:
           - LiveSecretArn
           - IsPITRMode
           - PITRDBEndpoint
+          - DRRegion
+          - ExternalEFSIdPgUi
+          - ExternalEFSIdPgPchc
+          - ExternalEFSIdPgPay
+          - BackupVaultEncryptionKeyArn
+          - HourlyEFSDRRetentionDays
 
     ParameterLabels:
       Name:
@@ -87,9 +93,21 @@ Metadata:
       LiveSecretArn:
         default: Live Region Secret ARN (DR standby only — required for secrets sync)
       IsPITRMode:
-        default: PITR Mode (set by dr-failover-v2 only — do not change manually)
+        default: PITR Mode (true = DB restored externally via PITR, DBStack suppressed)
       PITRDBEndpoint:
-        default: PITR DB Endpoint (set by dr-failover-v2 only — do not change manually)
+        default: PITR DB Endpoint (written by dr-failover Step Functions before stack update)
+      DRRegion:
+        default: DR AWS Region (backup copy destination)
+      ExternalEFSIdPgUi:
+        default: Restored EFS ID (written by dr-failover Step Functions before stack update — DR only)
+      ExternalEFSIdPgPchc:
+        default: Restored EFS ID (written by dr-failover Step Functions before stack update — DR only)
+      ExternalEFSIdPgPay:
+        default: Restored EFS ID (written by dr-failover Step Functions before stack update — DR only)
+      BackupVaultEncryptionKeyArn:
+        default: KMS CMK ARN for EFS backup vault encryption (multi-region key replica required in DR region)
+      HourlyEFSDRRetentionDays:
+        default: Days to retain hourly EFS backup copies in DR vault (must span full incremental chain)
 
 Parameters:
   Name:
@@ -241,6 +259,41 @@ Parameters:
       Leave blank for all other deployments — existing stacks are unaffected.
     Type: String
     Default: ''
+  DRRegion:
+    Description: AWS region name of the DR destination (e.g. us-east-2). Required for cross-region backup vault ARN construction.
+    Type: String
+    Default: ''
+  ExternalEFSIdPgUi:
+    Description: |
+      (DR Failover only) ID of the EFS file system for pg-ui, restored from cross-region backup.
+      Written by dr-failover before the stack update. Leave blank for normal operation.
+    Type: String
+    Default: ''
+  ExternalEFSIdPgPchc:
+    Description: |
+      (DR Failover only) ID of the EFS file system for pg-pchc, restored from cross-region backup.
+      Written by dr-failover before the stack update. Leave blank for normal operation.
+    Type: String
+    Default: ''
+  ExternalEFSIdPgPay:
+    Description: |
+      (DR Failover only) ID of the EFS file system for pg-pay, restored from cross-region backup.
+      Written by dr-failover before the stack update. Leave blank for normal operation.
+    Type: String
+    Default: ''
+  BackupVaultEncryptionKeyArn:
+    Description: |
+      ARN of the KMS CMK replica in this region used to encrypt the DRBackupVault.
+      Required for cross-region EFS backup copies to be immediately decryptable at restore.
+      Leave blank to use the default AWS Backup managed key.
+    Type: String
+    Default: ''
+  HourlyEFSDRRetentionDays:
+    Description: Number of days to retain hourly EFS backup copies in the DR vault (1-35)
+    Type: Number
+    Default: 14
+    MinValue: 1
+    MaxValue: 35
 
 Mappings:
   Fn::Transform:
