@@ -521,6 +521,56 @@ Resources:
         - Key: Name
           Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
 
+  # Pre-deployed EFS security group for the DR region.
+  # Allows NFS (2049) inbound from app server SGs — appserver-basic2.yaml (via appserver.yaml include)
+  # adds the ingress rules automatically when UseExternalEFS=true (ExternalEFSID is non-empty).
+  # Also used as the mount target SG when the Lambda creates mount targets for the restored EFS.
+
+  EFSStandbySecurityGroupPgUi:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pg-ui, efs, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pg-ui, efs, standby]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  EFSStandbySecurityGroupPgPchc:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pg-pchc, efs, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pg-pchc, efs, standby]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  EFSStandbySecurityGroupPgPay:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pg-pay, efs, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], pg-pay, efs, standby]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
   # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
   # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
   # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
@@ -861,6 +911,48 @@ Resources:
         MonthlyExpiration: 3650 # 10 years
 
 Outputs:
+
+  DRDBSecretArn:
+    Condition: IsDR
+    Description: ARN of the DR Secrets Manager secret — wire into secrets-sync Lambda
+    Value: !Ref DRDBSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-DRDBSecretArn'
+
+  DBStandbySubnetGroup:
+    Condition: IsDR
+    Description: Pre-deployed DB subnet group for PITR restore
+    Value: !Ref DBStandbySubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySubnetGroup'
+
+  DBStandbySecurityGroupId:
+    Condition: IsDR
+    Description: Pre-deployed DB security group for PITR restore
+    Value: !GetAtt DBStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySecurityGroupId'
+
+  EFSStandbySecurityGroupIdPgUi:
+    Condition: IsDR
+    Description: Pre-deployed EFS security group for pg-ui DR restore mount targets
+    Value: !GetAtt EFSStandbySecurityGroupPgUi.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-EFSStandbySecurityGroupIdPgUi'
+
+  EFSStandbySecurityGroupIdPgPchc:
+    Condition: IsDR
+    Description: Pre-deployed EFS security group for pg-pchc DR restore mount targets
+    Value: !GetAtt EFSStandbySecurityGroupPgPchc.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-EFSStandbySecurityGroupIdPgPchc'
+
+  EFSStandbySecurityGroupIdPgPay:
+    Condition: IsDR
+    Description: Pre-deployed EFS security group for pg-pay DR restore mount targets
+    Value: !GetAtt EFSStandbySecurityGroupPgPay.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-EFSStandbySecurityGroupIdPgPay'
 
   PaygateDeploymentUserGroup:
     Description: Add the BitBucket user into this group
