@@ -1,9 +1,11 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: |
-  PCHC DR DNS Failover Runbook — Step 1: Health Check Lambda (PCHCDR-56).
-  Verifies all PCHC apps are healthy on DR ALBs before the DNS cutover
-  approval gate. Reads ALB DNS names from an SSM Parameter Store path written
-  by the dr-failover workflow, then HTTP GETs the health check path on each app.
+  PCHC DR DNS Failover Runbook (PCHCDR-56). Deploys:
+  (1) Health check Lambda — verifies all PCHC apps are healthy on DR ALBs before cutover.
+  (2) Route 53 failover Lambda — updates Route 53 records to point to DR ALBs at cutover.
+  (3) SSM Automation Document — 4-step runbook: health check → DR Manager approval → DNS cutover → SNS all-clear.
+  Started manually by the DR Manager from the AWS Console after the dr-failover workflow succeeds
+  and UAT validation is complete.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -20,10 +22,20 @@ Metadata:
           - AlbDnsMapParameterPath
           - HealthCheckPath
       - Label:
+          default: Route 53 Failover
+        Parameters:
+          - HostedZoneMapParameterPath
+      - Label:
           default: Network
         Parameters:
           - VpcId
           - SubnetIds
+      - Label:
+          default: Notifications & Approval
+        Parameters:
+          - SNSTopicArn
+          - ApproverIamArns
+          - ApprovalTimeoutSeconds
       - Label:
           default: Logging
         Parameters:
@@ -40,10 +52,18 @@ Metadata:
         default: SSM Parameter Path — ALB DNS Map
       HealthCheckPath:
         default: Health Check Path
+      HostedZoneMapParameterPath:
+        default: SSM Parameter Path — Hosted Zone Map
       VpcId:
         default: VPC ID (for internal ALB access)
       SubnetIds:
         default: Subnet IDs (comma-separated)
+      SNSTopicArn:
+        default: SNS Topic ARN
+      ApproverIamArns:
+        default: Approver IAM ARNs (comma-separated, for reference)
+      ApprovalTimeoutSeconds:
+        default: Approval Timeout (seconds)
       LogRetentionDays:
         default: CloudWatch Log Retention (days)
 
@@ -81,6 +101,16 @@ Parameters:
     Type: String
     Default: /health
 
+  HostedZoneMapParameterPath:
+    Description: >
+      SSM Parameter Store path holding a JSON object that maps app names to their
+      Route 53 hosted zone configuration. Written once during PCHCDR-55 setup and
+      updated when records change. Example value:
+      {"pesonet":{"hostedZoneId":"ZXXXX","recordName":"pesonet.pchc.com.ph","albHostedZoneId":"Z14GRHDCWA56QT"}}
+      albHostedZoneId is the canonical hosted zone ID for the ALB (region-specific constant).
+    Type: String
+    Default: /pchc/dr/prddr/hosted-zone-map
+
   VpcId:
     Description: >
       VPC ID in the DR region. Required if app ALBs are internal-facing.
@@ -93,6 +123,28 @@ Parameters:
       Comma-separated private subnet IDs in the DR region. Required when VpcId is set.
     Type: String
     Default: ''
+
+  SNSTopicArn:
+    Description: >
+      ARN of the SNS topic used for the aws:approve approval notification and the
+      all-clear message after cutover. Must be in the same region as this stack.
+    Type: String
+
+  ApproverIamArns:
+    Description: >
+      Comma-separated IAM user or role ARNs authorised to approve the DNS cutover.
+      This is for reference only — the actual Approvers list is supplied when starting
+      the SSM runbook execution (StringList parameter named Approvers).
+      Example: arn:aws:iam::123456789012:user/dr-manager
+    Type: String
+    Default: ''
+
+  ApprovalTimeoutSeconds:
+    Description: >
+      Seconds to wait for the DR Manager approval before the runbook aborts.
+      Default is 14400 (4 hours). Baked into the SSM document at deploy time.
+    Type: Number
+    Default: 14400
 
   LogRetentionDays:
     Description: Number of days to retain Lambda CloudWatch logs.
@@ -117,7 +169,7 @@ Conditions:
 Resources:
 
   ####
-  # IAM
+  # IAM — Health Check Lambda
   ####
 
   LambdaRole:
@@ -162,7 +214,7 @@ Resources:
                 Resource: '*'
 
   ####
-  # CloudWatch Logs
+  # CloudWatch Logs — Health Check Lambda
   ####
 
   LambdaLogGroup:
@@ -172,7 +224,7 @@ Resources:
       RetentionInDays: !Ref LogRetentionDays
 
   ####
-  # Lambda
+  # Lambda — Health Check
   ####
 
   LambdaFunction:
@@ -232,6 +284,259 @@ Resources:
               logger.info(f'All {len(alb_dns_map)} apps healthy')
               return {'status': 'ok', 'checked': len(alb_dns_map)}
 
+  ####
+  # IAM — Route 53 Failover Lambda
+  ####
+
+  Route53LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-r53-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+        - PolicyName: ReadSSMParameters
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter${AlbDnsMapParameterPath}
+                  - !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter${HostedZoneMapParameterPath}
+        - PolicyName: Route53Cutover
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                  - route53:ListResourceRecordSets
+                Resource: arn:aws:route53:::hostedzone/*
+
+  ####
+  # CloudWatch Logs — Route 53 Failover Lambda
+  ####
+
+  Route53LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-r53
+      RetentionInDays: !Ref LogRetentionDays
+
+  ####
+  # Lambda — Route 53 Failover
+  ####
+
+  Route53LambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: Route53LambdaLogGroup
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-r53
+      Description: >
+        DR DNS cutover — reads ALB DNS names and hosted zone config from SSM Parameter
+        Store and UPSERTs Route 53 alias A records to route traffic to DR ALBs.
+        Groups changes by hosted zone and submits a single ChangeBatch per zone.
+      Handler: index.handler
+      Role: !GetAtt Route53LambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 120
+      Environment:
+        Variables:
+          ALB_DNS_MAP_PARAMETER: !Ref AlbDnsMapParameterPath
+          HOSTED_ZONE_MAP_PARAMETER: !Ref HostedZoneMapParameterPath
+          DR_REGION: !Ref DRRegion
+      Code:
+        ZipFile: |
+          import json, os
+          import boto3
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+              region = os.environ['DR_REGION']
+              ssm = boto3.client('ssm', region_name=region)
+              r53 = boto3.client('route53')
+
+              alb_resp = ssm.get_parameter(Name=os.environ['ALB_DNS_MAP_PARAMETER'])
+              alb_dns_map = json.loads(alb_resp['Parameter']['Value'])
+
+              # hosted_zone_map: {app: {hostedZoneId, recordName, albHostedZoneId}}
+              # albHostedZoneId is the canonical zone ID for the ALB (e.g. Z14GRHDCWA56QT for us-west-2)
+              hz_resp = ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])
+              hosted_zone_map = json.loads(hz_resp['Parameter']['Value'])
+
+              hz_changes = {}
+              for app_name, zone_info in hosted_zone_map.items():
+                  if app_name not in alb_dns_map:
+                      logger.warning(f'{app_name}: not in ALB DNS map, skipping')
+                      continue
+                  alb_dns = alb_dns_map[app_name]
+                  hz_id = zone_info['hostedZoneId']
+                  change = {
+                      'Action': 'UPSERT',
+                      'ResourceRecordSet': {
+                          'Name': zone_info['recordName'],
+                          'Type': 'A',
+                          'AliasTarget': {
+                              'HostedZoneId': zone_info['albHostedZoneId'],
+                              'DNSName': alb_dns,
+                              'EvaluateTargetHealth': False
+                          }
+                      }
+                  }
+                  hz_changes.setdefault(hz_id, []).append(change)
+
+              for hz_id, change_list in hz_changes.items():
+                  r53.change_resource_record_sets(
+                      HostedZoneId=hz_id,
+                      ChangeBatch={
+                          'Comment': f'DR failover DNS cutover — {len(change_list)} records',
+                          'Changes': change_list
+                      }
+                  )
+                  logger.info(f'Updated {len(change_list)} records in hosted zone {hz_id}')
+
+              total = sum(len(v) for v in hz_changes.values())
+              logger.info(f'Route 53 cutover complete: {total} records across {len(hz_changes)} hosted zones')
+              return {'status': 'ok', 'updated': total, 'hostedZones': len(hz_changes)}
+
+  ####
+  # IAM — SSM Automation Role
+  ####
+
+  SSMAutomationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-ssm-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdas
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt LambdaFunction.Arn
+                  - !GetAtt Route53LambdaFunction.Arn
+        - PolicyName: PublishSNS
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SNSTopicArn
+
+  ####
+  # SSM Automation Document
+  ####
+
+  DNSFailoverRunbook:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      Name: !Sub ${OrgName}-${EnvName}-dr-dns-failover-runbook
+      Content:
+        schemaVersion: '0.3'
+        description: >
+          PCHC DR DNS Failover Runbook. Four steps:
+          (1) Health check all PCHC apps on DR ALBs.
+          (2) DR Manager approval gate — identity and timestamp recorded for BSP audit.
+          (3) Route 53 DNS cutover to DR ALBs.
+          (4) SNS all-clear notification.
+          Start manually from the AWS Console after the dr-failover workflow succeeds
+          and UAT validation on DR is complete.
+        assumeRole: !GetAtt SSMAutomationRole.Arn
+        parameters:
+          HealthCheckLambdaArn:
+            type: String
+            default: !GetAtt LambdaFunction.Arn
+            description: ARN of the health check Lambda.
+          Route53FailoverLambdaArn:
+            type: String
+            default: !GetAtt Route53LambdaFunction.Arn
+            description: ARN of the Route 53 failover Lambda.
+          SNSTopicArn:
+            type: String
+            default: !Ref SNSTopicArn
+            description: SNS topic for approval notification and all-clear.
+          Approvers:
+            type: StringList
+            description: >
+              IAM user or role ARNs authorised to approve the DNS cutover.
+              Example: ["arn:aws:iam::123456789012:user/dr-manager"]
+        mainSteps:
+          - name: HealthCheck
+            action: aws:invokeLambdaFunction
+            description: Verify all PCHC apps are healthy on DR ALBs.
+            inputs:
+              FunctionName: '{{ HealthCheckLambdaArn }}'
+              Payload: '{}'
+            nextStep: ApproveCutover
+            onFailure: Abort
+          - name: ApproveCutover
+            action: aws:approve
+            description: >
+              DR Manager approval gate. Approver identity and timestamp are recorded
+              in the SSM execution log for BSP audit purposes.
+            timeoutSeconds: !Ref ApprovalTimeoutSeconds
+            inputs:
+              NotificationArn: '{{ SNSTopicArn }}'
+              Message: >
+                PCHC DR health check passed for all applications. Approve to proceed
+                with Route 53 DNS cutover to the DR region. This action routes all
+                production traffic to DR ALBs — only approve after completing UAT validation.
+              MinRequiredApprovals: 1
+              Approvers: '{{ Approvers }}'
+            nextStep: Route53Cutover
+            onFailure: Abort
+          - name: Route53Cutover
+            action: aws:invokeLambdaFunction
+            description: Update Route 53 alias A records to point to DR ALBs.
+            inputs:
+              FunctionName: '{{ Route53FailoverLambdaArn }}'
+              Payload: '{}'
+            nextStep: NotifyAllClear
+            onFailure: Abort
+          - name: NotifyAllClear
+            action: aws:executeAwsApi
+            description: Publish all-clear SNS notification.
+            isEnd: true
+            inputs:
+              Service: sns
+              Api: Publish
+              TopicArn: '{{ SNSTopicArn }}'
+              Subject: PCHC DR DNS Cutover Complete
+              Message: >
+                Route 53 DNS failover cutover to DR region completed successfully.
+                All PCHC application traffic is now routed to DR ALBs. Proceed with
+                post-cutover verification per the DR runbook checklist.
+
 Outputs:
 
   LambdaFunctionArn:
@@ -245,3 +550,23 @@ Outputs:
     Value: !Ref LambdaFunction
     Export:
       Name: !Sub ${AWS::StackName}-LambdaName
+
+  Route53FailoverLambdaArn:
+    Description: ARN of the Route 53 failover Lambda — pass this to the SSM runbook.
+    Value: !GetAtt Route53LambdaFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-Route53LambdaArn
+
+  Route53FailoverLambdaName:
+    Description: Name of the Route 53 failover Lambda — use this to invoke manually for testing.
+    Value: !Ref Route53LambdaFunction
+    Export:
+      Name: !Sub ${AWS::StackName}-Route53LambdaName
+
+  SSMDocumentName:
+    Description: >
+      Name of the SSM Automation Document — start this manually from the AWS Console
+      after the dr-failover workflow succeeds and UAT validation is complete.
+    Value: !Ref DNSFailoverRunbook
+    Export:
+      Name: !Sub ${AWS::StackName}-SSMDocumentName
