@@ -27,6 +27,18 @@ Metadata:
           default: Disaster Recovery
         Parameters:
           - DeployPaidResources
+          - EnableBackup
+      - Label:
+          default: Backup Configuration
+        Parameters:
+          - DRRegion
+          - DRVaultName
+          - ThirtyMinScheduleExpression
+          - DailyScheduleExpression
+          - ThirtyMinRetentionDays
+          - DailyRetentionDays
+          - DRThirtyMinRetentionDays
+          - DRDailyRetentionDays
 
     ParameterLabels:
       Name:
@@ -39,6 +51,24 @@ Metadata:
         default: Environment Name
       DeployPaidResources:
         default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      EnableBackup:
+        default: Enable AWS Backup (true = live region only, false = DR region)
+      DRRegion:
+        default: DR Region
+      DRVaultName:
+        default: DR Backup Vault Name (must pre-exist in DR region)
+      ThirtyMinScheduleExpression:
+        default: 30-Minute Backup Schedule (cron)
+      DailyScheduleExpression:
+        default: Daily Backup Schedule (cron)
+      ThirtyMinRetentionDays:
+        default: 30-Min Backup Retention in source region (days)
+      DailyRetentionDays:
+        default: Daily Backup Retention in source region (days)
+      DRThirtyMinRetentionDays:
+        default: 30-Min Backup Retention in DR region (days)
+      DRDailyRetentionDays:
+        default: Daily Backup Retention in DR region (days)
 
 Parameters:
   Name:
@@ -117,6 +147,60 @@ Parameters:
       - 'true'
       - 'false'
 
+  EnableBackup:
+    Description: |
+      true (default): Create AWS Backup vault, plan, and selection for DocDB Elastic. Set to true only in the LIVE region.
+      false: Skip all backup resources. Always set this to false when deploying in the DR region — the CopyAction
+             destination is a different region, so running backup from DR would copy within the same region and fail.
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  DRRegion:
+    Description: AWS region to replicate DocDB Elastic backups to (DR region).
+    Type: String
+    Default: us-west-2
+
+  DRVaultName:
+    Description: >-
+      Name of the backup vault in the DR region that receives copied recovery points.
+      Must pre-exist before this stack is deployed. The Default vault is available
+      in every region automatically.
+    Type: String
+    Default: Default
+
+  ThirtyMinScheduleExpression:
+    Description: Cron expression for the 30-minute incremental backup rule.
+    Type: String
+    Default: cron(0,30 * * * ? *)
+
+  DailyScheduleExpression:
+    Description: Cron expression for the daily backup rule (long-retention anchor).
+    Type: String
+    Default: cron(0 2 ? * * *)
+
+  ThirtyMinRetentionDays:
+    Description: Days to retain 30-minute recovery points in the source region. 2 days = 96 recovery points.
+    Type: Number
+    Default: 2
+
+  DailyRetentionDays:
+    Description: Days to retain daily recovery points in the source region.
+    Type: Number
+    Default: 30
+
+  DRThirtyMinRetentionDays:
+    Description: Days to retain 30-minute recovery points in the DR region.
+    Type: Number
+    Default: 3
+
+  DRDailyRetentionDays:
+    Description: Days to retain daily recovery points in the DR region.
+    Type: Number
+    Default: 30
+
 Mappings: 
   Fn::Transform:
     Name: AWS::Include
@@ -129,6 +213,9 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsEnableBackup: !And
+    - Condition: IsDeployPaidResources
+    - !Equals [!Ref EnableBackup, 'true']
   IsNotProdAndDeployPaidResources: !And
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
@@ -285,6 +372,147 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
+###
+# AWS Backup Section
+###
+
+  BackupVault:
+    Condition: IsEnableBackup
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    Properties:
+      BackupVaultName: !Sub ${AWS::StackName}-docdb-vault
+      BackupVaultTags:
+        Name: !Sub ${AWS::StackName}-docdb-vault
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+  BackupPlan:
+    Condition: IsEnableBackup
+    Type: AWS::Backup::BackupPlan
+    DependsOn: BackupVault
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub ${AWS::StackName}-docdb-plan
+        BackupPlanRule:
+          - RuleName: ThirtyMinBackup
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: !Ref ThirtyMinScheduleExpression
+            StartWindowMinutes: 30
+            CompletionWindowMinutes: 60
+            Lifecycle:
+              DeleteAfterDays: !Ref ThirtyMinRetentionDays
+            CopyActions:
+              - DestinationBackupVaultArn: !Sub arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${DRVaultName}
+                Lifecycle:
+                  DeleteAfterDays: !Ref DRThirtyMinRetentionDays
+          - RuleName: DailyBackup
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: !Ref DailyScheduleExpression
+            StartWindowMinutes: 120
+            CompletionWindowMinutes: 300
+            Lifecycle:
+              DeleteAfterDays: !Ref DailyRetentionDays
+            CopyActions:
+              - DestinationBackupVaultArn: !Sub arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${DRVaultName}
+                Lifecycle:
+                  DeleteAfterDays: !Ref DRDailyRetentionDays
+      BackupPlanTags:
+        Name: !Sub ${AWS::StackName}-docdb-plan
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+  BackupRole:
+    Condition: IsEnableBackup
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-docdb-backup-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+      Policies:
+        - PolicyName: DocDBElasticBackupPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: DocDBElasticOperations
+                Effect: Allow
+                Action:
+                  - docdb-elastic:CreateClusterSnapshot
+                  - docdb-elastic:CopyClusterSnapshot
+                  - docdb-elastic:DeleteClusterSnapshot
+                  - docdb-elastic:GetClusterSnapshot
+                  - docdb-elastic:ListClusterSnapshots
+                  - docdb-elastic:RestoreClusterFromSnapshot
+                  - docdb-elastic:GetCluster
+                  - docdb-elastic:ListClusters
+                  - docdb-elastic:TagResource
+                  - docdb-elastic:UntagResource
+                  - docdb-elastic:ListTagsForResource
+                Resource: !Sub arn:aws:docdb-elastic:*:${AWS::AccountId}:*
+
+  BackupSelection:
+    Condition: IsEnableBackup
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: !Sub ${AWS::StackName}-docdb-selection
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !GetAtt DocumentDBStack.Outputs.DocuDBElasticClusterARN
+
+  BackupFailureAlarm:
+    Condition: IsEnableBackup
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-docdb-backup-failures
+      AlarmDescription: >-
+        One or more DocDB Elastic backup jobs failed. Each missed 30-min job
+        increases effective RPO by 30 minutes. Check AWS Backup console → Jobs.
+      MetricName: NumberOfBackupJobsFailed
+      Namespace: AWS/Backup
+      Dimensions:
+        - Name: BackupVaultName
+          Value: !Ref BackupVault
+      Statistic: Sum
+      Period: 1800
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${SNSStackName}-TopicArn
+
+  CopyFailureAlarm:
+    Condition: IsEnableBackup
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-docdb-copy-failures
+      AlarmDescription: >-
+        One or more DocDB Elastic cross-region copy jobs to DR region failed.
+        DR recovery points may be stale — verify the DR vault has recent snapshots.
+      MetricName: NumberOfCopyJobsFailed
+      Namespace: AWS/Backup
+      Dimensions:
+        - Name: BackupVaultName
+          Value: !Ref BackupVault
+      Statistic: Sum
+      Period: 1800
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${SNSStackName}-TopicArn
+
 Outputs:
   EcrName:
     Description: DNS name of the Application Load Balancer
@@ -329,5 +557,25 @@ Outputs:
     Value: !GetAtt DocumentDBStack.Outputs.DocuDBElasticSecurityGroup
     Export:
       Name: !Sub ${AWS::StackName}-DocuDBElasticSecurityGroup
-  
-  
+
+  BackupVaultName:
+    Condition: IsEnableBackup
+    Description: DocDB Elastic backup vault name in source region.
+    Value: !Ref BackupVault
+    Export:
+      Name: !Sub ${AWS::StackName}-BackupVaultName
+
+  BackupVaultArn:
+    Condition: IsEnableBackup
+    Description: DocDB Elastic backup vault ARN — use as docdb_backup_vault_name in dr-failover-v2 input.
+    Value: !GetAtt BackupVault.BackupVaultArn
+    Export:
+      Name: !Sub ${AWS::StackName}-BackupVaultArn
+
+  BackupRoleArn:
+    Condition: IsEnableBackup
+    Description: IAM role ARN for DocDB Elastic backup and restore operations.
+    Value: !GetAtt BackupRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-BackupRoleArn
+
