@@ -1,0 +1,247 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  PCHC DR DNS Failover Runbook — Step 1: Health Check Lambda (PCHCDR-56).
+  Verifies all PCHC apps are healthy on DR ALBs before the DNS cutover
+  approval gate. Reads ALB DNS names from an SSM Parameter Store path written
+  by the dr-failover workflow, then HTTP GETs the health check path on each app.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - OrgName
+          - EnvName
+      - Label:
+          default: DR Configuration
+        Parameters:
+          - DRRegion
+          - AlbDnsMapParameterPath
+          - HealthCheckPath
+      - Label:
+          default: Network
+        Parameters:
+          - VpcId
+          - SubnetIds
+      - Label:
+          default: Logging
+        Parameters:
+          - LogRetentionDays
+
+    ParameterLabels:
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      DRRegion:
+        default: DR Region
+      AlbDnsMapParameterPath:
+        default: SSM Parameter Path — ALB DNS Map
+      HealthCheckPath:
+        default: Health Check Path
+      VpcId:
+        default: VPC ID (for internal ALB access)
+      SubnetIds:
+        default: Subnet IDs (comma-separated)
+      LogRetentionDays:
+        default: CloudWatch Log Retention (days)
+
+Parameters:
+
+  OrgName:
+    Description: Organization name prefix used in resource names.
+    Type: String
+    Default: pchc
+
+  EnvName:
+    Description: DR environment name (e.g. prddr).
+    Type: String
+    Default: prddr
+
+  DRRegion:
+    Description: AWS region where DR failover stacks are deployed.
+    Type: String
+    Default: us-west-2
+    AllowedValues:
+      - us-east-2
+      - us-west-2
+
+  AlbDnsMapParameterPath:
+    Description: >
+      SSM Parameter Store path holding a JSON object that maps app names to
+      their DR ALB DNS names. Written by the dr-failover workflow after
+      deploying failover stacks. Example value:
+      {"pesonet":"internal-xxx.us-west-2.elb.amazonaws.com","pddts":"..."}
+    Type: String
+    Default: /pchc/dr/prddr/alb-dns-map
+
+  HealthCheckPath:
+    Description: HTTP path to call on each app ALB.
+    Type: String
+    Default: /health
+
+  VpcId:
+    Description: >
+      VPC ID in the DR region. Required if app ALBs are internal-facing.
+      Leave blank to deploy without VPC config (only if ALBs are internet-facing).
+    Type: String
+    Default: ''
+
+  SubnetIds:
+    Description: >
+      Comma-separated private subnet IDs in the DR region. Required when VpcId is set.
+    Type: String
+    Default: ''
+
+  LogRetentionDays:
+    Description: Number of days to retain Lambda CloudWatch logs.
+    Type: Number
+    Default: 30
+    AllowedValues:
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 180
+      - 365
+
+Conditions:
+
+  HasVpcConfig: !Not
+    - !Equals
+      - !Ref VpcId
+      - ''
+
+Resources:
+
+  ####
+  # IAM
+  ####
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+        - PolicyName: ReadAlbDnsMap
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter${AlbDnsMapParameterPath}
+        - PolicyName: VpcAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                Resource: '*'
+
+  ####
+  # CloudWatch Logs
+  ####
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}
+      RetentionInDays: !Ref LogRetentionDays
+
+  ####
+  # Lambda
+  ####
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaLogGroup
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}
+      Description: >
+        DR health check — reads ALB DNS names from SSM Parameter Store and
+        HTTP GETs the health check path on each app in the DR region.
+        Returns ok if all apps return 200; raises an exception otherwise.
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 120
+      VpcConfig: !If
+        - HasVpcConfig
+        - SubnetIds: !Split [',', !Ref SubnetIds]
+          SecurityGroupIds: []
+        - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          ALB_DNS_MAP_PARAMETER: !Ref AlbDnsMapParameterPath
+          HEALTH_CHECK_PATH: !Ref HealthCheckPath
+          DR_REGION: !Ref DRRegion
+      Code:
+        ZipFile: |
+          import json, os, urllib.request
+          import boto3
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+              ssm = boto3.client('ssm', region_name=os.environ['DR_REGION'])
+              resp = ssm.get_parameter(Name=os.environ['ALB_DNS_MAP_PARAMETER'])
+              alb_dns_map = json.loads(resp['Parameter']['Value'])
+
+              health_path = os.environ['HEALTH_CHECK_PATH']
+              failures = []
+
+              for app_name, alb_dns in alb_dns_map.items():
+                  url = f'http://{alb_dns}{health_path}'
+                  try:
+                      req = urllib.request.urlopen(url, timeout=10)
+                      if req.status == 200:
+                          logger.info(f'{app_name}: OK')
+                      else:
+                          failures.append(f'{app_name}: HTTP {req.status}')
+                  except Exception as e:
+                      failures.append(f'{app_name}: {e}')
+
+              if failures:
+                  raise Exception(f"Health check failed: {'; '.join(failures)}")
+
+              logger.info(f'All {len(alb_dns_map)} apps healthy')
+              return {'status': 'ok', 'checked': len(alb_dns_map)}
+
+Outputs:
+
+  LambdaFunctionArn:
+    Description: ARN of the health check Lambda — pass this to the SSM runbook.
+    Value: !GetAtt LambdaFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-LambdaArn
+
+  LambdaFunctionName:
+    Description: Name of the health check Lambda — use this to invoke manually for testing.
+    Value: !Ref LambdaFunction
+    Export:
+      Name: !Sub ${AWS::StackName}-LambdaName
