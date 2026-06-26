@@ -1,0 +1,968 @@
+AWSTemplateFormatVersion: 2010-09-09
+# CICS-DEDICATED DR Failover engine — derived from dr/dr-failover-v2.yaml.
+#
+# Why a dedicated version (vs. the app-agnostic dr-failover-v2.yaml):
+#   * CICS is a SINGLE monolithic stack (cics.yaml). There are no child app-server
+#     stacks to iterate — so the ecs_app_group / prereq / parallel_stacks machinery
+#     is removed.
+#   * CICS has TWO databases: cics (DBStack) and cicsfe (DBFEStack). This engine
+#     PITR-restores BOTH and updates BOTH DR secrets. The generic engine restores one.
+#   * CICS uses hard-coded SIOS/Windows AMIs and no Redshift — the Discover AMI /
+#     Redshift logic is removed.
+#   * CICS file system is FSx for OpenZFS (not EFS) — EFS/AWS-Backup restore removed.
+#     FSx restore is handled out of band (see cics/README.md §"DR FSx").
+#   * CICS app servers read the DB endpoint from the DR secret (DB_HOST), NOT a
+#     PITRDBEndpoint stack parameter — so the engine writes the restored endpoint into
+#     DRDBSecret / DRDBFESecret via update_secrets before the app stack update.
+#   * Adds an explicit Route53 cutover to the DR ALB (cics/README.md §"Option B").
+#
+# Lambda actions: discover | pitr_restore | check_db_status | update_secrets |
+#   update_stack | check_stack_status | dns_cutover | notify
+#
+# NETWORK STACK: at failover the DR network stack is scaled up via four flags (NOT the
+# DeployPaidResources master switch, which stays at its previous value):
+#   CreateJumpHost=true, CreateMultipleNat=true, CreateVpcEndpoint=true, S3GatewayVpcEndpoint=true
+# This brings up the jump host, a NAT instance per AZ (NatInstance2/3 — the existing
+# NatInstance1 is unaffected), the VPC interface endpoints, and the S3 gateway endpoint.
+# NatInstanceOrGateway is left untouched (NAT stays instance-based).
+# Caveat: the update uses TemplateURL, which re-resolves NatInstanceAMI (SSM al2023-latest);
+# if a newer AL2023 AMI has been published, NatInstance1 may be replaced. Pin NatInstanceAMI
+# to a fixed AMI id in the network stack if you must avoid that during failover.
+#
+# State machine input payload (supply ALL keys; use "" for the ones a path doesn't need):
+#   {
+#     "use_pitr":                 true,                      # true=PITR, false=snapshot
+#     "network_stack_name":       "pchc-<env>-<rgn>-cics-network",
+#     "network_template_url":     "https://.../common/network.yaml",
+#     "app_stack_name":           "pchc-productiondr-<rgn>-cics",
+#     "sns_topic_arn":            "<SNS topic ARN>",
+#
+#     # ── main DB (cics) ──
+#     "db_instance_identifier":   "<live-region cics DB id>",
+#     "pitr_target_identifier":   "<new cics PITR instance id — must not exist>",
+#     "pitr_subnet_group":        "<DBStandbySubnetGroup name>",
+#     "pitr_security_group_id":   "<DB SG id for the restored cics instance>",
+#     "dr_db_secret_arn":         "<DRDBSecret ARN>",
+#     "pitr_endpoint_ssm_path":   "/pchc/productiondr/cics/pitr-db-endpoint",
+#     "snapshot_identifier":      "",                        # snapshot path only
+#     "db_master_password":       "",                        # snapshot path only (blank => from secret)
+#
+#     # ── front-end DB (cicsfe) ──
+#     "db_fe_instance_identifier":  "<live-region cicsfe DB id>",
+#     "pitr_fe_target_identifier":  "<new cicsfe PITR instance id — must not exist>",
+#     "pitr_fe_subnet_group":       "<DBFEStandbySubnetGroup name>",
+#     "pitr_fe_security_group_id":  "<DB SG id for the restored cicsfe instance>",
+#     "dr_db_fe_secret_arn":        "<DRDBFESecret ARN>",
+#     "pitr_fe_endpoint_ssm_path":  "/pchc/productiondr/cicsfe/pitr-db-endpoint",
+#     "snapshot_identifier_fe":     "",                      # snapshot path only
+#     "db_fe_master_password":      "",                      # snapshot path only (blank => from secret)
+#
+#     # ── DNS cutover (Route53) ──
+#     "dns_hosted_zone_id":       "<client public hosted zone id>",
+#     "dns_record_name":          "cics.pchcdev.com",        # FQDN to repoint
+#     "dns_alb_dns_name":         "",                        # optional — explicit DR ALB DNS name
+#     "dns_alb_hosted_zone_id":   "",                        # optional — explicit DR ALB canonical zone
+#     "dns_alb_name_contains":    "productiondr-...-cics"     # used to auto-discover the DR ALB if the two above are blank
+#   }
+#
+# NOTE: cics.yaml's Outputs: are intentionally commented out, so the standby
+# subnet-group names, DB SG ids, and DR secret ARNs above must be supplied
+# explicitly in the payload — they are NOT read from app-stack exports.
+Description: >-
+  CICS-dedicated DR Failover engine. Single-stack, dual-database (cics + cicsfe)
+  PITR/snapshot restore with Route53 cutover to the DR ALB. All app-specific
+  config is passed via state machine input at invocation time.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - Name
+          - OrgName
+      - Label:
+          default: Configuration
+        Parameters:
+          - LogRetentionDays
+          - NetworkTemplateUrl
+
+    ParameterLabels:
+      Name:
+        default: Stack / Function Name
+      OrgName:
+        default: Organization Name
+      LogRetentionDays:
+        default: CloudWatch Log Retention (days)
+      NetworkTemplateUrl:
+        default: Default Network Stack Template URL (S3) — can be overridden per-invocation in the event payload
+
+Parameters:
+
+  Name:
+    Description: Unique identifier used in resource names.
+    Type: String
+    Default: cics-dr-failover
+
+  OrgName:
+    Description: Organization name prefix (e.g. pchc).
+    Type: String
+    Default: pchc
+
+  LogRetentionDays:
+    Description: Number of days to retain Lambda and Step Functions CloudWatch logs.
+    Type: Number
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+  NetworkTemplateUrl:
+    Description: |
+      Default S3 URL for the network stack template (common/network.yaml).
+      Bypasses the 51,200-byte TemplateBody API limit on network stack updates.
+      Can be overridden per-invocation by passing network_template_url in the state machine input.
+    Type: String
+    Default: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml
+
+Resources:
+
+####
+# IAM
+####
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-sfn-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaAndLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt LambdaFunction.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+####
+# CloudWatch Logs
+####
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/states/${AWS::StackName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+####
+# Lambda
+####
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}'
+      Description: >-
+        CICS DR Failover engine worker. Actions: discover | pitr_restore |
+        check_db_status | update_secrets | update_stack | check_stack_status |
+        dns_cutover | notify. All app config is read from the event payload.
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          DEFAULT_NETWORK_TEMPLATE_URL: !Ref NetworkTemplateUrl
+      Code:
+        ZipFile: |
+          import logging
+          import os
+          import json
+          import boto3
+          from botocore.exceptions import ClientError
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          TERMINAL_STATES = {
+              'CREATE_COMPLETE', 'UPDATE_COMPLETE',
+              'UPDATE_ROLLBACK_COMPLETE', 'UPDATE_ROLLBACK_FAILED',
+              'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED',
+              'DELETE_COMPLETE', 'DELETE_FAILED', 'CREATE_FAILED',
+          }
+          ROLLBACK_STATES = {
+              'UPDATE_ROLLBACK_COMPLETE', 'UPDATE_ROLLBACK_FAILED',
+              'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED',
+              'DELETE_FAILED', 'CREATE_FAILED',
+          }
+
+          def handler(event, context):
+              action = event.get('action', '')
+              if action == 'discover':            return _discover(event)
+              if action == 'pitr_restore':        return _pitr_restore(event)
+              if action == 'check_db_status':     return _check_db_status(event)
+              if action == 'update_secrets':      return _update_secrets(event)
+              if action == 'update_stack':        return _update_stack_action(event)
+              if action == 'check_stack_status':  return _check_stack_status(event)
+              if action == 'dns_cutover':         return _dns_cutover(event)
+              if action == 'notify':              return _notify(event)
+              raise ValueError(f'Unknown action: {action!r}')
+
+
+          # ── discover (snapshot path) ──────────────────────────────────────────
+          # Resolves the latest available snapshot for the cics + cicsfe source DBs
+          # and fetches master passwords from the DR secrets when not supplied.
+          # Not used on the PITR path.
+
+          def _discover(event):
+              region          = os.environ['AWS_REGION']
+              main_db_id      = event.get('db_instance_identifier', '')
+              fe_db_id        = event.get('db_fe_instance_identifier', '')
+              snapshot_id     = event.get('snapshot_identifier', '')
+              snapshot_id_fe  = event.get('snapshot_identifier_fe', '')
+              db_password     = event.get('db_master_password', '')
+              db_fe_password  = event.get('db_fe_master_password', '')
+              secret_arn      = event.get('dr_db_secret_arn', '')
+              fe_secret_arn   = event.get('dr_db_fe_secret_arn', '')
+
+              if not snapshot_id and main_db_id:
+                  logger.info(f'Discovering snapshot for cics DB: {main_db_id}')
+                  snapshot_id = _find_latest_snapshot(region, main_db_id)
+                  logger.info(f'cics snapshot: {snapshot_id}')
+              if not snapshot_id_fe and fe_db_id:
+                  logger.info(f'Discovering snapshot for cicsfe DB: {fe_db_id}')
+                  snapshot_id_fe = _find_latest_snapshot(region, fe_db_id)
+                  logger.info(f'cicsfe snapshot: {snapshot_id_fe}')
+
+              if not db_password and secret_arn:
+                  db_password = _fetch_db_password(region, secret_arn)
+              if not db_fe_password and fe_secret_arn:
+                  db_fe_password = _fetch_db_password(region, fe_secret_arn)
+
+              return {
+                  'snapshot_identifier':     snapshot_id,
+                  'snapshot_identifier_fe':  snapshot_id_fe,
+                  'db_master_password':      db_password,
+                  'db_fe_master_password':   db_fe_password,
+              }
+
+
+          # ── pitr_restore ──────────────────────────────────────────────────────
+
+          def _find_automated_backup_arn(rds, db_instance_identifier):
+              resp    = rds.describe_db_instance_automated_backups(
+                  DBInstanceIdentifier=db_instance_identifier
+              )
+              backups = resp.get('DBInstanceAutomatedBackups', [])
+              if not backups:
+                  raise Exception(
+                      f'No automated backups found for {db_instance_identifier} in this region. '
+                      f'Ensure EnableCrossRegionBackupReplication=true is set in cics.yaml '
+                      f'and replication has completed at least one backup cycle.'
+                  )
+              available = [b for b in backups if b.get('Status') in ('replicating', 'retained')]
+              if not available:
+                  statuses = [b.get('Status') for b in backups]
+                  raise Exception(
+                      f'No replicating/retained automated backup for {db_instance_identifier}. '
+                      f'Found statuses: {statuses}. Backup replication may still be initialising.'
+                  )
+              return available[0]['DBInstanceAutomatedBackupsArn']
+
+          def _pitr_restore(event):
+              """
+              Cross-region PITR restore using SourceDBInstanceAutomatedBackupsArn.
+              SourceDBInstanceIdentifier only works for same-region restores — for
+              cross-region we must supply the replicated backup ARN in the DR region.
+              """
+              region    = os.environ['AWS_REGION']
+              source_id  = event.get('db_instance_identifier', '')
+              target_id  = event.get('pitr_target_identifier', '')
+              subnet_grp = event.get('pitr_subnet_group', '')
+              sg_id      = event.get('pitr_security_group_id', '')
+
+              if not source_id or not target_id:
+                  raise ValueError('db_instance_identifier and pitr_target_identifier are required for PITR restore.')
+
+              rds        = boto3.client('rds', region_name=region)
+              backup_arn = _find_automated_backup_arn(rds, source_id)
+              logger.info(f'Using automated backup ARN: {backup_arn}')
+
+              kwargs = dict(
+                  SourceDBInstanceAutomatedBackupsArn=backup_arn,
+                  TargetDBInstanceIdentifier=target_id,
+                  UseLatestRestorableTime=True,
+                  MultiAZ=False,
+                  PubliclyAccessible=False,
+                  AutoMinorVersionUpgrade=True,
+                  Tags=[
+                      {'Key': 'Environment', 'Value': 'DR'},
+                      {'Key': 'ManagedBy',   'Value': 'cics-dr-failover'},
+                  ],
+              )
+              if subnet_grp:
+                  kwargs['DBSubnetGroupName'] = subnet_grp
+              if sg_id:
+                  kwargs['VpcSecurityGroupIds'] = [sg_id]
+
+              logger.info(f'PITR restore: {source_id} -> {target_id}')
+              try:
+                  rds.restore_db_instance_to_point_in_time(**kwargs)
+              except ClientError as e:
+                  if 'already exists' in str(e):
+                      logger.warning(f'{target_id} already exists — assuming in-progress restore.')
+                  else:
+                      raise
+              return {'pitr_target_identifier': target_id}
+
+
+          # ── check_db_status ───────────────────────────────────────────────────
+
+          def _check_db_status(event):
+              region    = os.environ['AWS_REGION']
+              target_id = event.get('pitr_target_identifier', '')
+              rds = boto3.client('rds', region_name=region)
+              resp     = rds.describe_db_instances(DBInstanceIdentifier=target_id)
+              instance = resp['DBInstances'][0]
+              status   = instance['DBInstanceStatus']
+              endpoint = instance.get('Endpoint', {}).get('Address', '')
+              port     = instance.get('Endpoint', {}).get('Port', 1433)  # SQL Server
+              available = status == 'available'
+              logger.info(f'DB {target_id}: status={status} endpoint={endpoint}')
+              return {
+                  'pitr_target_identifier': target_id,
+                  'db_status':    status,
+                  'db_available': available,
+                  'db_endpoint':  endpoint,
+                  'db_port':      port,
+              }
+
+
+          # ── update_secrets ────────────────────────────────────────────────────
+          # CICS app servers read DB_HOST from the DR secret, so the restored PITR
+          # endpoint is written here before the app stack update.
+
+          def _update_secrets(event):
+              region      = os.environ['AWS_REGION']
+              db_endpoint = event.get('db_endpoint', '')
+              secret_arn  = event.get('dr_db_secret_arn', '')
+              ssm_path    = event.get('pitr_endpoint_ssm_path', '')
+
+              if not db_endpoint:
+                  raise ValueError('db_endpoint is required — check_db_status must succeed first.')
+
+              if secret_arn:
+                  sm   = boto3.client('secretsmanager', region_name=region)
+                  resp = sm.get_secret_value(SecretId=secret_arn)
+                  secret = json.loads(resp['SecretString'])
+                  secret['DB_HOST'] = db_endpoint
+                  sm.put_secret_value(SecretId=secret_arn, SecretString=json.dumps(secret))
+                  logger.info(f'Updated secret {secret_arn} with endpoint {db_endpoint}')
+
+              if ssm_path:
+                  ssm = boto3.client('ssm', region_name=region)
+                  ssm.put_parameter(Name=ssm_path, Value=db_endpoint, Type='String', Overwrite=True)
+                  logger.info(f'Updated SSM {ssm_path} with endpoint {db_endpoint}')
+
+              return {'secrets_updated': True, 'db_endpoint': db_endpoint}
+
+
+          # ── update_stack ──────────────────────────────────────────────────────
+
+          def _update_stack_action(event):
+              region      = os.environ['AWS_REGION']
+              stack_name  = event.get('stack_name', '')
+              stack_type  = event.get('stack_type', 'app')   # 'network' or 'app'
+              extra       = event.get('extra_params', {})
+              template_url = event.get('network_template_url',
+                                       os.environ.get('DEFAULT_NETWORK_TEMPLATE_URL', ''))
+
+              cf = boto3.client('cloudformation', region_name=region)
+              logger.info(f'Updating stack: {stack_name} (type={stack_type})')
+
+              if stack_type == 'network':
+                  _cfn_update(cf, stack_name, extra, template_url=template_url or None)
+              else:
+                  _cfn_update(cf, stack_name, extra)  # UsePreviousTemplate — avoids 51200-byte TemplateBody limit
+
+              return {'stack_name': stack_name, 'submitted': True}
+
+
+          # ── check_stack_status ────────────────────────────────────────────────
+
+          def _check_stack_status(event):
+              region     = os.environ['AWS_REGION']
+              stack_name = event.get('stack_name', '')
+              cf   = boto3.client('cloudformation', region_name=region)
+              resp = cf.describe_stacks(StackName=stack_name)
+              status = resp['Stacks'][0]['StackStatus']
+              complete = status in TERMINAL_STATES
+              rollback = status in ROLLBACK_STATES
+              logger.info(f'Stack {stack_name}: {status}')
+              return {
+                  'stack_name':     stack_name,
+                  'stack_status':   status,
+                  'stack_complete': complete,
+                  'stack_rollback': rollback,
+              }
+
+
+          # ── dns_cutover ───────────────────────────────────────────────────────
+          # Single-owner Route53 cutover (cics/README.md §"Option B"). UPSERTs the
+          # hostname alias to the DR ALB. ALB target is taken from the payload, or
+          # auto-discovered in the DR region by name/DNS substring.
+
+          def _dns_cutover(event):
+              region      = os.environ['AWS_REGION']
+              zone_id     = event.get('dns_hosted_zone_id', '')
+              record_name = event.get('dns_record_name', '')
+              alb_dns     = event.get('dns_alb_dns_name', '')
+              alb_zone    = event.get('dns_alb_hosted_zone_id', '')
+
+              if not zone_id or not record_name:
+                  logger.info('dns_hosted_zone_id / dns_record_name not provided — skipping DNS cutover.')
+                  return {'dns_cutover': False, 'reason': 'no dns inputs'}
+
+              if not alb_dns or not alb_zone:
+                  name_contains = event.get('dns_alb_name_contains', '')
+                  if not name_contains:
+                      raise ValueError(
+                          'Provide either dns_alb_dns_name + dns_alb_hosted_zone_id, '
+                          'or dns_alb_name_contains to auto-discover the DR ALB.'
+                      )
+                  alb_dns, alb_zone = _find_alb(region, name_contains)
+                  logger.info(f'Discovered DR ALB: dns={alb_dns} zone={alb_zone}')
+
+              name = record_name if record_name.endswith('.') else record_name + '.'
+              r53  = boto3.client('route53')
+              r53.change_resource_record_sets(
+                  HostedZoneId=zone_id,
+                  ChangeBatch={
+                      'Comment': 'CICS DR failover cutover — point hostname at DR ALB',
+                      'Changes': [{
+                          'Action': 'UPSERT',
+                          'ResourceRecordSet': {
+                              'Name': name,
+                              'Type': 'A',
+                              'AliasTarget': {
+                                  'HostedZoneId': alb_zone,
+                                  'DNSName': alb_dns,
+                                  'EvaluateTargetHealth': False,
+                              },
+                          },
+                      }],
+                  },
+              )
+              logger.info(f'DNS cutover: {name} -> {alb_dns} (alias zone {alb_zone})')
+              return {'dns_cutover': True, 'record_name': name, 'alb_dns_name': alb_dns}
+
+
+          # ── notify ────────────────────────────────────────────────────────────
+
+          def _notify(event):
+              topic   = event.get('sns_topic_arn', '')
+              subject = event.get('subject', 'CICS DR Failover Notification')
+              message = event.get('message', '')
+              if not topic:
+                  logger.info('No sns_topic_arn provided — skipping notification.')
+                  return {'notified': False}
+              try:
+                  boto3.client('sns').publish(TopicArn=topic, Subject=subject, Message=message)
+                  logger.info(f'SNS notification sent: {subject}')
+              except Exception:
+                  logger.warning('SNS publish failed', exc_info=True)
+              return {'notified': True}
+
+
+          # ── helpers ───────────────────────────────────────────────────────────
+
+          def _fetch_db_password(region, secret_arn):
+              sm   = boto3.client('secretsmanager', region_name=region)
+              resp = sm.get_secret_value(SecretId=secret_arn)
+              secret = json.loads(resp['SecretString'])
+              pw = secret.get('DB_ROOT_PASSWORD', '')
+              if not pw:
+                  raise Exception(f'DB_ROOT_PASSWORD not in secret: {secret_arn}')
+              return pw
+
+          def _find_latest_snapshot(region, db_id):
+              rds = boto3.client('rds', region_name=region)
+              for snap_type in ['manual', 'automated']:
+                  resp = rds.describe_db_snapshots(DBInstanceIdentifier=db_id, SnapshotType=snap_type)
+                  snaps = [s for s in resp.get('DBSnapshots', []) if s.get('Status') == 'available']
+                  if snaps:
+                      snaps.sort(key=lambda x: x['SnapshotCreateTime'], reverse=True)
+                      return snaps[0]['DBSnapshotArn']
+              raise Exception(f'No available snapshots for: {db_id}')
+
+          def _find_alb(region, name_contains):
+              elbv2 = boto3.client('elbv2', region_name=region)
+              needle = name_contains.lower()
+              matches = []
+              paginator = elbv2.get_paginator('describe_load_balancers')
+              for page in paginator.paginate():
+                  for lb in page.get('LoadBalancers', []):
+                      hay = (lb.get('LoadBalancerName', '') + ' ' + lb.get('DNSName', '')).lower()
+                      if needle in hay:
+                          matches.append(lb)
+              if not matches:
+                  raise Exception(f'No DR ALB matched dns_alb_name_contains={name_contains!r} in {region}.')
+              if len(matches) > 1:
+                  names = [m.get('LoadBalancerName') for m in matches]
+                  logger.warning(f'Multiple ALBs matched {name_contains!r}: {names} — using the first.')
+              lb = matches[0]
+              return lb['DNSName'], lb['CanonicalHostedZoneId']
+
+          def _get_current_params(cf, stack_name):
+              resp = cf.describe_stacks(StackName=stack_name)
+              return {p['ParameterKey']: p['ParameterValue']
+                      for p in resp['Stacks'][0].get('Parameters', [])}
+
+          def _cfn_update(cf, stack_name, extra_params, template_url=None):
+              current = _get_current_params(cf, stack_name)
+              params  = []
+              for key in current:
+                  if key in extra_params:
+                      params.append({'ParameterKey': key, 'ParameterValue': str(extra_params[key])})
+                  else:
+                      params.append({'ParameterKey': key, 'UsePreviousValue': True})
+              for key in extra_params:
+                  if key not in current:
+                      logger.warning(f'[UPDATE_STACK] Skipping {key!r} — not a parameter in the deployed template of {stack_name}')
+
+              caps = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
+              if template_url:
+                  kwargs = dict(StackName=stack_name, TemplateURL=template_url,
+                                Parameters=params, Capabilities=caps)
+              else:
+                  kwargs = dict(StackName=stack_name, UsePreviousTemplate=True,
+                                Parameters=params, Capabilities=caps)
+
+              try:
+                  cf.update_stack(**kwargs)
+                  logger.info(f'[UPDATE_STACK] Submitted | stack={stack_name}')
+              except ClientError as e:
+                  code = e.response['Error']['Code']
+                  msg  = e.response['Error']['Message']
+                  if code == 'ValidationError' and 'No updates are to be performed' in msg:
+                      logger.info(f'[UPDATE_STACK] No changes needed | stack={stack_name}')
+                      return
+                  raise
+
+####
+# Step Functions — STANDARD (long-running, durable)
+####
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: StateMachineLogGroup
+    Properties:
+      StateMachineName: !Sub '${AWS::StackName}'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "CICS DR Failover — PITR (use_pitr=true) or snapshot (use_pitr=false). Scales up the DR network stack (jump host, NAT-per-AZ, VPC endpoints, S3 gateway), restores cics + cicsfe, updates both DR secrets, updates the single CICS app stack, then cuts DNS over to the DR ALB.",
+          "StartAt": "UpdateNetworkStack",
+          "States": {
+
+            "UpdateNetworkStack": {
+              "Comment": "Scale up the DR network: flip CreateJumpHost, CreateMultipleNat, CreateVpcEndpoint, S3GatewayVpcEndpoint to true. DeployPaidResources is left at its previous value.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                 "update_stack",
+                "stack_type":             "network",
+                "stack_name.$":           "$.network_stack_name",
+                "network_template_url.$": "$.network_template_url",
+                "extra_params": {
+                  "CreateJumpHost":       "true",
+                  "CreateMultipleNat":    "true",
+                  "CreateVpcEndpoint":    "true",
+                  "S3GatewayVpcEndpoint": "true"
+                }
+              },
+              "ResultPath": "$.network_update",
+              "Next": "WaitNetworkStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitNetworkStack": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckNetworkStack"
+            },
+
+            "CheckNetworkStack": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "check_stack_status",
+                "stack_name.$": "$.network_stack_name"
+              },
+              "ResultPath": "$.network_status",
+              "Next": "NetworkStackDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "NetworkStackDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.network_status.stack_rollback", "BooleanEquals": true, "Next": "FailoverFailed"},
+                {"Variable": "$.network_status.stack_complete", "BooleanEquals": true, "Next": "RouteByMode"}
+              ],
+              "Default": "WaitNetworkStack"
+            },
+
+            "RouteByMode": {
+              "Comment": "PITR path (restore both DBs out-of-band) or snapshot path (let CFN restore both nested DBs).",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.use_pitr", "BooleanEquals": true, "Next": "PITRRestoreMain"}
+              ],
+              "Default": "DiscoverSnapshots"
+            },
+
+            "PITRRestoreMain": {
+              "Comment": "PITR restore of the main cics DB (~5 min RPO).",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                   "pitr_restore",
+                "db_instance_identifier.$": "$.db_instance_identifier",
+                "pitr_target_identifier.$": "$.pitr_target_identifier",
+                "pitr_subnet_group.$":      "$.pitr_subnet_group",
+                "pitr_security_group_id.$": "$.pitr_security_group_id"
+              },
+              "ResultPath": "$.pitr_main",
+              "Next": "WaitPITRMain",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 2, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitPITRMain": {
+              "Type": "Wait",
+              "Seconds": 90,
+              "Next": "CheckPITRMain"
+            },
+
+            "CheckPITRMain": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                   "check_db_status",
+                "pitr_target_identifier.$": "$.pitr_main.pitr_target_identifier"
+              },
+              "ResultPath": "$.pitr_main_status",
+              "Next": "PITRMainAvailable",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 30, "MaxAttempts": 5, "BackoffRate": 1.5}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "PITRMainAvailable": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.pitr_main_status.db_available", "BooleanEquals": true, "Next": "UpdateSecretsMain"}
+              ],
+              "Default": "WaitPITRMain"
+            },
+
+            "UpdateSecretsMain": {
+              "Comment": "Write the cics PITR endpoint into DRDBSecret (DB_HOST) + SSM.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                  "update_secrets",
+                "db_endpoint.$":           "$.pitr_main_status.db_endpoint",
+                "dr_db_secret_arn.$":      "$.dr_db_secret_arn",
+                "pitr_endpoint_ssm_path.$": "$.pitr_endpoint_ssm_path"
+              },
+              "ResultPath": "$.secrets_main",
+              "Next": "PITRRestoreFe",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "PITRRestoreFe": {
+              "Comment": "PITR restore of the front-end cicsfe DB.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                   "pitr_restore",
+                "db_instance_identifier.$": "$.db_fe_instance_identifier",
+                "pitr_target_identifier.$": "$.pitr_fe_target_identifier",
+                "pitr_subnet_group.$":      "$.pitr_fe_subnet_group",
+                "pitr_security_group_id.$": "$.pitr_fe_security_group_id"
+              },
+              "ResultPath": "$.pitr_fe",
+              "Next": "WaitPITRFe",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 2, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitPITRFe": {
+              "Type": "Wait",
+              "Seconds": 90,
+              "Next": "CheckPITRFe"
+            },
+
+            "CheckPITRFe": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                   "check_db_status",
+                "pitr_target_identifier.$": "$.pitr_fe.pitr_target_identifier"
+              },
+              "ResultPath": "$.pitr_fe_status",
+              "Next": "PITRFeAvailable",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 30, "MaxAttempts": 5, "BackoffRate": 1.5}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "PITRFeAvailable": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.pitr_fe_status.db_available", "BooleanEquals": true, "Next": "UpdateSecretsFe"}
+              ],
+              "Default": "WaitPITRFe"
+            },
+
+            "UpdateSecretsFe": {
+              "Comment": "Write the cicsfe PITR endpoint into DRDBFESecret (DB_HOST) + SSM.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                  "update_secrets",
+                "db_endpoint.$":           "$.pitr_fe_status.db_endpoint",
+                "dr_db_secret_arn.$":      "$.dr_db_fe_secret_arn",
+                "pitr_endpoint_ssm_path.$": "$.pitr_fe_endpoint_ssm_path"
+              },
+              "ResultPath": "$.secrets_fe",
+              "Next": "UpdateAppStackPITR",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "UpdateAppStackPITR": {
+              "Comment": "Update the CICS app stack with IsPITRMode=true — DBStack + DBFEStack suppressed; app servers read endpoints from the DR secrets.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "update_stack",
+                "stack_type":   "app",
+                "stack_name.$": "$.app_stack_name",
+                "extra_params": {
+                  "DeployPaidResources": "true",
+                  "IsPITRMode":          "true"
+                }
+              },
+              "ResultPath": "$.app_update",
+              "Next": "WaitAppStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "DiscoverSnapshots": {
+              "Comment": "Snapshot path — resolve latest snapshots + master passwords for cics + cicsfe.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                     "discover",
+                "db_instance_identifier.$":   "$.db_instance_identifier",
+                "db_fe_instance_identifier.$": "$.db_fe_instance_identifier",
+                "snapshot_identifier.$":      "$.snapshot_identifier",
+                "snapshot_identifier_fe.$":   "$.snapshot_identifier_fe",
+                "dr_db_secret_arn.$":         "$.dr_db_secret_arn",
+                "dr_db_fe_secret_arn.$":      "$.dr_db_fe_secret_arn",
+                "db_master_password.$":       "$.db_master_password",
+                "db_fe_master_password.$":    "$.db_fe_master_password"
+              },
+              "ResultPath": "$.discovered",
+              "Next": "UpdateAppStackSnapshot",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "UpdateAppStackSnapshot": {
+              "Comment": "Snapshot path — update app stack with both snapshot ids; CFN restores DBStack + DBFEStack inside the stack (~24h RPO).",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "update_stack",
+                "stack_type":   "app",
+                "stack_name.$": "$.app_stack_name",
+                "extra_params": {
+                  "DeployPaidResources":    "true",
+                  "IsPITRMode":             "false",
+                  "SnapshotIdentifier.$":   "$.discovered.snapshot_identifier",
+                  "DBMasterUserPassword.$": "$.discovered.db_master_password",
+                  "SnapshotIdentifierFe.$": "$.discovered.snapshot_identifier_fe",
+                  "DBFEMasterUserPassword.$": "$.discovered.db_fe_master_password"
+                }
+              },
+              "ResultPath": "$.app_update",
+              "Next": "WaitAppStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitAppStack": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckAppStack"
+            },
+
+            "CheckAppStack": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "check_stack_status",
+                "stack_name.$": "$.app_stack_name"
+              },
+              "ResultPath": "$.app_status",
+              "Next": "AppStackDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "AppStackDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.app_status.stack_rollback", "BooleanEquals": true, "Next": "FailoverFailed"},
+                {"Variable": "$.app_status.stack_complete", "BooleanEquals": true, "Next": "DNSCutover"}
+              ],
+              "Default": "WaitAppStack"
+            },
+
+            "DNSCutover": {
+              "Comment": "Repoint the CICS hostname at the DR ALB (single-owner UPSERT).",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                  "dns_cutover",
+                "dns_hosted_zone_id.$":    "$.dns_hosted_zone_id",
+                "dns_record_name.$":       "$.dns_record_name",
+                "dns_alb_dns_name.$":      "$.dns_alb_dns_name",
+                "dns_alb_hosted_zone_id.$": "$.dns_alb_hosted_zone_id",
+                "dns_alb_name_contains.$": "$.dns_alb_name_contains"
+              },
+              "ResultPath": "$.dns_result",
+              "Next": "NotifyComplete",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "NotifyComplete": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":         "notify",
+                "sns_topic_arn.$": "$.sns_topic_arn",
+                "subject":        "CICS DR Failover Complete",
+                "message":        "CICS DR failover completed. Network + app stack UPDATE_COMPLETE, cics + cicsfe restored, DNS cut over to DR ALB."
+              },
+              "ResultPath": "$.notify_result",
+              "Next": "Complete",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 1}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Complete", "ResultPath": "$.notify_error"}]
+            },
+
+            "Complete": {
+              "Type": "Succeed"
+            },
+
+            "FailoverFailed": {
+              "Type": "Fail",
+              "Error": "FailoverFailed",
+              "Cause": "CICS DR failover aborted — a step failed after retries. Check CloudWatch Logs and the Step Functions execution history."
+            }
+
+          }
+        }
+
+####
+# Outputs
+####
+
+Outputs:
+
+  StateMachineArn:
+    Description: ARN of the CICS DR Failover State Machine
+    Value: !Ref StateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineArn'
+
+  StateMachineName:
+    Description: Name of the CICS DR Failover State Machine
+    Value: !GetAtt StateMachine.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineName'
+
+  LambdaArn:
+    Description: ARN of the CICS DR Failover worker Lambda
+    Value: !GetAtt LambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+
+  LambdaName:
+    Description: Name of the CICS DR Failover worker Lambda
+    Value: !Ref LambdaFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaName'
+
+  LambdaLogGroupName:
+    Description: CloudWatch Log Group for the CICS DR Failover worker Lambda
+    Value: !Ref LambdaLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaLogGroup'
+
+  StateMachineLogGroupName:
+    Description: CloudWatch Log Group for the CICS DR Failover State Machine execution history
+    Value: !Ref StateMachineLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineLogGroup'
