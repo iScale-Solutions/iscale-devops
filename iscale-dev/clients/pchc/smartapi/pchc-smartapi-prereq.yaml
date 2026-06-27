@@ -33,11 +33,11 @@ Metadata:
         Parameters:
           - DRRegion
           - DRVaultName
-          - ThirtyMinScheduleExpression
+          - HourlyScheduleExpression
           - DailyScheduleExpression
-          - ThirtyMinRetentionDays
+          - HourlyRetentionDays
           - DailyRetentionDays
-          - DRThirtyMinRetentionDays
+          - DRHourlyRetentionDays
           - DRDailyRetentionDays
 
     ParameterLabels:
@@ -57,16 +57,16 @@ Metadata:
         default: DR Region
       DRVaultName:
         default: DR Backup Vault Name (must pre-exist in DR region)
-      ThirtyMinScheduleExpression:
-        default: 30-Minute Backup Schedule (cron)
+      HourlyScheduleExpression:
+        default: Hourly Backup Schedule (cron)
       DailyScheduleExpression:
         default: Daily Backup Schedule (cron)
-      ThirtyMinRetentionDays:
-        default: 30-Min Backup Retention in source region (days)
+      HourlyRetentionDays:
+        default: Hourly Backup Retention in source region (days)
       DailyRetentionDays:
         default: Daily Backup Retention in source region (days)
-      DRThirtyMinRetentionDays:
-        default: 30-Min Backup Retention in DR region (days)
+      DRHourlyRetentionDays:
+        default: Hourly Backup Retention in DR region (days)
       DRDailyRetentionDays:
         default: Daily Backup Retention in DR region (days)
 
@@ -171,18 +171,18 @@ Parameters:
     Type: String
     Default: Default
 
-  ThirtyMinScheduleExpression:
-    Description: Cron expression for the 30-minute incremental backup rule.
+  HourlyScheduleExpression:
+    Description: Cron expression for the hourly backup rule (AWS Backup minimum interval is 60 minutes).
     Type: String
-    Default: cron(0,30 * * * ? *)
+    Default: cron(0 * * * ? *)
 
   DailyScheduleExpression:
     Description: Cron expression for the daily backup rule (long-retention anchor).
     Type: String
     Default: cron(0 2 ? * * *)
 
-  ThirtyMinRetentionDays:
-    Description: Days to retain 30-minute recovery points in the source region. 2 days = 96 recovery points.
+  HourlyRetentionDays:
+    Description: Days to retain hourly recovery points in the source region. 2 days = 48 recovery points.
     Type: Number
     Default: 2
 
@@ -191,8 +191,8 @@ Parameters:
     Type: Number
     Default: 30
 
-  DRThirtyMinRetentionDays:
-    Description: Days to retain 30-minute recovery points in the DR region.
+  DRHourlyRetentionDays:
+    Description: Days to retain hourly recovery points in the DR region.
     Type: Number
     Default: 3
 
@@ -395,17 +395,17 @@ Resources:
       BackupPlan:
         BackupPlanName: !Sub ${AWS::StackName}-docdb-plan
         BackupPlanRule:
-          - RuleName: ThirtyMinBackup
+          - RuleName: HourlyBackup
             TargetBackupVault: !Ref BackupVault
-            ScheduleExpression: !Ref ThirtyMinScheduleExpression
-            StartWindowMinutes: 30
-            CompletionWindowMinutes: 60
+            ScheduleExpression: !Ref HourlyScheduleExpression
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 120
             Lifecycle:
-              DeleteAfterDays: !Ref ThirtyMinRetentionDays
+              DeleteAfterDays: !Ref HourlyRetentionDays
             CopyActions:
               - DestinationBackupVaultArn: !Sub arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${DRVaultName}
                 Lifecycle:
-                  DeleteAfterDays: !Ref DRThirtyMinRetentionDays
+                  DeleteAfterDays: !Ref DRHourlyRetentionDays
           - RuleName: DailyBackup
             TargetBackupVault: !Ref BackupVault
             ScheduleExpression: !Ref DailyScheduleExpression
@@ -475,8 +475,8 @@ Resources:
     Properties:
       AlarmName: !Sub ${AWS::StackName}-docdb-backup-failures
       AlarmDescription: >-
-        One or more DocDB Elastic backup jobs failed. Each missed 30-min job
-        increases effective RPO by 30 minutes. Check AWS Backup console → Jobs.
+        One or more DocDB Elastic backup jobs failed. Each missed hourly job
+        increases effective RPO by 1 hour. Check AWS Backup console → Jobs.
       MetricName: NumberOfBackupJobsFailed
       Namespace: AWS/Backup
       Dimensions:
