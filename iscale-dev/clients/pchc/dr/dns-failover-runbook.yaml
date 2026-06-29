@@ -156,6 +156,14 @@ Parameters:
     Type: String
     Default: '14400'
 
+  PropagationWaitSeconds:
+    Description: >
+      Seconds to sleep after Route 53 changes reach INSYNC, allowing recursive
+      resolver caches to expire before the all-clear fires. Set to the highest
+      DNS TTL in use across PCHC app records (default 300 = 5 minutes).
+    Type: Number
+    Default: 300
+
   LogRetentionDays:
     Description: Number of days to retain Lambda CloudWatch logs.
     Type: Number
@@ -340,6 +348,10 @@ Resources:
                   - route53:ChangeResourceRecordSets
                   - route53:ListResourceRecordSets
                 Resource: arn:aws:route53:::hostedzone/*
+              - Effect: Allow
+                Action:
+                  - route53:GetChange
+                Resource: arn:aws:route53:::change/*
 
   ####
   # CloudWatch Logs — Route 53 Failover Lambda
@@ -367,15 +379,16 @@ Resources:
       Handler: index.handler
       Role: !GetAtt Route53LambdaRole.Arn
       Runtime: python3.12
-      Timeout: 120
+      Timeout: 600
       Environment:
         Variables:
           ALB_DNS_MAP_PARAMETER: !Ref AlbDnsMapParameterPath
           HOSTED_ZONE_MAP_PARAMETER: !Ref HostedZoneMapParameterPath
           DR_REGION: !Ref DRRegion
+          PROPAGATION_WAIT_SECONDS: !Ref PropagationWaitSeconds
       Code:
         ZipFile: |
-          import json, os
+          import json, os, time
           import boto3
           import logging
 
@@ -417,18 +430,31 @@ Resources:
                   }
                   hz_changes.setdefault(hz_id, []).append(change)
 
+              change_ids = []
               for hz_id, change_list in hz_changes.items():
-                  r53.change_resource_record_sets(
+                  resp = r53.change_resource_record_sets(
                       HostedZoneId=hz_id,
                       ChangeBatch={
                           'Comment': f'DR failover DNS cutover — {len(change_list)} records',
                           'Changes': change_list
                       }
                   )
-                  logger.info(f'Updated {len(change_list)} records in hosted zone {hz_id}')
+                  change_ids.append(resp['ChangeInfo']['Id'])
+                  logger.info(f'Updated {len(change_list)} records in hosted zone {hz_id} (change {resp["ChangeInfo"]["Id"]})')
+
+              waiter = r53.get_waiter('resource_record_sets_changed')
+              for change_id in change_ids:
+                  logger.info(f'Waiting for Route 53 change {change_id} to reach INSYNC...')
+                  waiter.wait(Id=change_id, WaiterConfig={'Delay': 10, 'MaxAttempts': 30})
+                  logger.info(f'Change {change_id} is INSYNC')
+
+              wait_seconds = int(os.environ.get('PROPAGATION_WAIT_SECONDS', '300'))
+              logger.info(f'All changes INSYNC. Waiting {wait_seconds}s for resolver cache TTLs to expire...')
+              time.sleep(wait_seconds)
+              logger.info('Propagation wait complete.')
 
               total = sum(len(v) for v in hz_changes.values())
-              logger.info(f'Route 53 cutover complete: {total} records across {len(hz_changes)} hosted zones')
+              logger.info(f'Route 53 cutover complete: {total} records across {len(hz_changes)} hosted zones — all INSYNC and propagated')
               return {'status': 'ok', 'updated': total, 'hostedZones': len(hz_changes)}
 
   ####
