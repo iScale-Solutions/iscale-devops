@@ -14,8 +14,8 @@ This README exists to give Claude (and future readers) enough context to safely 
 | [cics-dr-vpc-peering.yaml](cics-dr-vpc-peering.yaml) | Cross-region VPC peering between the main CICS region and the DR region. Deployed twice — once as **Requester** (main) and once as **Accepter** (DR). |
 | [cics-vpn.yaml](cics-vpn.yaml) | AWS Client VPN endpoint peered into the CICS VPC. |
 | [cics-lambda-cron.yaml](cics-lambda-cron.yaml) | Standalone Lambda (Python 3.9) on a CRON schedule that queries the CICS RDS instance. Has its own VPC SG and S3 bucket. |
-| [cics-dr-failover.yaml](cics-dr-failover.yaml) | **CICS-dedicated DR failover engine** (Step Functions + Lambda). Forked from `dr/dr-failover-v2.yaml`: dual-DB (cics + cicsfe) PITR/snapshot restore + Route53 cutover, single app stack, no EFS/AMI/Redshift/ECS machinery. |
-| [CICS-DR-FAILOVER.md](CICS-DR-FAILOVER.md) | Runbook for `cics-dr-failover.yaml` — flow, **state machine input payload**, pre-flight, and trigger steps. |
+| [cics-dr-failover.yaml](cics-dr-failover.yaml) | **CICS-dedicated DR failover engine** (Step Functions + Lambda). Forked from `dr/dr-failover-v2.yaml`: network scale-up, dual-DB (cics + cicsfe) PITR/snapshot restore, force-start of `System=CICS` EC2 instances, and Route53 cutover. Single app stack; no EFS/AMI/Redshift/ECS machinery. |
+| [CICS-DR-FAILOVER.md](CICS-DR-FAILOVER.md) | Runbook for `cics-dr-failover.yaml` — flow, **deploy-time stack parameters** (stack names, DB ids, secret ARNs, SNS) vs. **per-invocation payload** (PITR/snapshot ids, DNS), pre-flight, and trigger steps. |
 
 ---
 

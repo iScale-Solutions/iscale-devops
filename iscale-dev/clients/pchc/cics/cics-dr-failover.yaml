@@ -17,7 +17,7 @@ AWSTemplateFormatVersion: 2010-09-09
 #   * Adds an explicit Route53 cutover to the DR ALB (cics/README.md §"Option B").
 #
 # Lambda actions: discover | pitr_restore | check_db_status | update_secrets |
-#   update_stack | check_stack_status | dns_cutover | notify
+#   update_stack | check_stack_status | start_instances | dns_cutover | notify
 #
 # NETWORK STACK: at failover the DR network stack is scaled up via four flags (NOT the
 # DeployPaidResources master switch, which stays at its previous value):
@@ -25,34 +25,30 @@ AWSTemplateFormatVersion: 2010-09-09
 # This brings up the jump host, a NAT instance per AZ (NatInstance2/3 — the existing
 # NatInstance1 is unaffected), the VPC interface endpoints, and the S3 gateway endpoint.
 # NatInstanceOrGateway is left untouched (NAT stays instance-based).
-# Caveat: the update uses TemplateURL, which re-resolves NatInstanceAMI (SSM al2023-latest);
-# if a newer AL2023 AMI has been published, NatInstance1 may be replaced. Pin NatInstanceAMI
-# to a fixed AMI id in the network stack if you must avoid that during failover.
+# Note: the update uses TemplateURL, which re-resolves NatInstanceAMI (SSM al2023-latest), so
+# NatInstance1 may be replaced on update. This is ACCEPTABLE BY DESIGN — the NAT instance is
+# treated as ephemeral (purely a NAT-gateway replacement), so recreation at failover is fine.
 #
-# State machine input payload (supply ALL keys; use "" for the ones a path doesn't need):
+# These are CloudFormation PARAMETERS (set once at stack deploy, NOT per-invocation):
+#   NetworkStackName, NetworkTemplateUrl, AppStackName, SnsTopicArn,
+#   DbInstanceIdentifier, DrDbSecretArn, DbFeInstanceIdentifier, DrDbFeSecretArn
+#
+# State machine input payload (per-invocation; supply ALL keys; use "" for the ones a path doesn't need):
 #   {
 #     "use_pitr":                 true,                      # true=PITR, false=snapshot
-#     "network_stack_name":       "pchc-<env>-<rgn>-cics-network",
-#     "network_template_url":     "https://.../common/network.yaml",
-#     "app_stack_name":           "pchc-productiondr-<rgn>-cics",
-#     "sns_topic_arn":            "<SNS topic ARN>",
 #
 #     # ── main DB (cics) ──
-#     "db_instance_identifier":   "<live-region cics DB id>",
 #     "pitr_target_identifier":   "<new cics PITR instance id — must not exist>",
 #     "pitr_subnet_group":        "<DBStandbySubnetGroup name>",
 #     "pitr_security_group_id":   "<DB SG id for the restored cics instance>",
-#     "dr_db_secret_arn":         "<DRDBSecret ARN>",
 #     "pitr_endpoint_ssm_path":   "/pchc/productiondr/cics/pitr-db-endpoint",
 #     "snapshot_identifier":      "",                        # snapshot path only
 #     "db_master_password":       "",                        # snapshot path only (blank => from secret)
 #
 #     # ── front-end DB (cicsfe) ──
-#     "db_fe_instance_identifier":  "<live-region cicsfe DB id>",
 #     "pitr_fe_target_identifier":  "<new cicsfe PITR instance id — must not exist>",
 #     "pitr_fe_subnet_group":       "<DBFEStandbySubnetGroup name>",
 #     "pitr_fe_security_group_id":  "<DB SG id for the restored cicsfe instance>",
-#     "dr_db_fe_secret_arn":        "<DRDBFESecret ARN>",
 #     "pitr_fe_endpoint_ssm_path":  "/pchc/productiondr/cicsfe/pitr-db-endpoint",
 #     "snapshot_identifier_fe":     "",                      # snapshot path only
 #     "db_fe_master_password":      "",                      # snapshot path only (blank => from secret)
@@ -66,8 +62,9 @@ AWSTemplateFormatVersion: 2010-09-09
 #   }
 #
 # NOTE: cics.yaml's Outputs: are intentionally commented out, so the standby
-# subnet-group names, DB SG ids, and DR secret ARNs above must be supplied
-# explicitly in the payload — they are NOT read from app-stack exports.
+# subnet-group names, DB SG ids, and the values now carried as parameters
+# (DR secret ARNs, DB identifiers, stack names) must be supplied explicitly —
+# they are NOT read from app-stack exports.
 Description: >-
   CICS-dedicated DR Failover engine. Single-stack, dual-database (cics + cicsfe)
   PITR/snapshot restore with Route53 cutover to the DR ALB. All app-specific
@@ -86,6 +83,16 @@ Metadata:
         Parameters:
           - LogRetentionDays
           - NetworkTemplateUrl
+      - Label:
+          default: Failover Targets (stacks / DBs / secrets / SNS)
+        Parameters:
+          - NetworkStackName
+          - AppStackName
+          - DbInstanceIdentifier
+          - DrDbSecretArn
+          - DbFeInstanceIdentifier
+          - DrDbFeSecretArn
+          - SnsTopicArn
 
     ParameterLabels:
       Name:
@@ -95,7 +102,21 @@ Metadata:
       LogRetentionDays:
         default: CloudWatch Log Retention (days)
       NetworkTemplateUrl:
-        default: Default Network Stack Template URL (S3) — can be overridden per-invocation in the event payload
+        default: Network Stack Template URL (S3)
+      NetworkStackName:
+        default: DR Network Stack Name
+      AppStackName:
+        default: DR CICS App Stack Name
+      DbInstanceIdentifier:
+        default: Source cics DB Identifier (live region)
+      DrDbSecretArn:
+        default: DR main-DB Secret ARN (DRDBSecret)
+      DbFeInstanceIdentifier:
+        default: Source cicsfe DB Identifier (live region)
+      DrDbFeSecretArn:
+        default: DR front-end-DB Secret ARN (DRDBFESecret)
+      SnsTopicArn:
+        default: Completion Notification SNS Topic ARN
 
 Parameters:
 
@@ -117,11 +138,39 @@ Parameters:
 
   NetworkTemplateUrl:
     Description: |
-      Default S3 URL for the network stack template (common/network.yaml).
+      S3 URL for the network stack template (common/network.yaml).
       Bypasses the 51,200-byte TemplateBody API limit on network stack updates.
-      Can be overridden per-invocation by passing network_template_url in the state machine input.
     Type: String
     Default: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml
+
+  NetworkStackName:
+    Description: Name of the DR network CloudFormation stack scaled up at failover.
+    Type: String
+
+  AppStackName:
+    Description: Name of the DR CICS application stack (cics.yaml) updated at failover.
+    Type: String
+
+  DbInstanceIdentifier:
+    Description: Live-region identifier of the main cics DB (source for PITR / snapshot discovery).
+    Type: String
+
+  DrDbSecretArn:
+    Description: ARN of the DR main-DB secret (DRDBSecret) whose DB_HOST is updated with the restored cics endpoint.
+    Type: String
+
+  DbFeInstanceIdentifier:
+    Description: Live-region identifier of the front-end cicsfe DB (source for PITR / snapshot discovery).
+    Type: String
+
+  DrDbFeSecretArn:
+    Description: ARN of the DR front-end-DB secret (DRDBFESecret) whose DB_HOST is updated with the restored cicsfe endpoint.
+    Type: String
+
+  SnsTopicArn:
+    Description: SNS topic ARN for the completion notification. Leave blank to skip notifications.
+    Type: String
+    Default: ''
 
 Resources:
 
@@ -202,7 +251,7 @@ Resources:
       Description: >-
         CICS DR Failover engine worker. Actions: discover | pitr_restore |
         check_db_status | update_secrets | update_stack | check_stack_status |
-        dns_cutover | notify. All app config is read from the event payload.
+        start_instances | dns_cutover | notify. All app config is read from the event payload.
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.12
@@ -241,6 +290,7 @@ Resources:
               if action == 'update_secrets':      return _update_secrets(event)
               if action == 'update_stack':        return _update_stack_action(event)
               if action == 'check_stack_status':  return _check_stack_status(event)
+              if action == 'start_instances':     return _start_instances(event)
               if action == 'dns_cutover':         return _dns_cutover(event)
               if action == 'notify':              return _notify(event)
               raise ValueError(f'Unknown action: {action!r}')
@@ -494,6 +544,30 @@ Resources:
               return {'dns_cutover': True, 'record_name': name, 'alb_dns_name': alb_dns}
 
 
+          # ── start_instances ───────────────────────────────────────────────────
+          # Force-start every EC2 instance carrying a tag (default System=CICS) in this
+          # (DR) region — e.g. instances left stopped by the start/stop schedule.
+          # Idempotent: only instances currently 'stopped' are started; already-running
+          # instances are left alone.
+
+          def _start_instances(event):
+              region  = os.environ['AWS_REGION']
+              tag_key = event.get('instance_tag_key', 'System')
+              tag_val = event.get('instance_tag_value', 'CICS')
+              ec2 = boto3.client('ec2', region_name=region)
+              resp = ec2.describe_instances(Filters=[
+                  {'Name': f'tag:{tag_key}',      'Values': [tag_val]},
+                  {'Name': 'instance-state-name', 'Values': ['stopped']},
+              ])
+              ids = [i['InstanceId'] for r in resp.get('Reservations', []) for i in r['Instances']]
+              if ids:
+                  ec2.start_instances(InstanceIds=ids)
+                  logger.info(f'Started {len(ids)} {tag_key}={tag_val} instance(s): {ids}')
+              else:
+                  logger.info(f'No stopped {tag_key}={tag_val} instances to start.')
+              return {'started_instance_ids': ids, 'started_count': len(ids)}
+
+
           # ── notify ────────────────────────────────────────────────────────────
 
           def _notify(event):
@@ -605,7 +679,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "CICS DR Failover — PITR (use_pitr=true) or snapshot (use_pitr=false). Scales up the DR network stack (jump host, NAT-per-AZ, VPC endpoints, S3 gateway), restores cics + cicsfe, updates both DR secrets, updates the single CICS app stack, then cuts DNS over to the DR ALB.",
+          "Comment": "CICS DR Failover — PITR (use_pitr=true) or snapshot (use_pitr=false). Scales up the DR network stack (jump host, NAT-per-AZ, VPC endpoints, S3 gateway), restores cics + cicsfe, updates both DR secrets, updates the single CICS app stack, force-starts all System=CICS EC2 instances, then cuts DNS over to the DR ALB.",
           "StartAt": "UpdateNetworkStack",
           "States": {
 
@@ -616,8 +690,8 @@ Resources:
               "Parameters": {
                 "action":                 "update_stack",
                 "stack_type":             "network",
-                "stack_name.$":           "$.network_stack_name",
-                "network_template_url.$": "$.network_template_url",
+                "stack_name":             "${NetworkStackName}",
+                "network_template_url":   "${NetworkTemplateUrl}",
                 "extra_params": {
                   "CreateJumpHost":       "true",
                   "CreateMultipleNat":    "true",
@@ -642,7 +716,7 @@ Resources:
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action":       "check_stack_status",
-                "stack_name.$": "$.network_stack_name"
+                "stack_name":   "${NetworkStackName}"
               },
               "ResultPath": "$.network_status",
               "Next": "NetworkStackDone",
@@ -674,7 +748,7 @@ Resources:
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action":                   "pitr_restore",
-                "db_instance_identifier.$": "$.db_instance_identifier",
+                "db_instance_identifier":   "${DbInstanceIdentifier}",
                 "pitr_target_identifier.$": "$.pitr_target_identifier",
                 "pitr_subnet_group.$":      "$.pitr_subnet_group",
                 "pitr_security_group_id.$": "$.pitr_security_group_id"
@@ -719,7 +793,7 @@ Resources:
               "Parameters": {
                 "action":                  "update_secrets",
                 "db_endpoint.$":           "$.pitr_main_status.db_endpoint",
-                "dr_db_secret_arn.$":      "$.dr_db_secret_arn",
+                "dr_db_secret_arn":        "${DrDbSecretArn}",
                 "pitr_endpoint_ssm_path.$": "$.pitr_endpoint_ssm_path"
               },
               "ResultPath": "$.secrets_main",
@@ -734,7 +808,7 @@ Resources:
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action":                   "pitr_restore",
-                "db_instance_identifier.$": "$.db_fe_instance_identifier",
+                "db_instance_identifier":   "${DbFeInstanceIdentifier}",
                 "pitr_target_identifier.$": "$.pitr_fe_target_identifier",
                 "pitr_subnet_group.$":      "$.pitr_fe_subnet_group",
                 "pitr_security_group_id.$": "$.pitr_fe_security_group_id"
@@ -779,7 +853,7 @@ Resources:
               "Parameters": {
                 "action":                  "update_secrets",
                 "db_endpoint.$":           "$.pitr_fe_status.db_endpoint",
-                "dr_db_secret_arn.$":      "$.dr_db_fe_secret_arn",
+                "dr_db_secret_arn":        "${DrDbFeSecretArn}",
                 "pitr_endpoint_ssm_path.$": "$.pitr_fe_endpoint_ssm_path"
               },
               "ResultPath": "$.secrets_fe",
@@ -795,7 +869,7 @@ Resources:
               "Parameters": {
                 "action":       "update_stack",
                 "stack_type":   "app",
-                "stack_name.$": "$.app_stack_name",
+                "stack_name":   "${AppStackName}",
                 "extra_params": {
                   "DeployPaidResources": "true",
                   "IsPITRMode":          "true"
@@ -813,12 +887,12 @@ Resources:
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action":                     "discover",
-                "db_instance_identifier.$":   "$.db_instance_identifier",
-                "db_fe_instance_identifier.$": "$.db_fe_instance_identifier",
+                "db_instance_identifier":     "${DbInstanceIdentifier}",
+                "db_fe_instance_identifier":  "${DbFeInstanceIdentifier}",
                 "snapshot_identifier.$":      "$.snapshot_identifier",
                 "snapshot_identifier_fe.$":   "$.snapshot_identifier_fe",
-                "dr_db_secret_arn.$":         "$.dr_db_secret_arn",
-                "dr_db_fe_secret_arn.$":      "$.dr_db_fe_secret_arn",
+                "dr_db_secret_arn":           "${DrDbSecretArn}",
+                "dr_db_fe_secret_arn":        "${DrDbFeSecretArn}",
                 "db_master_password.$":       "$.db_master_password",
                 "db_fe_master_password.$":    "$.db_fe_master_password"
               },
@@ -835,7 +909,7 @@ Resources:
               "Parameters": {
                 "action":       "update_stack",
                 "stack_type":   "app",
-                "stack_name.$": "$.app_stack_name",
+                "stack_name":   "${AppStackName}",
                 "extra_params": {
                   "DeployPaidResources":    "true",
                   "IsPITRMode":             "false",
@@ -862,7 +936,7 @@ Resources:
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action":       "check_stack_status",
-                "stack_name.$": "$.app_stack_name"
+                "stack_name":   "${AppStackName}"
               },
               "ResultPath": "$.app_status",
               "Next": "AppStackDone",
@@ -874,9 +948,24 @@ Resources:
               "Type": "Choice",
               "Choices": [
                 {"Variable": "$.app_status.stack_rollback", "BooleanEquals": true, "Next": "FailoverFailed"},
-                {"Variable": "$.app_status.stack_complete", "BooleanEquals": true, "Next": "DNSCutover"}
+                {"Variable": "$.app_status.stack_complete", "BooleanEquals": true, "Next": "StartCicsInstances"}
               ],
               "Default": "WaitAppStack"
+            },
+
+            "StartCicsInstances": {
+              "Comment": "Force-start every EC2 instance tagged System=CICS in the DR region (e.g. instances left stopped by the start/stop schedule) before flipping DNS. Idempotent — only stopped instances are started.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":             "start_instances",
+                "instance_tag_key":   "System",
+                "instance_tag_value": "CICS"
+              },
+              "ResultPath": "$.start_instances",
+              "Next": "DNSCutover",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
             },
 
             "DNSCutover": {
@@ -902,7 +991,7 @@ Resources:
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
                 "action":         "notify",
-                "sns_topic_arn.$": "$.sns_topic_arn",
+                "sns_topic_arn":  "${SnsTopicArn}",
                 "subject":        "CICS DR Failover Complete",
                 "message":        "CICS DR failover completed. Network + app stack UPDATE_COMPLETE, cics + cicsfe restored, DNS cut over to DR ALB."
               },

@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  DR backup vault — deploy in the DR region to receive cross-region CopyAction
+  recovery points from the live-region backup plan. Vault is retained on stack
+  deletion so recovery points are never lost on an accidental teardown.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Encryption
+        Parameters:
+          - EncryptionKeyArn
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      EncryptionKeyArn:
+        default: KMS CMK ARN (DR region replica)
+
+Parameters:
+
+  Name:
+    Description: Unique identifier used in resource naming (e.g. "smartapi-docdb", "cics2-docdb").
+    Type: String
+    MinLength: 3
+    MaxLength: 30
+
+  OrgName:
+    Description: Organization name prefix.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Must contain only lowercase letters and hyphens.
+
+  EnvName:
+    Description: Environment name — only DR variants are accepted here.
+    Type: String
+    Default: ProductionDR
+    AllowedValues:
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+
+  EncryptionKeyArn:
+    Description: >-
+      ARN of the KMS CMK to encrypt recovery points in this vault.
+      For cross-region copies: must be a multi-region key replica in the DR region
+      so recovery points can be decrypted at restore time without key import.
+      Leave blank to use the default AWS-managed aws/backup key.
+    Type: String
+    Default: ''
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  IsEncryptionKeyProvided: !Not [!Equals [!Ref EncryptionKeyArn, '']]
+
+Resources:
+
+  DRBackupVault:
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Join
+        - '-'
+        - - !Ref OrgName
+          - !FindInMap [EnvShort, !Ref EnvName, Name]
+          - !FindInMap [RegionShort, !Ref 'AWS::Region', Name]
+          - !Ref Name
+          - vault
+      EncryptionKeyArn: !If [IsEncryptionKeyProvided, !Ref EncryptionKeyArn, !Ref 'AWS::NoValue']
+      BackupVaultTags:
+        Name: !Join
+          - '-'
+          - - !Ref OrgName
+            - !FindInMap [EnvShort, !Ref EnvName, Name]
+            - !FindInMap [RegionShort, !Ref 'AWS::Region', Name]
+            - !Ref Name
+            - vault
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+Outputs:
+
+  DRVaultName:
+    Description: >-
+      Vault name — pass this as DRVaultName when deploying the live-region backup
+      plan stack so the CopyAction knows where to write recovery points.
+    Value: !Ref DRBackupVault
+    Export:
+      Name: !Sub ${AWS::StackName}-VaultName
+
+  DRVaultArn:
+    Description: Full ARN of the DR backup vault.
+    Value: !GetAtt DRBackupVault.BackupVaultArn
+    Export:
+      Name: !Sub ${AWS::StackName}-VaultArn

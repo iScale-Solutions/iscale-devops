@@ -27,6 +27,13 @@ Metadata:
           default: Disaster Recovery
         Parameters:
           - DeployPaidResources
+          - EnableBackup
+      - Label:
+          default: Backup Configuration
+        Parameters:
+          - DRRegion
+          - SourceSnapshotRetentionDays
+          - DRSnapshotRetentionDays
 
     ParameterLabels:
       Name:
@@ -39,6 +46,14 @@ Metadata:
         default: Environment Name
       DeployPaidResources:
         default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      EnableBackup:
+        default: Enable DocDB Elastic snapshot Lambda (true = live region only, false = DR region)
+      DRRegion:
+        default: DR Region
+      SourceSnapshotRetentionDays:
+        default: Snapshot Retention in source region (days)
+      DRSnapshotRetentionDays:
+        default: Snapshot Retention in DR region (days)
 
 Parameters:
   Name:
@@ -117,6 +132,31 @@ Parameters:
       - 'true'
       - 'false'
 
+  EnableBackup:
+    Description: |
+      true (default): Deploy the hourly DocDB Elastic snapshot Lambda. Set to true only in the LIVE region.
+      false: Skip all backup resources. Always set this to false when deploying in the DR region.
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  DRRegion:
+    Description: AWS region to copy DocDB Elastic snapshots to (DR region).
+    Type: String
+    Default: us-west-2
+
+  SourceSnapshotRetentionDays:
+    Description: Days to retain hourly snapshots in the source region (2 days = 48 recovery points).
+    Type: Number
+    Default: 2
+
+  DRSnapshotRetentionDays:
+    Description: Days to retain copied snapshots in the DR region.
+    Type: Number
+    Default: 30
+
 Mappings: 
   Fn::Transform:
     Name: AWS::Include
@@ -129,6 +169,9 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsEnableBackup: !And
+    - Condition: IsDeployPaidResources
+    - !Equals [!Ref EnableBackup, 'true']
   IsNotProdAndDeployPaidResources: !And
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
@@ -285,6 +328,185 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
+###
+# DocDB Elastic Snapshot Lambda Section
+# AWS Backup does not support docdb-elastic resources — native API snapshots via Lambda instead.
+###
+
+  SnapshotLambdaRole:
+    Condition: IsEnableBackup
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DocDBElasticSnapshotPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - docdb-elastic:CreateClusterSnapshot
+                  - docdb-elastic:CopyClusterSnapshot
+                  - docdb-elastic:DeleteClusterSnapshot
+                  - docdb-elastic:GetClusterSnapshot
+                  - docdb-elastic:ListClusterSnapshots
+                Resource: !Sub arn:aws:docdb-elastic:*:${AWS::AccountId}:*
+
+  SnapshotLambdaLogGroup:
+    Condition: IsEnableBackup
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-docdb-snapshot
+      RetentionInDays: 30
+
+  SnapshotLambda:
+    Condition: IsEnableBackup
+    Type: AWS::Lambda::Function
+    DependsOn: SnapshotLambdaLogGroup
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-docdb-snapshot
+      Handler: index.handler
+      Runtime: python3.12
+      Timeout: 300
+      Role: !GetAtt SnapshotLambdaRole.Arn
+      Environment:
+        Variables:
+          CLUSTER_ARN: !GetAtt DocumentDBStack.Outputs.DocuDBElasticClusterARN
+          DR_REGION: !Ref DRRegion
+          SOURCE_RETENTION_DAYS: !Ref SourceSnapshotRetentionDays
+          DR_RETENTION_DAYS: !Ref DRSnapshotRetentionDays
+          SNAPSHOT_PREFIX: !Sub ${AWS::StackName}-hourly
+      Code:
+        ZipFile: |
+          import boto3, os, re
+          from datetime import datetime, timezone, timedelta
+          from botocore.exceptions import ClientError
+
+          def handler(event, context):
+              cluster_arn = os.environ['CLUSTER_ARN']
+              dr_region = os.environ['DR_REGION']
+              src_days = int(os.environ['SOURCE_RETENTION_DAYS'])
+              dr_days = int(os.environ['DR_RETENTION_DAYS'])
+              prefix = os.environ['SNAPSHOT_PREFIX']
+              src = boto3.client('docdb-elastic')
+              dr = boto3.client('docdb-elastic', region_name=dr_region)
+              now = datetime.now(timezone.utc)
+
+              name = '{}-{}'.format(prefix, now.strftime('%Y%m%d-%H00'))
+              try:
+                  src.create_cluster_snapshot(clusterArn=cluster_arn, snapshotName=name)
+                  print('Created snapshot: {}'.format(name))
+              except ClientError as e:
+                  if e.response['Error']['Code'] != 'ConflictException':
+                      raise
+
+              for snap in _list_snapshots(src, cluster_arn):
+                  if snap['status'] == 'ACTIVE' and snap['snapshotName'].startswith(prefix):
+                      try:
+                          dr.copy_cluster_snapshot(
+                              snapshotArn=snap['snapshotArn'],
+                              targetSnapshotName=snap['snapshotName'],
+                              copyTags=True
+                          )
+                          print('Copied to DR: {}'.format(snap['snapshotName']))
+                      except ClientError as e:
+                          if e.response['Error']['Code'] != 'ConflictException':
+                              print('Copy failed for {}: {}'.format(snap['snapshotName'], e))
+
+              cutoff = now - timedelta(days=src_days)
+              for snap in _list_snapshots(src, cluster_arn):
+                  dt = _parse_date(snap['snapshotName'], prefix)
+                  if dt and dt < cutoff:
+                      try:
+                          src.delete_cluster_snapshot(snapshotArn=snap['snapshotArn'])
+                          print('Deleted source: {}'.format(snap['snapshotName']))
+                      except ClientError:
+                          pass
+
+              cutoff_dr = now - timedelta(days=dr_days)
+              for snap in _list_snapshots(dr):
+                  if snap['snapshotName'].startswith(prefix):
+                      dt = _parse_date(snap['snapshotName'], prefix)
+                      if dt and dt < cutoff_dr:
+                          try:
+                              dr.delete_cluster_snapshot(snapshotArn=snap['snapshotArn'])
+                              print('Deleted DR: {}'.format(snap['snapshotName']))
+                          except ClientError:
+                              pass
+
+          def _list_snapshots(client, cluster_arn=None):
+              kwargs = {}
+              if cluster_arn:
+                  kwargs['clusterArn'] = cluster_arn
+              result = []
+              while True:
+                  resp = client.list_cluster_snapshots(**kwargs)
+                  result.extend(resp.get('snapshots', []))
+                  token = resp.get('nextToken')
+                  if not token:
+                      break
+                  kwargs['nextToken'] = token
+              return result
+
+          def _parse_date(name, prefix):
+              m = re.search(r'(\d{8}-\d{4})', name)
+              if m:
+                  try:
+                      return datetime.strptime(m.group(1), '%Y%m%d-%H%M').replace(tzinfo=timezone.utc)
+                  except ValueError:
+                      pass
+              return None
+
+  SnapshotScheduleRule:
+    Condition: IsEnableBackup
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${AWS::StackName}-docdb-snapshot-hourly
+      ScheduleExpression: cron(0 * * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SnapshotLambda.Arn
+          Id: DocDBSnapshotTarget
+
+  SnapshotSchedulePermission:
+    Condition: IsEnableBackup
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SnapshotLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SnapshotScheduleRule.Arn
+
+  SnapshotFailureAlarm:
+    Condition: IsEnableBackup
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-docdb-snapshot-errors
+      AlarmDescription: >-
+        DocDB Elastic snapshot Lambda reported errors. Each missed hourly run
+        increases effective RPO by 1 hour. Check CloudWatch Logs for details.
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SnapshotLambda
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${SNSStackName}-TopicArn
+
 Outputs:
   EcrName:
     Description: DNS name of the Application Load Balancer
@@ -329,5 +551,11 @@ Outputs:
     Value: !GetAtt DocumentDBStack.Outputs.DocuDBElasticSecurityGroup
     Export:
       Name: !Sub ${AWS::StackName}-DocuDBElasticSecurityGroup
-  
-  
+
+  SnapshotLambdaArn:
+    Condition: IsEnableBackup
+    Description: ARN of the Lambda that creates and copies hourly DocDB Elastic snapshots.
+    Value: !GetAtt SnapshotLambda.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-SnapshotLambdaArn
+

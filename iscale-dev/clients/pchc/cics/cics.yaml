@@ -383,6 +383,11 @@ Conditions:
   IsDeployPaidResourcesAndNotPITR: !And
     - Condition: IsDeployPaidResources
     - !Not [{Condition: IsPITRMode}]
+  # PITR failover in the DR region: the standby SGs exist (IsDR) and the restored
+  # instances are attached to them, so app-server ingress must target the standby SGs.
+  IsDRAndPITR: !And
+    - Condition: IsDR
+    - Condition: IsPITRMode
   IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR: !And
     - Condition: IsProdOrProductionDR
     - Condition: IsDeployPaidResourcesAndNotPITR
@@ -2372,19 +2377,19 @@ Resources:
         - Key: Name
           Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
 
-  # Pre-deployed DB security group for PITR restore in DR standby.
-  # App server stacks can add ingress rules to this SG at restore time.
-  # no need ?
-  # DBStandbySecurityGroup:
-  #   Condition: IsDR
-  #   Type: AWS::EC2::SecurityGroup
-  #   Properties:
-  #     GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
-  #     VpcId:
-  #       Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+  # Pre-deployed DB security group for PITR restore in DR standby (cics).
+  # Attached to the restored cics instance at failover; app server stacks add
+  # ingress rules to this SG at restore time.
+  DBStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
 
   # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
   # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
@@ -2436,6 +2441,41 @@ Resources:
       Description: Allow connection from BKUPSVR
       IpProtocol: TCP
       GroupId: !GetAtt [DBStack, Outputs.SecurityGroupId]
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !Ref BKUPSVRSecurityGroup
+
+  # PITR-mode equivalents of the three rules above, targeting the standby SG that the
+  # restored cics instance is attached to (DBStack is suppressed in PITR mode).
+  AllowCICSAPPSVRIntoStandbyDB:
+    Condition: IsDRAndPITR
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from CICSAPPSVR (PITR standby)
+      IpProtocol: TCP
+      GroupId: !GetAtt DBStandbySecurityGroup.GroupId
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !Ref CICSAPPSVRSecurityGroup
+
+  AllowGLBLSCPSVRIntoStandbyDB:
+    Condition: IsDRAndPITR
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from GLBLSCPSVR (PITR standby)
+      IpProtocol: TCP
+      GroupId: !GetAtt DBStandbySecurityGroup.GroupId
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !Ref GLBLSCPSVRSecurityGroup
+
+  AllowBKUPSVRIntoStandbyDB:
+    Condition: IsDRAndPITR
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from BKUPSVR (PITR standby)
+      IpProtocol: TCP
+      GroupId: !GetAtt DBStandbySecurityGroup.GroupId
       FromPort: 1433
       ToPort: 1433
       SourceSecurityGroupId: !Ref BKUPSVRSecurityGroup
@@ -2623,6 +2663,20 @@ Resources:
         - Key: Name
           Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
 
+  # Pre-deployed DB security group for PITR restore in DR standby (cicsfe).
+  # Attached to the restored cicsfe instance at failover; app server stacks add
+  # ingress rules to this SG at restore time.
+  DBFEStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfe, db, standby]]
+
   # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
   # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
   # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
@@ -2647,6 +2701,19 @@ Resources:
       Description: Allow connection from CICSFEAPPSVR
       IpProtocol: TCP
       GroupId: !GetAtt [DBFEStack, Outputs.SecurityGroupId]
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !Ref CICSFEAPPSVRSecurityGroup
+
+  # PITR-mode equivalent, targeting the standby SG the restored cicsfe instance uses
+  # (DBFEStack is suppressed in PITR mode).
+  AllowCICSFEAPPSVRIntoStandbyDBFE:
+    Condition: IsDRAndPITR
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from CICSFEAPPSVR (PITR standby)
+      IpProtocol: TCP
+      GroupId: !GetAtt DBFEStandbySecurityGroup.GroupId
       FromPort: 1433
       ToPort: 1433
       SourceSecurityGroupId: !Ref CICSFEAPPSVRSecurityGroup
@@ -3071,33 +3138,38 @@ Resources:
           WIT_SVR_ID: !Ref CICSWITSVRInstance
           JUMP_SVR_ID: !Ref PCHJUMPSVRInstance
 
-# Outputs:
+Outputs:
 
-#Required for VPC Peering connections
+  # DR standby DB subnet groups — pre-deployed (Condition: IsDR) for the PITR
+  # restore at failover. Surfaced so cics-dr-failover's payload (pitr_subnet_group /
+  # pitr_fe_subnet_group) can be read from this stack's outputs instead of looked up by hand.
+  DBStandbySubnetGroupName:
+    Condition: IsDR
+    Description: cics DB standby subnet group name (use as pitr_subnet_group at failover).
+    Value: !Ref DBStandbySubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySubnetGroup'
 
-  # DBPort:
-  #   # Condition: IsMainRegion
-  #   Description: DB Server Security Group
-  #   Value: !GetAtt [DBStack, Outputs.DBInstancePort]
-  #   Export:
-  #     Name: !Sub '${AWS::StackName}-DBPort'
+  DBFEStandbySubnetGroupName:
+    Condition: IsDR
+    Description: cicsfe DB standby subnet group name (use as pitr_fe_subnet_group at failover).
+    Value: !Ref DBFEStandbySubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBFEStandbySubnetGroup'
 
-  # DBSecurityGroup:
-  #   # Condition: IsMainRegion
-  #   Description: DB Server Security Group
-  #   Value: !GetAtt [DBStack, Outputs.SecurityGroupId]
-  #   Export:
-  #     Name: !Sub '${AWS::StackName}-DBSecurityGroup'
-  
-  # DBSecurityGroup2:
-  #   # Condition: IsMainRegion
-  #   Description: Old CICS DB2 Server Security Group, delete soon
-  #   Value: !GetAtt [DBStack, Outputs.SecurityGroupId]
-  #   Export:
-  #     Name: !Sub '${AWS::StackName}-DBSecurityGroup2'
+  # DR standby DB security groups — pre-deployed (Condition: IsDR), attached to the
+  # restored instances at failover. Surfaced for cics-dr-failover's payload
+  # (pitr_security_group_id / pitr_fe_security_group_id).
+  DBStandbySecurityGroupId:
+    Condition: IsDR
+    Description: cics DB standby security group id (use as pitr_security_group_id at failover).
+    Value: !GetAtt DBStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySecurityGroup'
 
-  # CICSAPPSVRSecurityGroup:
-  #   Description: App Servers Security Group
-  #   Value: !GetAtt CICSAPPSVRSecurityGroup.GroupId
-  #   Export:
-  #     Name: !Sub '${AWS::StackName}-CICSAPPSVRSecurityGroup'
+  DBFEStandbySecurityGroupId:
+    Condition: IsDR
+    Description: cicsfe DB standby security group id (use as pitr_fe_security_group_id at failover).
+    Value: !GetAtt DBFEStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-DBFEStandbySecurityGroup'
