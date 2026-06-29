@@ -26,12 +26,6 @@ Metadata:
         Parameters:
           - HostedZoneMapParameterPath
       - Label:
-          default: Network
-        Parameters:
-          - VpcId
-          - SubnetIds
-          - LambdaSecurityGroupId
-      - Label:
           default: Notifications & Approval
         Parameters:
           - SNSTopicArn
@@ -55,12 +49,6 @@ Metadata:
         default: Health Check Path
       HostedZoneMapParameterPath:
         default: SSM Parameter Path — Hosted Zone Map
-      VpcId:
-        default: VPC ID (for internal ALB access)
-      SubnetIds:
-        default: Subnet IDs (comma-separated)
-      LambdaSecurityGroupId:
-        default: Lambda Security Group ID
       SNSTopicArn:
         default: SNS Topic ARN
       ApproverIamArns:
@@ -114,26 +102,6 @@ Parameters:
     Type: String
     Default: /pchc/dr/prddr/hosted-zone-map
 
-  VpcId:
-    Description: >
-      VPC ID in the DR region. Required if app ALBs are internal-facing.
-      Leave blank to deploy without VPC config (only if ALBs are internet-facing).
-    Type: String
-    Default: ''
-
-  SubnetIds:
-    Description: >
-      Comma-separated private subnet IDs in the DR region. Required when VpcId is set.
-    Type: String
-    Default: ''
-
-  LambdaSecurityGroupId:
-    Description: >
-      Security group ID for the health check Lambda. Required when VpcId is set.
-      The SG needs no inbound rules — only outbound to the ALB listener port (80/443).
-    Type: String
-    Default: ''
-
   SNSTopicArn:
     Description: >
       ARN of the SNS topic used for the aws:approve approval notification and the
@@ -177,13 +145,6 @@ Parameters:
       - 180
       - 365
 
-Conditions:
-
-  HasVpcConfig: !Not
-    - !Equals
-      - !Ref VpcId
-      - ''
-
 Resources:
 
   ####
@@ -220,19 +181,6 @@ Resources:
                 Action:
                   - ssm:GetParameter
                 Resource: !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter${AlbDnsMapParameterPath}
-        - !If
-          - HasVpcConfig
-          - PolicyName: VpcAccess
-            PolicyDocument:
-              Version: 2012-10-17
-              Statement:
-                - Effect: Allow
-                  Action:
-                    - ec2:CreateNetworkInterface
-                    - ec2:DeleteNetworkInterface
-                    - ec2:DescribeNetworkInterfaces
-                  Resource: '*'
-          - !Ref AWS::NoValue
 
   ####
   # CloudWatch Logs — Health Check Lambda
@@ -261,12 +209,6 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Runtime: python3.12
       Timeout: 120
-      VpcConfig: !If
-        - HasVpcConfig
-        - SubnetIds: !Split [',', !Ref SubnetIds]
-          SecurityGroupIds:
-            - !Ref LambdaSecurityGroupId
-        - !Ref AWS::NoValue
       Environment:
         Variables:
           ALB_DNS_MAP_PARAMETER: !Ref AlbDnsMapParameterPath
