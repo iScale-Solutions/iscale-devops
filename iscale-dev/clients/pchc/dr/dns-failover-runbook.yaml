@@ -19,12 +19,7 @@ Metadata:
           default: DR Configuration
         Parameters:
           - DRRegion
-          - AlbDnsMapParameterPath
           - HealthCheckPath
-      - Label:
-          default: Route 53 Failover
-        Parameters:
-          - HostedZoneMapParameterPath
       - Label:
           default: Notifications & Approval
         Parameters:
@@ -43,12 +38,8 @@ Metadata:
         default: Environment Name
       DRRegion:
         default: DR Region
-      AlbDnsMapParameterPath:
-        default: SSM Parameter Path — ALB DNS Map
       HealthCheckPath:
         default: Health Check Path
-      HostedZoneMapParameterPath:
-        default: SSM Parameter Path — Hosted Zone Map
       SNSTopicArn:
         default: SNS Topic ARN
       ApproverIamArns:
@@ -87,29 +78,10 @@ Parameters:
       - us-east-2
       - us-west-2
 
-  AlbDnsMapParameterPath:
-    Description: >
-      SSM Parameter Store path holding a JSON object that maps app names to
-      their DR ALB DNS names. Written by the dr-failover workflow after
-      deploying failover stacks. Example value:
-      {"pesonet":"internal-xxx.us-west-2.elb.amazonaws.com","pddts":"..."}
-    Type: String
-    Default: /pchc/dr/ProductionDR/alb-dns-map
-
   HealthCheckPath:
     Description: HTTP path to call on each app ALB.
     Type: String
     Default: /health
-
-  HostedZoneMapParameterPath:
-    Description: >
-      SSM Parameter Store path holding a JSON object that maps app names to their
-      Route 53 hosted zone configuration. Written once during DR setup and
-      updated when records change. Example value:
-      {"pesonet":{"hostedZoneId":"ZXXXX","recordName":"pesonet.pchc.com.ph","albHostedZoneId":"Z14GRHDCWA56QT"}}
-      albHostedZoneId is the canonical hosted zone ID for the ALB (region-specific constant).
-    Type: String
-    Default: /pchc/dr/ProductionDR/hosted-zone-map
 
   SNSTopicArn:
     Description: >
@@ -189,7 +161,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - ssm:GetParameter
-                Resource: !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter${AlbDnsMapParameterPath}
+                Resource: !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/alb-dns-map
 
   ####
   # CloudWatch Logs — Health Check Lambda
@@ -220,7 +192,7 @@ Resources:
       Timeout: 120
       Environment:
         Variables:
-          ALB_DNS_MAP_PARAMETER: !Ref AlbDnsMapParameterPath
+          ALB_DNS_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/alb-dns-map
           HEALTH_CHECK_PATH: !Ref HealthCheckPath
           DR_REGION: !Ref DRRegion
       Code:
@@ -291,8 +263,8 @@ Resources:
                 Action:
                   - ssm:GetParameter
                 Resource:
-                  - !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter${AlbDnsMapParameterPath}
-                  - !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter${HostedZoneMapParameterPath}
+                  - !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/alb-dns-map
+                  - !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/hosted-zone-map
         - PolicyName: Route53Cutover
           PolicyDocument:
             Version: 2012-10-17
@@ -335,8 +307,8 @@ Resources:
       Timeout: 600
       Environment:
         Variables:
-          ALB_DNS_MAP_PARAMETER: !Ref AlbDnsMapParameterPath
-          HOSTED_ZONE_MAP_PARAMETER: !Ref HostedZoneMapParameterPath
+          ALB_DNS_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/alb-dns-map
+          HOSTED_ZONE_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/hosted-zone-map
           DR_REGION: !Ref DRRegion
           PROPAGATION_WAIT_SECONDS: !Ref PropagationWaitSeconds
       Code:
