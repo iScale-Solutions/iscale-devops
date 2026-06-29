@@ -24,9 +24,10 @@ CICS differs from the apps the generic engine was built for (pesonet, SmartAPI):
 ```
 UpdateNetworkStack (scale-up flags) ──► poll until UPDATE_COMPLETE
   └─ RouteByMode
-       ├─ [use_pitr=true]  PITRRestoreMain (cics)  ─► poll until available ─► UpdateSecretsMain
-       │                   PITRRestoreFe   (cicsfe)─► poll until available ─► UpdateSecretsFe
-       │                   UpdateAppStackPITR  (IsPITRMode=true)
+       ├─ [use_pitr=true]  PITRRestoreParallel (Parallel — both branches run simultaneously)
+       │                   ├─ branch 1: PITRRestoreMain  (cics)   ─► poll until available ─► UpdateSecretsMain
+       │                   └─ branch 2: PITRRestoreFe    (cicsfe) ─► poll until available ─► UpdateSecretsFe
+       │                   └── both complete ──► UpdateAppStackPITR (IsPITRMode=true)
        │
        └─ [use_pitr=false] DiscoverSnapshots (latest cics + cicsfe snapshots)
                            UpdateAppStackSnapshot (SnapshotIdentifier + SnapshotIdentifierFe)
