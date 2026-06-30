@@ -1,5 +1,7 @@
 # StrongSwan VPN Gateway — Setup Reference
 
+> **⚠️ Legacy reference.** This document describes the original **StrongSwan on Amazon Linux 2** gateway (policy-based IPsec, iptables MASQUERADE on `eth0`, kernel 4.14/5.10). The gateway has since migrated to **LibreSwan on Amazon Linux 2023** (route-based VTI, nftables, kernel 6.1) — see **[LIBRESWAN.md](LIBRESWAN.md)** for the current setup and the kernel-6.1 rationale behind the change. This file is retained for historical reference of the legacy configuration.
+
 This document describes how the StrongSwan IPsec VPN gateway is configured within the PhilPass stack. Two EC2 instances (one per Availability Zone) run StrongSwan to establish IPsec tunnels between PCHC's AWS VPC and the Bangko Sentral ng Pilipinas (BSP) network.
 
 ## Overview

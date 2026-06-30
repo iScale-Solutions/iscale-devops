@@ -1120,6 +1120,18 @@ Resources:
             02_start_ipsec:
               command: 'systemctl enable --now ipsec'
               ignoreErrors: true
+            # [ADDED] Disable rp_filter on VTI interfaces after tunnel comes up.
+            # VTI interfaces are created by Libreswan on start, so sysctl for them
+            # must run after ipsec starts. Without this, return traffic gets dropped.
+            03_disable_rp_filter_vti:
+              command: |
+                sleep 5
+                for vti in vti0 vti1; do
+                  if [ -d /proc/sys/net/ipv4/conf/$vti ]; then
+                    sysctl -w net.ipv4.conf.$vti.rp_filter=0
+                    sysctl -w net.ipv4.conf.$vti.disable_policy=1
+                  fi
+                done
 
         NetworkFiles:
           commands:
@@ -1145,9 +1157,13 @@ Resources:
                 net.ipv4.conf.all.accept_source_route = 0
                 net.ipv4.conf.default.accept_source_route = 0
 
-                # Reverse path filtering
-                net.ipv4.conf.all.rp_filter = 1
-                net.ipv4.conf.default.rp_filter = 1
+                # [CHANGED] rp_filter set to 0 globally.
+                # With VTI, strict rp_filter drops return traffic because the
+                # source (remote subnet) isn't routable via the interface the
+                # decrypted packet appears on. VTI interfaces get rp_filter=0
+                # explicitly after ipsec starts (see 03_disable_rp_filter_vti).
+                net.ipv4.conf.all.rp_filter = 0
+                net.ipv4.conf.default.rp_filter = 0
 
                 # ICMP hardening
                 net.ipv4.icmp_echo_ignore_broadcasts = 1
@@ -1171,6 +1187,10 @@ Resources:
                     - !FindInMap [BSPConfig, UAT, PPPGateway]
                     - !FindInMap [BSPConfig, Production, PPPDRGateway]
                   3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
+              # [CHANGED] Secrets file should be 0600, not default
+              permissions: '0600'
+              owner: root
+              group: root
 
 # AZ 1 Prod
         AZ1ConfigProd:
@@ -1186,24 +1206,26 @@ Resources:
                               ${PRIVATE_SUBNET}
                           }
                       }
-                      set destination_subnet {
-                          type ipv4_addr;
-                          flags interval;
-                          elements = {
-                              ${3RD_SUBNET},
-                              ${PPP_SUBNET},
-                              ${PPP_DR_SUBNET}
-                          }
-                      }
+
                       chain POSTROUTING {
                           type nat hook postrouting priority 100;
-                          ip saddr @source_subnet ip daddr @destination_subnet oif "ens5" masquerade
+
+                          # [CHANGED] Masquerade on VTI interfaces instead of ens5.
+                          # On kernel 6.1 (AL2023), XFRM policy check happens before
+                          # POSTROUTING for forwarded traffic. Masquerading on ens5
+                          # fires too late — traffic bypasses IPsec entirely.
+                          # VTI interfaces receive routed traffic first, so NAT fires
+                          # before XFRM encryption.
+                          #
+                          # [CHANGED] oifname "vti*" (runtime name match) instead of
+                          # oif "vtiN" (load-time index): nftables loads before ipsec
+                          # creates the vti devices, so oif fails with "Interface does
+                          # not exist". The wildcard also collapses all tunnels into a
+                          # single rule, so adding destinations adds no rules.
+                          ip saddr @source_subnet oifname "vti*" masquerade
                       }
                   }
                 - PRIVATE_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPrivateSubnetAZ1]
-                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
-                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
-                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
             /etc/ipsec.d/ipsec.conf:
               content: !Sub
                 - |
@@ -1225,6 +1247,12 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      # Unique mark per conn so kernel maps traffic to the right tunnel.
+                      mark=42/0xffffffff
+                      vti-interface=vti0
+                      vti-routing=yes
+                      vti-shared=no
 
                   conn bspPPPlusDR
                       authby=secret
@@ -1243,6 +1271,11 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=43/0xffffffff
+                      vti-interface=vti1
+                      vti-routing=yes
+                      vti-shared=no
 
                   conn bspPP3rd
                       authby=secret
@@ -1262,6 +1295,11 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=44/0xffffffff
+                      vti-interface=vti2
+                      vti-routing=yes
+                      vti-shared=no
                 - LEFT_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPublicSubnetAZ1]
                   PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
                   PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
@@ -1269,7 +1307,9 @@ Resources:
                   PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
                   3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
                   3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
-              permissions: '0700'
+              # [CHANGED] Was 0700. Config files should be 0644 (not executable).
+              # Only secrets files need restrictive permissions.
+              permissions: '0644'
               owner: root
               group: root
 # AZ 2 Prod
@@ -1286,24 +1326,26 @@ Resources:
                               ${PRIVATE_SUBNET}
                           }
                       }
-                      set destination_subnet {
-                          type ipv4_addr;
-                          flags interval;
-                          elements = {
-                              ${3RD_SUBNET},
-                              ${PPP_SUBNET},
-                              ${PPP_DR_SUBNET}
-                          }
-                      }
+
                       chain POSTROUTING {
                           type nat hook postrouting priority 100;
-                          ip saddr @source_subnet ip daddr @destination_subnet oif "ens5" masquerade
+
+                          # [CHANGED] Masquerade on VTI interfaces instead of ens5.
+                          # On kernel 6.1 (AL2023), XFRM policy check happens before
+                          # POSTROUTING for forwarded traffic. Masquerading on ens5
+                          # fires too late — traffic bypasses IPsec entirely.
+                          # VTI interfaces receive routed traffic first, so NAT fires
+                          # before XFRM encryption.
+                          #
+                          # [CHANGED] oifname "vti*" (runtime name match) instead of
+                          # oif "vtiN" (load-time index): nftables loads before ipsec
+                          # creates the vti devices, so oif fails with "Interface does
+                          # not exist". The wildcard also collapses all tunnels into a
+                          # single rule, so adding destinations adds no rules.
+                          ip saddr @source_subnet oifname "vti*" masquerade
                       }
                   }
                 - PRIVATE_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPrivateSubnetAZ2]
-                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
-                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
-                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
             /etc/ipsec.d/ipsec.conf:
               content: !Sub
                 - |
@@ -1325,6 +1367,12 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      # Unique mark per conn so kernel maps traffic to the right tunnel.
+                      mark=42/0xffffffff
+                      vti-interface=vti0
+                      vti-routing=yes
+                      vti-shared=no
 
                   conn bspPPPlusDR
                       authby=secret
@@ -1343,6 +1391,11 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=43/0xffffffff
+                      vti-interface=vti1
+                      vti-routing=yes
+                      vti-shared=no
 
                   conn bspPP3rd
                       authby=secret
@@ -1362,6 +1415,11 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=44/0xffffffff
+                      vti-interface=vti2
+                      vti-routing=yes
+                      vti-shared=no
                 - LEFT_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPublicSubnetAZ2]
                   PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
                   PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
@@ -1369,7 +1427,9 @@ Resources:
                   PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
                   3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
                   3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
-              permissions: '0700'
+              # [CHANGED] Was 0700. Config files should be 0644 (not executable).
+              # Only secrets files need restrictive permissions.
+              permissions: '0644'
               owner: root
               group: root
 # AZ 1 UAT
@@ -1386,22 +1446,27 @@ Resources:
                               ${PRIVATE_SUBNET}
                           }
                       }
-                      set destination_subnet {
-                          type ipv4_addr;
-                          flags interval;
-                          elements = {
-                              ${3RD_SUBNET},
-                              ${PPP_SUBNET}
-                          }
-                      }
+
                       chain POSTROUTING {
                           type nat hook postrouting priority 100;
-                          ip saddr @source_subnet ip daddr @destination_subnet oif "ens5" masquerade
+
+                          # [CHANGED] Masquerade on VTI interfaces instead of ens5.
+                          # On kernel 6.1 (AL2023), XFRM policy check happens before
+                          # POSTROUTING for forwarded traffic. Masquerading on ens5
+                          # fires too late — traffic bypasses IPsec entirely.
+                          # VTI interfaces receive routed traffic first, so NAT fires
+                          # before XFRM encryption.
+                          #
+                          # [CHANGED] oifname "vti*" (runtime name match) instead of
+                          # oif "vtiN" (load-time index): nftables loads before ipsec
+                          # creates the vti devices, so oif fails with "Interface does
+                          # not exist". The wildcard also collapses all tunnels into a
+                          # single rule, so adding destinations adds no rules.
+                          ip saddr @source_subnet oifname "vti*" masquerade
                       }
                   }
                 - PRIVATE_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPrivateSubnetAZ1]
-                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
-                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+
             /etc/ipsec.d/ipsec.conf:
               content: !Sub
                 - |
@@ -1423,6 +1488,12 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      # Unique mark per conn so kernel maps traffic to the right tunnel.
+                      mark=42/0xffffffff
+                      vti-interface=vti0
+                      vti-routing=yes
+                      vti-shared=no
 
                   conn bspPP3rd
                       authby=secret
@@ -1442,14 +1513,22 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=43/0xffffffff
+                      vti-interface=vti1
+                      vti-routing=yes
+                      vti-shared=no
                 - LEFT_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPublicSubnetAZ1]
                   PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
                   PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
                   3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
                   3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
-              permissions: '0700'
+              # [CHANGED] Was 0700. Config files should be 0644 (not executable).
+              # Only secrets files need restrictive permissions.
+              permissions: '0644'
               owner: root
               group: root
+
 # AZ 2 UAT
         AZ2ConfigUAT:
           files:
@@ -1464,22 +1543,26 @@ Resources:
                               ${PRIVATE_SUBNET}
                           }
                       }
-                      set destination_subnet {
-                          type ipv4_addr;
-                          flags interval;
-                          elements = {
-                              ${3RD_SUBNET},
-                              ${PPP_SUBNET}
-                          }
-                      }
+
                       chain POSTROUTING {
                           type nat hook postrouting priority 100;
-                          ip saddr @source_subnet ip daddr @destination_subnet oif "ens5" masquerade
+
+                          # [CHANGED] Masquerade on VTI interfaces instead of ens5.
+                          # On kernel 6.1 (AL2023), XFRM policy check happens before
+                          # POSTROUTING for forwarded traffic. Masquerading on ens5
+                          # fires too late — traffic bypasses IPsec entirely.
+                          # VTI interfaces receive routed traffic first, so NAT fires
+                          # before XFRM encryption.
+                          #
+                          # [CHANGED] oifname "vti*" (runtime name match) instead of
+                          # oif "vtiN" (load-time index): nftables loads before ipsec
+                          # creates the vti devices, so oif fails with "Interface does
+                          # not exist". The wildcard also collapses all tunnels into a
+                          # single rule, so adding destinations adds no rules.
+                          ip saddr @source_subnet oifname "vti*" masquerade
                       }
                   }
                 - PRIVATE_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPrivateSubnetAZ2]
-                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
-                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
             /etc/ipsec.d/ipsec.conf:
               content: !Sub
                 - |
@@ -1501,6 +1584,12 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      # Unique mark per conn so kernel maps traffic to the right tunnel.
+                      mark=42/0xffffffff
+                      vti-interface=vti0
+                      vti-routing=yes
+                      vti-shared=no
 
                   conn bspPP3rd
                       authby=secret
@@ -1520,12 +1609,19 @@ Resources:
                       dpddelay=10
                       dpdtimeout=60
                       dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=43/0xffffffff
+                      vti-interface=vti1
+                      vti-routing=yes
+                      vti-shared=no
                 - LEFT_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPublicSubnetAZ2]
                   PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
                   PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
                   3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
                   3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
-              permissions: '0700'
+              # [CHANGED] Was 0700. Config files should be 0644 (not executable).
+              # Only secrets files need restrictive permissions.
+              permissions: '0644'
               owner: root
               group: root
     Properties:

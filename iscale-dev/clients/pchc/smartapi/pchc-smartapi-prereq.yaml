@@ -24,6 +24,11 @@ Metadata:
           - ShardCount
           - ShardInstanceCount
       - Label:
+          default: DocDB Schedule Configuration (non-prod instance clusters only)
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
+      - Label:
           default: Disaster Recovery
         Parameters:
           - DeployPaidResources
@@ -48,6 +53,10 @@ Metadata:
         default: Deploy Paid Resources (false = DR standby, true = active/failover)
       EnableBackup:
         default: Enable DocDB Elastic snapshot Lambda (true = live region only, false = DR region)
+      StartScheduleExpression:
+        default: DocDB Cluster Start Schedule (non-prod; far-future = disabled indefinitely)
+      StopScheduleExpression:
+        default: DocDB Cluster Stop Schedule (non-prod)
       DRRegion:
         default: DR Region
       SourceSnapshotRetentionDays:
@@ -157,6 +166,20 @@ Parameters:
     Type: Number
     Default: 30
 
+  StartScheduleExpression:
+    Description: >-
+      EventBridge Scheduler cron for starting the DocDB cluster (non-prod instance clusters only).
+      Defaults to Dec 31 2099 — effectively disabled. Update this when a real start schedule is needed.
+    Type: String
+    Default: 'cron(0 9 31 12 ? 2099)'
+
+  StopScheduleExpression:
+    Description: >-
+      EventBridge Scheduler cron for stopping the DocDB cluster (non-prod instance clusters only).
+      Defaults to 00:00 UTC daily.
+    Type: String
+    Default: 'cron(0 0 * * ? *)'
+
 Mappings: 
   Fn::Transform:
     Name: AWS::Include
@@ -175,6 +198,11 @@ Conditions:
   IsNotProdAndDeployPaidResources: !And
     - Condition: IsNotProd
     - Condition: IsDeployPaidResources
+  IsInstanceCluster: !Equals [!Ref ClusterType, 'instance']
+  IsDocDbScheduleEnabled: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
+    - Condition: IsInstanceCluster
 
 Resources:
 
@@ -506,6 +534,72 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions:
         - Fn::ImportValue: !Sub ${SNSStackName}-TopicArn
+
+###
+# DocDB Start/Stop Scheduler Section
+# Applies to non-prod, instance-type clusters only.
+# Elastic clusters (docdb-elastic) have no start/stop API — excluded via IsInstanceCluster.
+# Start schedule defaults to a far-future date (Dec 31 2099) — disabled indefinitely.
+# Stop schedule fires every day at 00:00 UTC.
+###
+
+  DocDbSchedulerRole:
+    Condition: IsDocDbScheduleEnabled
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DocDbStartStopPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:StartDBCluster
+                  - rds:StopDBCluster
+                Resource: !Sub
+                  - arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${ClusterId}
+                  - ClusterId: !GetAtt DocumentDBStack.Outputs.DBClusterIdentifier
+
+  DocDbStopSchedule:
+    Condition: IsDocDbScheduleEnabled
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${AWS::StackName}-docdb-stop
+      Description: Stop DocDB instance cluster daily at 00:00 UTC — non-prod cost saving
+      ScheduleExpression: !Ref StopScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:rds:stopDBCluster
+        RoleArn: !GetAtt DocDbSchedulerRole.Arn
+        Input: !Sub
+          - '{"DbClusterIdentifier": "${ClusterId}"}'
+          - ClusterId: !GetAtt DocumentDBStack.Outputs.DBClusterIdentifier
+
+  DocDbStartSchedule:
+    Condition: IsDocDbScheduleEnabled
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${AWS::StackName}-docdb-start
+      Description: Start DocDB instance cluster — set to far-future date, disabled indefinitely
+      ScheduleExpression: !Ref StartScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:rds:startDBCluster
+        RoleArn: !GetAtt DocDbSchedulerRole.Arn
+        Input: !Sub
+          - '{"DbClusterIdentifier": "${ClusterId}"}'
+          - ClusterId: !GetAtt DocumentDBStack.Outputs.DBClusterIdentifier
 
 Outputs:
   EcrName:

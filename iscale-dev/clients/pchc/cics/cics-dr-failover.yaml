@@ -679,7 +679,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "CICS DR Failover — PITR (use_pitr=true) or snapshot (use_pitr=false). Scales up the DR network stack (jump host, NAT-per-AZ, VPC endpoints, S3 gateway), restores cics + cicsfe, updates both DR secrets, updates the single CICS app stack, force-starts all System=CICS EC2 instances, then cuts DNS over to the DR ALB.",
+          "Comment": "CICS DR Failover — PITR (use_pitr=true) or snapshot (use_pitr=false). Scales up the DR network stack (jump host, NAT-per-AZ, VPC endpoints, S3 gateway), restores cics + cicsfe in parallel (PITRRestoreParallel), updates both DR secrets, updates the single CICS app stack, force-starts all System=CICS EC2 instances, then cuts DNS over to the DR ALB.",
           "StartAt": "UpdateNetworkStack",
           "States": {
 
@@ -734,131 +734,151 @@ Resources:
             },
 
             "RouteByMode": {
-              "Comment": "PITR path (restore both DBs out-of-band) or snapshot path (let CFN restore both nested DBs).",
+              "Comment": "PITR path (restore both DBs out-of-band, in parallel) or snapshot path (let CFN restore both nested DBs).",
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.use_pitr", "BooleanEquals": true, "Next": "PITRRestoreMain"}
+                {"Variable": "$.use_pitr", "BooleanEquals": true, "Next": "PITRRestoreParallel"}
               ],
               "Default": "DiscoverSnapshots"
             },
 
-            "PITRRestoreMain": {
-              "Comment": "PITR restore of the main cics DB (~5 min RPO).",
-              "Type": "Task",
-              "Resource": "${LambdaFunction.Arn}",
-              "Parameters": {
-                "action":                   "pitr_restore",
-                "db_instance_identifier":   "${DbInstanceIdentifier}",
-                "pitr_target_identifier.$": "$.pitr_target_identifier",
-                "pitr_subnet_group.$":      "$.pitr_subnet_group",
-                "pitr_security_group_id.$": "$.pitr_security_group_id"
-              },
-              "ResultPath": "$.pitr_main",
-              "Next": "WaitPITRMain",
-              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 2, "BackoffRate": 2}],
-              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
-            },
-
-            "WaitPITRMain": {
-              "Type": "Wait",
-              "Seconds": 90,
-              "Next": "CheckPITRMain"
-            },
-
-            "CheckPITRMain": {
-              "Type": "Task",
-              "Resource": "${LambdaFunction.Arn}",
-              "Parameters": {
-                "action":                   "check_db_status",
-                "pitr_target_identifier.$": "$.pitr_main.pitr_target_identifier"
-              },
-              "ResultPath": "$.pitr_main_status",
-              "Next": "PITRMainAvailable",
-              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 30, "MaxAttempts": 5, "BackoffRate": 1.5}],
-              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
-            },
-
-            "PITRMainAvailable": {
-              "Type": "Choice",
-              "Choices": [
-                {"Variable": "$.pitr_main_status.db_available", "BooleanEquals": true, "Next": "UpdateSecretsMain"}
+            "PITRRestoreParallel": {
+              "Comment": "Restore cics and cicsfe DBs in parallel via PITR, then write both DR secrets. Both branches run simultaneously; failure in either aborts both and routes to FailoverFailed.",
+              "Type": "Parallel",
+              "Branches": [
+                {
+                  "StartAt": "PITRRestoreMain",
+                  "States": {
+                    "PITRRestoreMain": {
+                      "Comment": "PITR restore of the main cics DB (~5 min RPO).",
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                   "pitr_restore",
+                        "db_instance_identifier":   "${DbInstanceIdentifier}",
+                        "pitr_target_identifier.$": "$.pitr_target_identifier",
+                        "pitr_subnet_group.$":      "$.pitr_subnet_group",
+                        "pitr_security_group_id.$": "$.pitr_security_group_id"
+                      },
+                      "ResultPath": "$.pitr_main",
+                      "Next": "WaitPITRMain",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 2, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "MainBranchFailed", "ResultPath": "$.error"}]
+                    },
+                    "WaitPITRMain": {
+                      "Type": "Wait",
+                      "Seconds": 90,
+                      "Next": "CheckPITRMain"
+                    },
+                    "CheckPITRMain": {
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                   "check_db_status",
+                        "pitr_target_identifier.$": "$.pitr_main.pitr_target_identifier"
+                      },
+                      "ResultPath": "$.pitr_main_status",
+                      "Next": "PITRMainAvailable",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 30, "MaxAttempts": 5, "BackoffRate": 1.5}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "MainBranchFailed", "ResultPath": "$.error"}]
+                    },
+                    "PITRMainAvailable": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {"Variable": "$.pitr_main_status.db_available", "BooleanEquals": true, "Next": "UpdateSecretsMain"}
+                      ],
+                      "Default": "WaitPITRMain"
+                    },
+                    "UpdateSecretsMain": {
+                      "Comment": "Write the cics PITR endpoint into DRDBSecret (DB_HOST) + SSM.",
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                   "update_secrets",
+                        "db_endpoint.$":            "$.pitr_main_status.db_endpoint",
+                        "dr_db_secret_arn":         "${DrDbSecretArn}",
+                        "pitr_endpoint_ssm_path.$": "$.pitr_endpoint_ssm_path"
+                      },
+                      "ResultPath": "$.secrets_main",
+                      "End": true,
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "MainBranchFailed", "ResultPath": "$.error"}]
+                    },
+                    "MainBranchFailed": {
+                      "Type": "Fail",
+                      "Error": "MainBranchFailed",
+                      "Cause": "Main cics DB PITR restore or secret update failed — see branch logs."
+                    }
+                  }
+                },
+                {
+                  "StartAt": "PITRRestoreFe",
+                  "States": {
+                    "PITRRestoreFe": {
+                      "Comment": "PITR restore of the front-end cicsfe DB.",
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                   "pitr_restore",
+                        "db_instance_identifier":   "${DbFeInstanceIdentifier}",
+                        "pitr_target_identifier.$": "$.pitr_fe_target_identifier",
+                        "pitr_subnet_group.$":      "$.pitr_fe_subnet_group",
+                        "pitr_security_group_id.$": "$.pitr_fe_security_group_id"
+                      },
+                      "ResultPath": "$.pitr_fe",
+                      "Next": "WaitPITRFe",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 2, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FeBranchFailed", "ResultPath": "$.error"}]
+                    },
+                    "WaitPITRFe": {
+                      "Type": "Wait",
+                      "Seconds": 90,
+                      "Next": "CheckPITRFe"
+                    },
+                    "CheckPITRFe": {
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                   "check_db_status",
+                        "pitr_target_identifier.$": "$.pitr_fe.pitr_target_identifier"
+                      },
+                      "ResultPath": "$.pitr_fe_status",
+                      "Next": "PITRFeAvailable",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 30, "MaxAttempts": 5, "BackoffRate": 1.5}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FeBranchFailed", "ResultPath": "$.error"}]
+                    },
+                    "PITRFeAvailable": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {"Variable": "$.pitr_fe_status.db_available", "BooleanEquals": true, "Next": "UpdateSecretsFe"}
+                      ],
+                      "Default": "WaitPITRFe"
+                    },
+                    "UpdateSecretsFe": {
+                      "Comment": "Write the cicsfe PITR endpoint into DRDBFESecret (DB_HOST) + SSM.",
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                   "update_secrets",
+                        "db_endpoint.$":            "$.pitr_fe_status.db_endpoint",
+                        "dr_db_secret_arn":         "${DrDbFeSecretArn}",
+                        "pitr_endpoint_ssm_path.$": "$.pitr_fe_endpoint_ssm_path"
+                      },
+                      "ResultPath": "$.secrets_fe",
+                      "End": true,
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FeBranchFailed", "ResultPath": "$.error"}]
+                    },
+                    "FeBranchFailed": {
+                      "Type": "Fail",
+                      "Error": "FeBranchFailed",
+                      "Cause": "Front-end cicsfe DB PITR restore or secret update failed — see branch logs."
+                    }
+                  }
+                }
               ],
-              "Default": "WaitPITRMain"
-            },
-
-            "UpdateSecretsMain": {
-              "Comment": "Write the cics PITR endpoint into DRDBSecret (DB_HOST) + SSM.",
-              "Type": "Task",
-              "Resource": "${LambdaFunction.Arn}",
-              "Parameters": {
-                "action":                  "update_secrets",
-                "db_endpoint.$":           "$.pitr_main_status.db_endpoint",
-                "dr_db_secret_arn":        "${DrDbSecretArn}",
-                "pitr_endpoint_ssm_path.$": "$.pitr_endpoint_ssm_path"
-              },
-              "ResultPath": "$.secrets_main",
-              "Next": "PITRRestoreFe",
-              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
-              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
-            },
-
-            "PITRRestoreFe": {
-              "Comment": "PITR restore of the front-end cicsfe DB.",
-              "Type": "Task",
-              "Resource": "${LambdaFunction.Arn}",
-              "Parameters": {
-                "action":                   "pitr_restore",
-                "db_instance_identifier":   "${DbFeInstanceIdentifier}",
-                "pitr_target_identifier.$": "$.pitr_fe_target_identifier",
-                "pitr_subnet_group.$":      "$.pitr_fe_subnet_group",
-                "pitr_security_group_id.$": "$.pitr_fe_security_group_id"
-              },
-              "ResultPath": "$.pitr_fe",
-              "Next": "WaitPITRFe",
-              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 2, "BackoffRate": 2}],
-              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
-            },
-
-            "WaitPITRFe": {
-              "Type": "Wait",
-              "Seconds": 90,
-              "Next": "CheckPITRFe"
-            },
-
-            "CheckPITRFe": {
-              "Type": "Task",
-              "Resource": "${LambdaFunction.Arn}",
-              "Parameters": {
-                "action":                   "check_db_status",
-                "pitr_target_identifier.$": "$.pitr_fe.pitr_target_identifier"
-              },
-              "ResultPath": "$.pitr_fe_status",
-              "Next": "PITRFeAvailable",
-              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 30, "MaxAttempts": 5, "BackoffRate": 1.5}],
-              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
-            },
-
-            "PITRFeAvailable": {
-              "Type": "Choice",
-              "Choices": [
-                {"Variable": "$.pitr_fe_status.db_available", "BooleanEquals": true, "Next": "UpdateSecretsFe"}
-              ],
-              "Default": "WaitPITRFe"
-            },
-
-            "UpdateSecretsFe": {
-              "Comment": "Write the cicsfe PITR endpoint into DRDBFESecret (DB_HOST) + SSM.",
-              "Type": "Task",
-              "Resource": "${LambdaFunction.Arn}",
-              "Parameters": {
-                "action":                  "update_secrets",
-                "db_endpoint.$":           "$.pitr_fe_status.db_endpoint",
-                "dr_db_secret_arn":        "${DrDbFeSecretArn}",
-                "pitr_endpoint_ssm_path.$": "$.pitr_fe_endpoint_ssm_path"
-              },
-              "ResultPath": "$.secrets_fe",
+              "ResultPath": "$.pitr_parallel",
               "Next": "UpdateAppStackPITR",
-              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
             },
 

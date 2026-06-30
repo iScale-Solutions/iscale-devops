@@ -7,8 +7,8 @@ This stack provisions the AWS infrastructure required to connect PCHC to the **B
 ```
 Internet
    │
-   ├── EIP AZ1 ──► StrongSwan EC2 (AZ1) ──► IPsec tunnel ──► BSP PhilPassPlus
-   ├── EIP AZ2 ──► StrongSwan EC2 (AZ2) ──► IPsec tunnel ──► BSP 3rd Party
+   ├── EIP AZ1 ──► LibreSwan EC2 (AZ1) ──► IPsec tunnel ──► BSP PhilPassPlus
+   ├── EIP AZ2 ──► LibreSwan EC2 (AZ2) ──► IPsec tunnel ──► BSP 3rd Party
    │
    └── ALB ──► BSP Interface EC2 ──► RDS MySQL
 ```
@@ -17,7 +17,7 @@ The stack is composed of four logical layers:
 
 | Layer | Resources |
 |---|---|
-| VPN | StrongSwan EC2 instances (2× t3.nano, one per AZ), Elastic IPs, ENIs, route table entries |
+| VPN | LibreSwan EC2 instances on AL2023 (2× t3.nano, one per AZ), Elastic IPs, ENIs, route table entries |
 | DNS | Route53 Resolver outbound endpoint forwarding `bsp.gov.ph` to BSP DNS servers |
 | Application | BSP Interface EC2 (t3.medium), Application Load Balancer, Route53 A record |
 | Data | RDS MySQL 8.4 (db.t4g.micro), AWS Backup (prod only) |
@@ -63,7 +63,7 @@ Shared CloudFormation include files (mappings, conditions) are pulled from `s3:/
 | Parameter | Default | Description |
 |---|---|---|
 | `BSPInterfaceAMI` | `ami-00b8d9cb8a7161e41` | AMI for the BSP Interface EC2 instance |
-| `StrongswanAMI` | `ami-0499b5b9a26be1426` | AMI for the StrongSwan VPN EC2 instances |
+| `StrongswanAMI` | `ami-0499b5b9a26be1426` | AMI (Amazon Linux 2023) for the VPN gateway EC2 instances. Legacy-named; the gateway now runs LibreSwan |
 | `InstanceKeyName` | *(empty)* | EC2 key pair name; omit to use SSM Session Manager only |
 | `InstanceType` | `t3.medium` | Instance type for the BSP Interface server |
 
@@ -78,7 +78,7 @@ Shared CloudFormation include files (mappings, conditions) are pulled from `s3:/
 
 | Parameter | Default | Description |
 |---|---|---|
-| `StrongswanActive` | `true` | Set `false` to skip all StrongSwan resources (VPN, routes, DNS resolver) |
+| `StrongswanActive` | `true` | Set `false` to skip all VPN gateway resources (VPN, routes, DNS resolver). Legacy-named |
 | `BSPMode` | `UAT` | BSP environment to connect to: `Production` or `UAT` |
 | `BSPInterfaceHostname` | `philpassv2` | Hostname prefix for the Route53 record (e.g. `philpassv2.pchc.com.ph`) |
 | `StrongswanPPPPSK` | *(sensitive)* | Pre-shared key for the PhilPassPlus IPsec tunnel |
@@ -98,12 +98,14 @@ Shared CloudFormation include files (mappings, conditions) are pulled from `s3:/
 
 ## IPsec Tunnel Details
 
-StrongSwan is configured with IKEv1, PSK authentication, and the following cipher suites:
+The gateway runs **LibreSwan on Amazon Linux 2023** using **route-based IPsec (VTI)** with **nftables** for SNAT. It is configured with IKEv1, PSK authentication, and the following cipher suites:
 
 - **IKE**: `aes256-sha256-modp2048`, lifetime 43200s (12 hours)
 - **ESP**: `aes128-sha256-modp2048`
 
-Each StrongSwan instance attaches to a pre-allocated ENI with a fixed private IP that is registered with BSP. These IPs must **not** change after registration — the ENIs persist independently of the EC2 instances.
+Each tunnel is pinned to its own VTI interface (`vti0`/`vti1`/…) with a unique XFRM mark, and private-subnet traffic is masqueraded onto the VTI by a single nftables rule. This replaced the earlier StrongSwan-on-AL2 design (policy-based IPsec + iptables MASQUERADE on `eth0`), which stopped working on the AL2023 kernel 6.1 because the XFRM policy check now runs before POSTROUTING NAT. See [LIBRESWAN.md](LIBRESWAN.md) for the full gateway internals and the kernel rationale (and [STRONGSWAN.md](STRONGSWAN.md) for the legacy setup).
+
+Each gateway instance attaches to a pre-allocated ENI with a fixed private IP that is registered with BSP. These IPs must **not** change after registration — the ENIs persist independently of the EC2 instances.
 
 The two Elastic IPs (`BSPVPNGatewayEIP1`, `BSPVPNGatewayEIP2`) have `DeletionPolicy: Retain` and must be registered with BSP before deployment. Do not release them.
 
@@ -129,14 +131,14 @@ aws cloudformation deploy \
 
 A CloudWatch Dashboard is created automatically, displaying:
 
-- **Alarms panel** — all StrongSwan and BSP Interface alarms
-- **CPU** — StrongSwan AZ1/AZ2, BSP Interface, RDS
-- **Memory** — StrongSwan AZ1/AZ2, BSP Interface, RDS freeable memory
+- **Alarms panel** — all VPN gateway and BSP Interface alarms
+- **CPU** — VPN gateway AZ1/AZ2, BSP Interface, RDS
+- **Memory** — VPN gateway AZ1/AZ2, BSP Interface, RDS freeable memory
 - **Performance** — ALB response time, RDS read/write latency
 - **Network** — NetworkIn/Out for all instances
-- **Space** — disk usage for StrongSwan and BSP Interface, RDS free storage
+- **Space** — disk usage for VPN gateway and BSP Interface, RDS free storage
 
-CloudWatch alarms (CPU ≥80%, memory ≥80%, disk ≥80%) are enabled only in Production and notify via the SNS topic from `SNSStackName`.
+CloudWatch alarms (CPU ≥80%, memory ≥80%, disk ≥80%) are enabled only in Production and notify via the SNS topic from `SNSStackName`. The CloudWatch dashboard widgets label the gateway instances as `BSP-gateway-AZ1` / `BSP-gateway-AZ2`.
 
 ## Access
 
@@ -147,5 +149,5 @@ Database access from the jump host is explicitly allowed via a security group in
 ## Notes
 
 - The `ServerStack`, `CacheStack`, and `DeployStack` nested stacks are currently commented out. Uncomment and configure if an application server or ElastiCache cluster is needed.
-- StrongSwan instances run as `t3.nano` and are not configurable — they are sized for VPN tunnelling only.
+- VPN gateway instances run as `t3.nano` and are not configurable — they are sized for VPN tunnelling only.
 - The RDS scheduler (start/stop) is created only in non-production environments to reduce costs.

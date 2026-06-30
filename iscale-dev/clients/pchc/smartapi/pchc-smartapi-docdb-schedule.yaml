@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Scheduled start/stop for a DocumentDB instance cluster via EventBridge Scheduler
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Target
+        Parameters:
+          - DocDbClusterIdentifier
+      - Label:
+          default: Stop Schedule
+        Parameters:
+          - StopScheduleExpression
+          - StopScheduleState
+      - Label:
+          default: Start Schedule
+        Parameters:
+          - StartScheduleExpression
+          - StartScheduleState
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - OrgName
+          - EnvName
+
+    ParameterLabels:
+      DocDbClusterIdentifier:
+        default: DocumentDB Cluster Identifier
+      StopScheduleExpression:
+        default: Stop Cron Expression
+      StopScheduleState:
+        default: Stop Schedule State
+      StartScheduleExpression:
+        default: Start Cron Expression
+      StartScheduleState:
+        default: Start Schedule State
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+
+Parameters:
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Must contain only lowercase letters and hyphens.
+    MaxLength: 10
+
+  EnvName:
+    Description: The name of the environment.
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+
+  DocDbClusterIdentifier:
+    Description: >-
+      The identifier of the DocumentDB instance cluster to manage.
+      Find it in the RDS/DocumentDB console under "Cluster identifier".
+    Type: String
+    MinLength: 1
+
+  StopScheduleExpression:
+    Description: >-
+      EventBridge Scheduler cron expression for stopping the cluster.
+      Uses UTC. Format: cron(Minutes Hours Day-of-month Month Day-of-week Year).
+    Type: String
+    Default: 'cron(0 0 * * ? *)'
+
+  StopScheduleState:
+    Description: Set to DISABLED to pause the stop schedule without deleting the stack.
+    Type: String
+    Default: ENABLED
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+
+  StartScheduleExpression:
+    Description: >-
+      EventBridge Scheduler cron expression for starting the cluster.
+      Uses UTC. Format: cron(Minutes Hours Day-of-month Month Day-of-week Year).
+    Type: String
+    Default: 'cron(0 8 * * ? *)'
+
+  StartScheduleState:
+    Description: >-
+      Set to ENABLED when a start schedule is needed.
+      Currently DISABLED — cluster is stopped indefinitely at 00:00 UTC and not auto-started.
+    Type: String
+    Default: DISABLED
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+
+Resources:
+
+###
+# IAM Role
+###
+
+  DocDbSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-scheduler-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: DocDbStartStop
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:StartDBCluster
+                  - rds:StopDBCluster
+                Resource: !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DocDbClusterIdentifier}
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-scheduler-role
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+###
+# Schedules
+###
+
+  DocDbStopSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${AWS::StackName}-stop
+      Description: !Sub Stop DocumentDB cluster ${DocDbClusterIdentifier} on schedule
+      ScheduleExpression: !Ref StopScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      State: !Ref StopScheduleState
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:rds:stopDBCluster
+        RoleArn: !GetAtt DocDbSchedulerRole.Arn
+        Input: !Sub '{"DbClusterIdentifier": "${DocDbClusterIdentifier}"}'
+
+  DocDbStartSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${AWS::StackName}-start
+      Description: !Sub Start DocumentDB cluster ${DocDbClusterIdentifier} on schedule
+      ScheduleExpression: !Ref StartScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      State: !Ref StartScheduleState
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:rds:startDBCluster
+        RoleArn: !GetAtt DocDbSchedulerRole.Arn
+        Input: !Sub '{"DbClusterIdentifier": "${DocDbClusterIdentifier}"}'
+
+Outputs:
+
+  SchedulerRoleArn:
+    Description: ARN of the IAM role used by EventBridge Scheduler
+    Value: !GetAtt DocDbSchedulerRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-SchedulerRoleArn
+
+  StopScheduleArn:
+    Description: ARN of the stop schedule
+    Value: !GetAtt DocDbStopSchedule.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-StopScheduleArn
+
+  StartScheduleArn:
+    Description: ARN of the start schedule
+    Value: !GetAtt DocDbStartSchedule.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-StartScheduleArn
