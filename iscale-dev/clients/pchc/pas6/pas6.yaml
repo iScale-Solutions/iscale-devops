@@ -90,9 +90,9 @@ Metadata:
       EnableCrossRegionBackupReplication:
         default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
       AppCRRBucketArn:
-        default: App CodeDeploy CRR Destination Bucket ARN (SSM parameter path — set by deploy-dr-foundation)
+        default: App CodeDeploy CRR Destination Bucket ARN (leave blank for DR stack — set by deploy-dr-foundation for live stack)
       SidekiqCRRBucketArn:
-        default: Sidekiq CodeDeploy CRR Destination Bucket ARN (SSM parameter path — set by deploy-dr-foundation)
+        default: Sidekiq CodeDeploy CRR Destination Bucket ARN (leave blank for DR stack — set by deploy-dr-foundation for live stack)
       SourceDbInstanceArn:
         default: Source DB Instance ARN (live region — required when replication is enabled)
       BackupReplicationRetentionPeriod:
@@ -232,13 +232,19 @@ Parameters:
       - 'true'
       - 'false'
   AppCRRBucketArn:
-    Description: SSM parameter path holding the ARN of the DR CodeDeploy artifacts bucket for the app server. Written by deploy-dr-foundation after L2 deploys. Leave at default path — value is managed via SSM, not this parameter.
-    Type: AWS::SSM::Parameter::Value<String>
-    Default: /pchc/dr/pas6/app-codedeploy-bucket-arn
+    Description: |
+      (Live region only) ARN of the DR CodeDeploy artifacts bucket for the app server.
+      Obtain from the AppDeployStack output in the DR region.
+      Leave blank for DR stack deployments — the IsDR condition suppresses CRR automatically.
+    Type: String
+    Default: ''
   SidekiqCRRBucketArn:
-    Description: SSM parameter path holding the ARN of the DR CodeDeploy artifacts bucket for the Sidekiq server. Written by deploy-dr-foundation after L2 deploys. Leave at default path — value is managed via SSM, not this parameter.
-    Type: AWS::SSM::Parameter::Value<String>
-    Default: /pchc/dr/pas6/sidekiq-codedeploy-bucket-arn
+    Description: |
+      (Live region only) ARN of the DR CodeDeploy artifacts bucket for the Sidekiq server.
+      Obtain from the SidekiqDeployStack output in the DR region.
+      Leave blank for DR stack deployments — the IsDR condition suppresses CRR automatically.
+    Type: String
+    Default: ''
   SourceDbInstanceArn:
     Description: |
       ARN of the live region RDS DB instance to replicate from.
@@ -572,7 +578,7 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        ReplicationDestinationBucketArn: !Ref AppCRRBucketArn
+        ReplicationDestinationBucketArn: !If [IsDR, '', !Ref AppCRRBucketArn]
 
   CacheStack:
     # Set IsDeployPaidResources=false (i.e. DR env) to suppress. See conditions for failover instructions.
@@ -741,7 +747,7 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
-        ReplicationDestinationBucketArn: !Ref SidekiqCRRBucketArn
+        ReplicationDestinationBucketArn: !If [IsDR, '', !Ref SidekiqCRRBucketArn]
 
   SidekiqServerStack:
     DependsOn:
