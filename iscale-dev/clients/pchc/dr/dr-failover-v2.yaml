@@ -4,7 +4,21 @@ AWSTemplateFormatVersion: 2010-09-09
 #   pitr_target_identifier, pitr_endpoint_ssm_path, pitr_subnet_group,
 #   pitr_security_group_id, redshift_cluster_identifier,
 #   redshift_snapshot_identifier, snapshot_identifier, db_master_password,
-#   sns_topic_arn
+#   sns_topic_arn,
+#   asg_configs=[{asg_name, min_size, desired_capacity, max_size}, ...] (pass [] to skip ASG scaling),
+#   codedeploy_wiring_configs=[{application_name, server_stack_prefix}, ...]
+#     application_name: full CodeDeploy app name, pattern {org}-{env}-{region}-{name}-application
+#       e.g. pchc-tdr-ue2-pesonet20-tre-application
+#     server_stack_name: substring to match against CFN stack names (e.g. TreasuryServerStack)
+#       matched with 'in' — does not need to be a prefix; any unique substring works
+#     deployment_group_name and asg_name are auto-discovered (random CFN suffixes)
+#     (omit key entirely to skip; switches deployment groups from Ec2TagFilters → AutoScalingGroups
+#     so lifecycle hooks fire when instances launch — must run BEFORE ScaleASGs)
+#   codedeploy_configs=[{application_name, s3_bucket,
+#     deployment_group_name (optional — omit to auto-discover via ListDeploymentGroups),
+#     s3_key (optional — omit to auto-discover latest object by LastModified),
+#     s3_prefix (optional — prefix filter for discovery, default "app-"),
+#     bundle_type (optional — default "zip")}, ...] (omit key entirely to skip CodeDeploy)
 # EFS restore keys (PITR path only — omit to skip EFS restore and create fresh EFS):
 #   efs_backup_vault_name, efs_id_ssm_path, backup_role_arn
 # Input payload keys (ecs_app_group mode — ECS Fargate multi-stack, e.g. SmartAPI):
@@ -12,7 +26,8 @@ AWSTemplateFormatVersion: 2010-09-09
 #   prereq_stack_name, parallel_stacks=[{"stack_name": "..."}, ...], sns_topic_arn
 # Lambda actions: discover | pitr_restore | check_db_status | update_secrets |
 #   check_efs_recovery_point | restore_efs | check_restore_job |
-#   update_stack | check_stack_status | notify
+#   update_stack | check_stack_status | notify |
+#   set_asg_capacity | update_codedeploy_group | trigger_codedeploy | check_codedeploy
 # Per-app EventBridge triggers: dr-trigger-<app>.yaml imports StateMachineArn.
 #
 # EFS SG design — how NFS access is established after restore:
@@ -172,8 +187,8 @@ Resources:
       FunctionName: !Sub '${AWS::StackName}'
       Description: >-
         DR Failover engine worker. Actions: discover | pitr_restore | check_db_status |
-        update_secrets | update_stack | check_stack_status | notify.
-        All app config is read from the event payload — no per-app env vars.
+        update_secrets | update_stack | check_stack_status | notify |
+        set_asg_capacity | update_codedeploy_group | trigger_codedeploy | check_codedeploy.
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.12
@@ -217,6 +232,10 @@ Resources:
               if action == 'check_stack_status':        return _check_stack_status(event)
               if action == 'notify':                    return _notify(event)
               if action == 'scale_ecs_service':         return _scale_ecs_service(event)
+              if action == 'set_asg_capacity':          return _set_asg_capacity(event)
+              if action == 'update_codedeploy_group':   return _update_codedeploy_group(event)
+              if action == 'trigger_codedeploy':        return _trigger_codedeploy(event)
+              if action == 'check_codedeploy':          return _check_codedeploy(event)
               raise ValueError(f'Unknown action: {action!r}')
 
 
@@ -661,6 +680,187 @@ Resources:
                       logger.info(f'Latest git-SHA image: {repo}:{tag}')
                       return f'{registry}/{repo}:{tag}'
               raise Exception(f'No git-SHA-tagged images found in ECR repo: {repo}')
+
+
+          # ── set_asg_capacity ─────────────────────────────────────────────────
+
+          def _set_asg_capacity(event):
+              region           = os.environ['AWS_REGION']
+              asg_name         = event.get('asg_name', '')
+              min_size         = int(event.get('min_size', 0))
+              desired_capacity = int(event.get('desired_capacity', 0))
+              max_size         = int(event.get('max_size', desired_capacity))
+              if not asg_name:
+                  raise ValueError('asg_name is required for set_asg_capacity')
+              asg = boto3.client('autoscaling', region_name=region)
+              asg.update_auto_scaling_group(
+                  AutoScalingGroupName=asg_name,
+                  MinSize=min_size,
+                  MaxSize=max_size,
+                  DesiredCapacity=desired_capacity,
+              )
+              logger.info(f'ASG {asg_name}: min={min_size} desired={desired_capacity} max={max_size}')
+              return {
+                  'asg_name':         asg_name,
+                  'min_size':         min_size,
+                  'desired_capacity': desired_capacity,
+                  'max_size':         max_size,
+              }
+
+
+          # ── trigger_codedeploy / check_codedeploy ────────────────────────────
+
+          def _trigger_codedeploy(event):
+              # Accepts event directly or wrapped under 'input' (state machine passes "input.$": "$")
+              inp         = event.get('input', event)
+              region      = os.environ['AWS_REGION']
+              app_name    = inp.get('application_name', '')
+              dg_name     = inp.get('deployment_group_name', '')
+              s3_bucket   = inp.get('s3_bucket', '')
+              s3_key      = inp.get('s3_key', '')
+              s3_prefix   = inp.get('s3_prefix', 'app-')
+              bundle_type = inp.get('bundle_type', 'zip')
+              if not app_name or not s3_bucket:
+                  raise ValueError(
+                      'application_name and s3_bucket are required for trigger_codedeploy'
+                  )
+              cd = boto3.client('codedeploy', region_name=region)
+              if not dg_name:
+                  # Auto-discover: deployment group name has a random CFN suffix
+                  dg_list = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
+                  if not dg_list:
+                      raise Exception(f'No deployment groups found for application: {app_name}')
+                  dg_name = dg_list[0]
+                  logger.info(f'Auto-discovered deployment group: {dg_name}')
+              if not s3_key:
+                  s3_key = _get_latest_s3_artifact(region, s3_bucket, s3_prefix)
+              resp = cd.create_deployment(
+                  applicationName=app_name,
+                  deploymentGroupName=dg_name,
+                  revision={
+                      'revisionType': 'S3',
+                      's3Location': {
+                          'bucket':     s3_bucket,
+                          'key':        s3_key,
+                          'bundleType': bundle_type,
+                      },
+                  },
+                  ignoreApplicationStopFailures=True,
+              )
+              deployment_id = resp['deploymentId']
+              logger.info(f'CodeDeploy deployment created: {deployment_id} ({app_name}/{dg_name}) s3_key={s3_key}')
+              return {
+                  'deployment_id':          deployment_id,
+                  'application_name':       app_name,
+                  'deployment_group_name':  dg_name,
+                  's3_key':                 s3_key,
+              }
+
+          def _get_latest_s3_artifact(region, bucket, prefix='app-'):
+              """List all objects under prefix, return the key of the most recently modified one."""
+              s3      = boto3.client('s3', region_name=region)
+              objects = []
+              kwargs  = {'Bucket': bucket, 'Prefix': prefix}
+              while True:
+                  resp    = s3.list_objects_v2(**kwargs)
+                  objects.extend(resp.get('Contents', []))
+                  if resp.get('IsTruncated'):
+                      kwargs['ContinuationToken'] = resp['NextContinuationToken']
+                  else:
+                      break
+              if not objects:
+                  raise Exception(f'No artifacts found in s3://{bucket} with prefix "{prefix}"')
+              objects.sort(key=lambda o: o['LastModified'], reverse=True)
+              key = objects[0]['Key']
+              logger.info(f'Latest artifact in s3://{bucket}: {key} (modified={objects[0]["LastModified"]})')
+              return key
+
+          def _check_codedeploy(event):
+              region        = os.environ['AWS_REGION']
+              deployment_id = event.get('deployment_id', '')
+              if not deployment_id:
+                  raise ValueError('deployment_id is required for check_codedeploy')
+              cd   = boto3.client('codedeploy', region_name=region)
+              resp = cd.get_deployment(deploymentId=deployment_id)
+              info      = resp['deploymentInfo']
+              status    = info['status']
+              complete  = status in ('Succeeded', 'Failed', 'Stopped')
+              succeeded = status == 'Succeeded'
+              logger.info(f'CodeDeploy {deployment_id}: {status}')
+              return {
+                  'deployment_id':        deployment_id,
+                  'deployment_status':    status,
+                  'deployment_complete':  complete,
+                  'deployment_succeeded': succeeded,
+              }
+
+
+          # ── update_codedeploy_group ───────────────────────────────────────────
+
+          def _update_codedeploy_group(event):
+              # Accepts event directly or wrapped under 'input' (state machine passes "input.$": "$")
+              inp          = event.get('input', event)
+              region       = os.environ['AWS_REGION']
+              app_name   = inp.get('application_name', '')
+              stack_name = inp.get('server_stack_name', '')
+              if not app_name or not stack_name:
+                  raise ValueError(
+                      'application_name and server_stack_name are required '
+                      'for update_codedeploy_group'
+                  )
+              # Deployment group name has a random CFN suffix — discover it
+              cd       = boto3.client('codedeploy', region_name=region)
+              dg_names = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
+              if not dg_names:
+                  raise Exception(f'No deployment groups found for CodeDeploy application: {app_name}')
+              dg_name = dg_names[0]
+              logger.info(f'Discovered deployment group: {dg_name} (app={app_name})')
+              # ASG name has a random CFN suffix — discover via stack resources
+              asg_name = _find_asg_from_stack_name(region, stack_name)
+              logger.info(f'Discovered ASG: {asg_name} (stack_name contains={stack_name})')
+              # Switch from Ec2TagFilters to AutoScalingGroups so lifecycle hooks fire on scale-out
+              cd.update_deployment_group(
+                  applicationName=app_name,
+                  currentDeploymentGroupName=dg_name,
+                  autoScalingGroups=[asg_name],
+                  ec2TagFilters=[],
+              )
+              logger.info(f'CodeDeploy group {app_name}/{dg_name} wired to ASG: {asg_name}')
+              return {
+                  'application_name':      app_name,
+                  'deployment_group_name': dg_name,
+                  'asg_name':              asg_name,
+              }
+
+          def _find_asg_from_stack_name(region, stack_name):
+              """Find AppServerAutoScalingGroup physical ID from a CFN stack whose name contains stack_name."""
+              cf     = boto3.client('cloudformation', region_name=region)
+              target = None
+              kwargs = {'StackStatusFilter': [
+                  'CREATE_COMPLETE', 'UPDATE_COMPLETE', 'UPDATE_ROLLBACK_COMPLETE',
+              ]}
+              while True:
+                  resp = cf.list_stacks(**kwargs)
+                  for s in resp.get('StackSummaries', []):
+                      if stack_name in s['StackName']:
+                          target = s['StackName']
+                          break
+                  if target or not resp.get('NextToken'):
+                      break
+                  kwargs['NextToken'] = resp['NextToken']
+              if not target:
+                  raise Exception(f'No active CFN stack found containing: {stack_name}')
+              # Walk stack resources to find AppServerAutoScalingGroup logical resource
+              rk = {}
+              while True:
+                  rr = cf.list_stack_resources(StackName=target, **rk)
+                  for res in rr.get('StackResourceSummaries', []):
+                      if res['LogicalResourceId'] == 'AppServerAutoScalingGroup':
+                          return res['PhysicalResourceId']
+                  if not rr.get('NextToken'):
+                      break
+                  rk['NextToken'] = rr['NextToken']
+              raise Exception(f'AppServerAutoScalingGroup resource not found in stack: {target}')
 
 
           # ── helpers ───────────────────────────────────────────────────────────
@@ -1364,10 +1564,158 @@ Resources:
             "AppStackDone": {
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.app_status.stack_rollback", "BooleanEquals": true,  "Next": "FailoverFailed"},
-                {"Variable": "$.app_status.stack_complete", "BooleanEquals": true,  "Next": "NotifyComplete"}
+                {"Variable": "$.app_status.stack_rollback", "BooleanEquals": true, "Next": "FailoverFailed"},
+                {"Variable": "$.app_status.stack_complete", "BooleanEquals": true, "Next": "WireCodeDeployRoute"}
               ],
               "Default": "WaitAppStack"
+            },
+
+            "WireCodeDeployRoute": {
+              "Comment": "If codedeploy_wiring_configs is present, switch deployment groups to ASG targeting before scaling (so lifecycle hooks are active when instances launch). Omit the key to skip.",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.codedeploy_wiring_configs", "IsPresent": true, "Next": "UpdateCodeDeployGroups"}
+              ],
+              "Default": "ScaleASGs"
+            },
+
+            "UpdateCodeDeployGroups": {
+              "Comment": "Switch each CodeDeploy deployment group from Ec2TagFilters to AutoScalingGroups. Clears tag filters so deployments are ASG-scoped only. Runs before ScaleASGs so lifecycle hooks fire as instances launch.",
+              "Type": "Map",
+              "ItemsPath": "$.codedeploy_wiring_configs",
+              "MaxConcurrency": 0,
+              "Iterator": {
+                "StartAt": "WireOneGroup",
+                "States": {
+                  "WireOneGroup": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":  "update_codedeploy_group",
+                      "input.$": "$"
+                    },
+                    "End": true,
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 2, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneGroupFailed", "ResultPath": "$.error"}]
+                  },
+                  "OneGroupFailed": {
+                    "Type": "Fail",
+                    "Error": "CodeDeployWiringFailed",
+                    "Cause": "Failed to wire a CodeDeploy deployment group to its ASG — check CloudWatch Logs."
+                  }
+                }
+              },
+              "ResultPath": "$.wiring_results",
+              "Next": "ScaleASGs",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "ScaleASGs": {
+              "Comment": "App stack is UPDATE_COMPLETE — Launch Template now has the DR AMI. Scale each ASG to its target capacity. asg_configs: [{asg_name, min_size, desired_capacity, max_size}, ...]. Pass [] to skip.",
+              "Type": "Map",
+              "ItemsPath": "$.asg_configs",
+              "MaxConcurrency": 0,
+              "Iterator": {
+                "StartAt": "SetOneASG",
+                "States": {
+                  "SetOneASG": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":             "set_asg_capacity",
+                      "asg_name.$":         "$.asg_name",
+                      "min_size.$":         "$.min_size",
+                      "desired_capacity.$": "$.desired_capacity",
+                      "max_size.$":         "$.max_size"
+                    },
+                    "End": true,
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 2, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneASGFailed", "ResultPath": "$.error"}]
+                  },
+                  "OneASGFailed": {
+                    "Type": "Fail",
+                    "Error": "ASGScalingFailed",
+                    "Cause": "Failed to update one ASG capacity — check CloudWatch Logs."
+                  }
+                }
+              },
+              "ResultPath": "$.asg_results",
+              "Next": "PostScaleRoute",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "PostScaleRoute": {
+              "Comment": "Trigger CodeDeploy if codedeploy_configs is present in the payload; otherwise complete.",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.codedeploy_configs", "IsPresent": true, "Next": "TriggerCodeDeployParallel"}
+              ],
+              "Default": "NotifyComplete"
+            },
+
+            "TriggerCodeDeployParallel": {
+              "Comment": "Trigger all CodeDeploy deployment groups concurrently then poll for completion. codedeploy_configs: [{application_name, deployment_group_name, s3_bucket, s3_key}, ...].",
+              "Type": "Map",
+              "ItemsPath": "$.codedeploy_configs",
+              "MaxConcurrency": 0,
+              "Iterator": {
+                "StartAt": "TriggerOneDeployment",
+                "States": {
+                  "TriggerOneDeployment": {
+                    "Comment": "Pass the full item as 'input' so optional fields (s3_key, s3_prefix, bundle_type) are forwarded without causing reference errors when absent.",
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":  "trigger_codedeploy",
+                      "input.$": "$"
+                    },
+                    "ResultPath": "$.deploy_result",
+                    "Next": "WaitOneDeployment",
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneDeploymentFailed", "ResultPath": "$.error"}]
+                  },
+                  "WaitOneDeployment": {
+                    "Type": "Wait",
+                    "Seconds": 30,
+                    "Next": "CheckOneDeployment"
+                  },
+                  "CheckOneDeployment": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":          "check_codedeploy",
+                      "deployment_id.$": "$.deploy_result.deployment_id"
+                    },
+                    "ResultPath": "$.deploy_status",
+                    "Next": "OneDeploymentDone",
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneDeploymentFailed", "ResultPath": "$.error"}]
+                  },
+                  "OneDeploymentDone": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "And": [
+                          {"Variable": "$.deploy_status.deployment_complete",  "BooleanEquals": true},
+                          {"Variable": "$.deploy_status.deployment_succeeded", "BooleanEquals": false}
+                        ],
+                        "Next": "OneDeploymentFailed"
+                      },
+                      {"Variable": "$.deploy_status.deployment_succeeded", "BooleanEquals": true, "Next": "OneDeploymentSucceeded"}
+                    ],
+                    "Default": "WaitOneDeployment"
+                  },
+                  "OneDeploymentSucceeded": {"Type": "Succeed"},
+                  "OneDeploymentFailed": {
+                    "Type": "Fail",
+                    "Error": "CodeDeployFailed",
+                    "Cause": "CodeDeploy deployment failed — check CodeDeploy console and application logs."
+                  }
+                }
+              },
+              "ResultPath": "$.codedeploy_results",
+              "Next": "NotifyComplete",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
             },
 
             "NotifyComplete": {
@@ -1377,7 +1725,7 @@ Resources:
                 "action":         "notify",
                 "sns_topic_arn.$": "$.sns_topic_arn",
                 "subject":        "DR Failover Complete",
-                "message":        "DR failover completed. Network stack and app stack are UPDATE_COMPLETE."
+                "message":        "DR failover completed. Network stack and app stack are UPDATE_COMPLETE. CodeDeploy groups wired to ASGs, capacities set, and deployments succeeded."
               },
               "ResultPath": "$.notify_result",
               "Next": "Complete",
