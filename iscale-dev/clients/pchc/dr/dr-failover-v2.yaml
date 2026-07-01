@@ -5,7 +5,8 @@ AWSTemplateFormatVersion: 2010-09-09
 #   pitr_security_group_id, redshift_cluster_identifier,
 #   redshift_snapshot_identifier, snapshot_identifier, db_master_password,
 #   sns_topic_arn,
-#   asg_configs=[{asg_name, min_size, desired_capacity, max_size}, ...] (pass [] to skip ASG scaling),
+#   asg_configs=[{asg_name OR server_stack_name, min_size, desired_capacity, max_size}, ...]
+#     asg_name: explicit ASG name; server_stack_name: substring match to auto-discover (pass [] to skip),
 #   codedeploy_wiring_configs=[{application_name, server_stack_prefix}, ...]
 #     application_name: full CodeDeploy app name, pattern {org}-{env}-{region}-{name}-application
 #       e.g. pchc-tdr-ue2-pesonet20-tre-application
@@ -687,11 +688,15 @@ Resources:
           def _set_asg_capacity(event):
               region           = os.environ['AWS_REGION']
               asg_name         = event.get('asg_name', '')
+              stack_name       = event.get('server_stack_name', '')
               min_size         = int(event.get('min_size', 0))
               desired_capacity = int(event.get('desired_capacity', 0))
               max_size         = int(event.get('max_size', desired_capacity))
+              if not asg_name and not stack_name:
+                  raise ValueError('asg_name or server_stack_name is required for set_asg_capacity')
               if not asg_name:
-                  raise ValueError('asg_name is required for set_asg_capacity')
+                  asg_name = _find_asg_from_stack_name(region, stack_name)
+                  logger.info(f'Discovered ASG: {asg_name} (stack_name contains={stack_name})')
               asg = boto3.client('autoscaling', region_name=region)
               asg.update_auto_scaling_group(
                   AutoScalingGroupName=asg_name,
