@@ -28,7 +28,7 @@ AWSTemplateFormatVersion: 2010-09-09
 # Lambda actions: discover | pitr_restore | check_db_status | update_secrets |
 #   check_efs_recovery_point | restore_efs | check_restore_job |
 #   update_stack | check_stack_status | notify |
-#   set_asg_capacity | update_codedeploy_group | trigger_codedeploy | check_codedeploy
+#   set_asg_capacity | check_all_asgs_healthy | update_codedeploy_group | trigger_codedeploy | check_codedeploy
 # Per-app EventBridge triggers: dr-trigger-<app>.yaml imports StateMachineArn.
 #
 # EFS SG design — how NFS access is established after restore:
@@ -234,6 +234,7 @@ Resources:
               if action == 'notify':                    return _notify(event)
               if action == 'scale_ecs_service':         return _scale_ecs_service(event)
               if action == 'set_asg_capacity':          return _set_asg_capacity(event)
+              if action == 'check_all_asgs_healthy':    return _check_all_asgs_healthy(event)
               if action == 'update_codedeploy_group':   return _update_codedeploy_group(event)
               if action == 'trigger_codedeploy':        return _trigger_codedeploy(event)
               if action == 'check_codedeploy':          return _check_codedeploy(event)
@@ -712,6 +713,36 @@ Resources:
                   'desired_capacity': desired_capacity,
                   'max_size':         max_size,
               }
+
+
+          # ── check_all_asgs_healthy ───────────────────────────────────────────
+
+          def _check_all_asgs_healthy(event):
+              """Poll all ASGs in asg_configs until desired instances reach InService."""
+              region      = os.environ['AWS_REGION']
+              asg_configs = event.get('asg_configs', [])
+              asg_client  = boto3.client('autoscaling', region_name=region)
+              all_healthy = True
+              results     = []
+              for cfg in asg_configs:
+                  asg_name   = cfg.get('asg_name', '')
+                  stack_name = cfg.get('server_stack_name', '')
+                  desired    = int(cfg.get('desired_capacity', 0))
+                  if desired == 0:
+                      results.append({'asg_name': asg_name or stack_name, 'desired': 0, 'in_service': 0, 'healthy': True})
+                      continue
+                  if not asg_name:
+                      asg_name = _find_asg_from_stack_name(region, stack_name)
+                  resp       = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
+                  group      = resp['AutoScalingGroups'][0]
+                  in_service = len([i for i in group['Instances'] if i['LifecycleState'] == 'InService'])
+                  healthy    = in_service >= desired
+                  if not healthy:
+                      all_healthy = False
+                  logger.info(f'ASG {asg_name}: desired={desired} in_service={in_service} healthy={healthy}')
+                  results.append({'asg_name': asg_name, 'desired': desired, 'in_service': in_service, 'healthy': healthy})
+              logger.info(f'All ASGs healthy: {all_healthy}')
+              return {'all_healthy': all_healthy, 'asg_health': results}
 
 
           # ── trigger_codedeploy / check_codedeploy ────────────────────────────
@@ -1644,8 +1675,38 @@ Resources:
                 }
               },
               "ResultPath": "$.asg_results",
-              "Next": "PostScaleRoute",
+              "Next": "WaitForInstances",
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitForInstances": {
+              "Comment": "Initial pause after scaling — give instances time to launch before first health check.",
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckASGsHealthy"
+            },
+
+            "CheckASGsHealthy": {
+              "Comment": "Poll all ASGs until desired instance count is InService. Loops back to WaitForInstances until ready.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":        "check_all_asgs_healthy",
+                "asg_configs.$": "$.asg_configs"
+              },
+              "ResultPath": "$.asg_health_result",
+              "Next": "ASGsHealthyRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "ASGsHealthyRoute": {
+              "Comment": "Proceed to CodeDeploy only once all ASGs have their desired instances InService.",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.asg_health_result.all_healthy", "BooleanEquals": true, "Next": "PostScaleRoute"}
+              ],
+              "Default": "WaitForInstances"
             },
 
             "PostScaleRoute": {
