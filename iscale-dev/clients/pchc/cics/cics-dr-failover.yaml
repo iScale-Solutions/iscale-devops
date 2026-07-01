@@ -560,12 +560,24 @@ Resources:
                   {'Name': 'instance-state-name', 'Values': ['stopped']},
               ])
               ids = [i['InstanceId'] for r in resp.get('Reservations', []) for i in r['Instances']]
-              if ids:
-                  ec2.start_instances(InstanceIds=ids)
-                  logger.info(f'Started {len(ids)} {tag_key}={tag_val} instance(s): {ids}')
-              else:
+              if not ids:
                   logger.info(f'No stopped {tag_key}={tag_val} instances to start.')
-              return {'started_instance_ids': ids, 'started_count': len(ids)}
+                  return {'started_instance_ids': [], 'capacity_failed_ids': [], 'started_count': 0}
+              started, capacity_failed = [], []
+              for iid in ids:
+                  try:
+                      ec2.start_instances(InstanceIds=[iid])
+                      started.append(iid)
+                  except ClientError as e:
+                      code = e.response['Error']['Code']
+                      if code in ('InsufficientInstanceCapacity', 'InsufficientCapacity'):
+                          logger.warning(f'InsufficientInstanceCapacity for {iid} — start manually once capacity is available')
+                          capacity_failed.append(iid)
+                      else:
+                          raise
+              logger.info(f'Started {len(started)}/{len(ids)} {tag_key}={tag_val} instance(s). '
+                          f'Capacity failures: {capacity_failed or "none"}')
+              return {'started_instance_ids': started, 'capacity_failed_ids': capacity_failed, 'started_count': len(started)}
 
 
           # ── notify ────────────────────────────────────────────────────────────
@@ -931,11 +943,11 @@ Resources:
                 "stack_type":   "app",
                 "stack_name":   "${AppStackName}",
                 "extra_params": {
-                  "DeployPaidResources":    "true",
-                  "IsPITRMode":             "false",
-                  "SnapshotIdentifier.$":   "$.discovered.snapshot_identifier",
-                  "DBMasterUserPassword.$": "$.discovered.db_master_password",
-                  "SnapshotIdentifierFe.$": "$.discovered.snapshot_identifier_fe",
+                  "DeployPaidResources":     "true",
+                  "IsPITRMode":              "false",
+                  "SnapshotIdentifier.$":    "$.discovered.snapshot_identifier",
+                  "DBMasterUserPassword.$":  "$.discovered.db_master_password",
+                  "SnapshotIdentifierFe.$":  "$.discovered.snapshot_identifier_fe",
                   "DBFEMasterUserPassword.$": "$.discovered.db_fe_master_password"
                 }
               },
@@ -974,7 +986,7 @@ Resources:
             },
 
             "StartCicsInstances": {
-              "Comment": "Force-start every EC2 instance tagged System=CICS in the DR region (e.g. instances left stopped by the start/stop schedule) before flipping DNS. Idempotent — only stopped instances are started.",
+              "Comment": "Force-start every EC2 instance tagged System=CICS in the DR region. Idempotent — only stopped instances are started. InsufficientInstanceCapacity is treated as a warning (logged, not fatal) so DNS cutover proceeds regardless.",
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {

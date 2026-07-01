@@ -90,7 +90,7 @@ Metadata:
       LoadBalancerCertificateArn:
         default: Load Balancer SSL Certificate ARN
       LoadBalancerHostName:
-        default: Load Balancer Host Name
+        default: Load Balancer Host Name (overrides region default)
       NetworkStackName:
         default: Network Stack Name
       RDPPort:
@@ -196,7 +196,10 @@ Parameters:
       - t3.large
       - t3.xlarge
   LoadBalancerHostName:
-    Description: (Optional) Custom Hostname for load balancer URL
+    Description: >-
+      (Optional) Custom hostname prefix for the ALB listener rule and Route53 record
+      (e.g. "cics" → cics.pchcdev.com). When blank, defaults to "cpacsweb" in the
+      main region and "cics-uat" in the DR region.
     Type: String
     Default: ''
     MaxLength: 12
@@ -398,6 +401,7 @@ Conditions:
     - Condition: IsProd
     - !Equals [!Ref EnvName, ProductionDR]
     - !Equals [!Ref EnvName, TestDR]
+  HasLoadBalancerHostName: !Not [!Equals [!Ref LoadBalancerHostName, '']]
 
 Resources:
 
@@ -2491,7 +2495,13 @@ Resources:
       Conditions:
         - Field: host-header
           Values:
-            - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+            - !If
+              - HasLoadBalancerHostName
+              - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+              - !If
+                - IsMainRegion
+                - !Join ['.', ['cpacsweb', !Ref ClientDomainName]]
+                - !Join ['.', ['cics-uat', !Ref ClientDomainName]]
       ListenerArn: !GetAtt [ELBStack, Outputs.ApplicationListenerArn]
       Priority: 100
 
@@ -2801,7 +2811,13 @@ Resources:
       HostedZoneName: !Join ['', [!Ref ClientDomainName, '.']] 
       Comment: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, dns, record]]
       RecordSets:
-        - Name: !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+        - Name: !If
+            - HasLoadBalancerHostName
+            - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+            - !If
+              - IsMainRegion
+              - !Join ['.', ['cpacsweb', !Ref ClientDomainName]]
+              - !Join ['.', ['cics-uat', !Ref ClientDomainName]]
           Type: A
           AliasTarget:
             HostedZoneId:
