@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: RDS cross-region read replica (DR region -> live region) for failback background sync
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Replica Configuration
+        Parameters:
+          - DRRegionDbInstanceArn
+          - ReplicaInstanceClass
+          - BackupRetentionPeriod
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Live Region Network Stack Name
+      SNSStackName:
+        default: SNS Stack Name
+      DRRegionDbInstanceArn:
+        default: DR Region Source DB Instance ARN
+      ReplicaInstanceClass:
+        default: Replica Instance Class
+      BackupRetentionPeriod:
+        default: Backup Retention Period (days)
+
+Parameters:
+  Name:
+    Description: Unique name/identifier matching the source app stack
+    Type: String
+    MinLength: 3
+    MaxLength: 20
+  OrgName:
+    Description: Organization short name
+    Type: String
+    Default: pchc
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+  NetworkStackName:
+    Description: Live (primary) region network stack name, for VPC/subnet imports
+    Type: String
+  SNSStackName:
+    Description: Live region SNS stack name, for the ReplicaLag alarm
+    Type: String
+  DRRegionDbInstanceArn:
+    Description: Full ARN of the source RDS instance in the DR region. Explicit value - Fn::ImportValue cannot resolve
+      cross-region, so this comes from the app's DR deployment record, not a stack import.
+    Type: String
+    AllowedPattern: '^arn:aws:rds:(us-west-2|us-east-2):[0-9]+:db:[a-z0-9-]+$'
+  ReplicaInstanceClass:
+    Description: Instance class for the live-region replica (match the DR region source class
+      unless right-sizing for live-region pricing). Restricted to classes already in use
+      across PCHC app DB instances - update this list if a new class is introduced.
+    Type: String
+    Default: db.t4g.2xlarge
+    AllowedValues:
+      - db.t3.small
+      - db.t4g.micro
+      - db.t4g.small
+      - db.t4g.medium
+      - db.t4g.large
+      - db.t4g.xlarge
+      - db.t4g.2xlarge
+      - db.m5.xlarge
+      - db.m5.2xlarge
+      - db.r5.4xlarge
+  BackupRetentionPeriod:
+    Description: Number of days to retain automated backups on the replica (1-35). Matches the
+      BackupReplicationRetentionPeriod convention used by this repo's other cross-region
+      replication templates - so post-promotion backup history is already accumulating rather
+      than starting from zero at cutover.
+    Type: Number
+    MinValue: 1
+    MaxValue: 35
+    Default: 7
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+  ReplicaDbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-sync']]
+      DBSubnetGroupDescription: !Sub 'Failback sync replica subnet group for ${Name}'
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-sync']]
+
+  ReplicaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Failback sync RDS replica SG for ${Name}'
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-sync-sg']]
+      # No ingress rules: cross-region replication traffic uses the AWS RDS backplane, not
+      # the VPC route table. App connectivity ingress is added at promotion time
+
+  RdsFailbackReplica:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot  # Prevent accidental deletion of the replica, which would break failback sync
+    UpdateReplacePolicy: Snapshot  # SourceDBInstanceIdentifier/KmsKeyId changes force replacement - snapshot instead of silent delete
+    Properties:
+      DBInstanceIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'db-replica']]
+      SourceDBInstanceIdentifier: !Ref DRRegionDbInstanceArn
+      DBInstanceClass: !Ref ReplicaInstanceClass
+      DBSubnetGroupName: !Ref ReplicaDbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref ReplicaSecurityGroup
+      KmsKeyId: alias/aws/rds  # Required: cross-region replica of an encrypted source needs an explicit destination-region key
+      MultiAZ: false          # Multi-AZ enabled at promotion time
+      PubliclyAccessible: false
+      AutoMinorVersionUpgrade: false
+      DeletionProtection: true
+      BackupRetentionPeriod: !Ref BackupRetentionPeriod
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'db-replica']]
+
+  ReplicaLagAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Name}-failback-replica-lag'
+      AlarmDescription: !Sub 'ReplicaLag exceeds 1s for ${Name} failback sync replica'
+      Namespace: AWS/RDS
+      MetricName: ReplicaLag
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsFailbackReplica
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
+Outputs:
+  ReplicaEndpointAddress:
+    Description: Endpoint address of the live-region failback replica
+    Value: !GetAtt RdsFailbackReplica.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-ReplicaEndpointAddress'
+  ReplicaArn:
+    Description: ARN of the live-region failback replica
+    Value: !Sub 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${RdsFailbackReplica}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ReplicaArn'
+  ReplicaLagAlarmArn:
+    Description: ARN of the ReplicaLag CloudWatch alarm
+    Value: !GetAtt ReplicaLagAlarm.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ReplicaLagAlarmArn'
