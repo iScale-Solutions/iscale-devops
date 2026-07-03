@@ -21,6 +21,7 @@ Metadata:
           - DRRegionDbInstanceArn
           - ReplicaInstanceClass
           - BackupRetentionPeriod
+          - ReplicaLagThreshold
     ParameterLabels:
       Name:
         default: Resource Name
@@ -38,6 +39,8 @@ Metadata:
         default: Replica Instance Class
       BackupRetentionPeriod:
         default: Backup Retention Period (days)
+      ReplicaLagThreshold:
+        default: Replica Lag Alarm Threshold (seconds)
 
 Parameters:
   Name:
@@ -99,6 +102,14 @@ Parameters:
     MinValue: 1
     MaxValue: 35
     Default: 7
+  ReplicaLagThreshold:
+    Description: ReplicaLag (seconds, averaged over two 5-minute periods) that triggers the alarm.
+      This is a replication-health threshold, not the RPO target - cross-region lag routinely
+      spikes above the sub-second RPO goal under write load, so the default is set high enough
+      to fire only on sustained, genuinely unhealthy lag. Tighten per app if needed.
+    Type: Number
+    MinValue: 1
+    Default: 60
 
 Mappings:
   Fn::Transform:
@@ -169,7 +180,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub '${Name}-failback-replica-lag'
-      AlarmDescription: !Sub 'ReplicaLag exceeds 1s for ${Name} failback sync replica'
+      AlarmDescription: !Sub 'ReplicaLag exceeds ${ReplicaLagThreshold}s for ${Name} failback sync replica'
       Namespace: AWS/RDS
       MetricName: ReplicaLag
       Dimensions:
@@ -178,7 +189,7 @@ Resources:
       Statistic: Average
       Period: 300
       EvaluationPeriods: 2
-      Threshold: 1
+      Threshold: !Ref ReplicaLagThreshold
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: breaching
       AlarmActions:
