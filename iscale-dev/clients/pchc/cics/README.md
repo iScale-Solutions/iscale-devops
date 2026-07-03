@@ -16,6 +16,8 @@ This README exists to give Claude (and future readers) enough context to safely 
 | [cics-lambda-cron.yaml](cics-lambda-cron.yaml) | Standalone Lambda (Python 3.9) on a CRON schedule that queries the CICS RDS instance. Has its own VPC SG and S3 bucket. |
 | [cics-dr-failover.yaml](cics-dr-failover.yaml) | **CICS-dedicated DR failover engine** (Step Functions + Lambda). Forked from `dr/dr-failover-v2.yaml`: network scale-up, dual-DB (cics + cicsfe) PITR/snapshot restore, force-start of `System=CICS` EC2 instances, and Route53 cutover. Single app stack; no EFS/AMI/Redshift/ECS machinery. |
 | [CICS-DR-FAILOVER.md](CICS-DR-FAILOVER.md) | Runbook for `cics-dr-failover.yaml` — flow, **deploy-time stack parameters** (stack names, DB ids, secret ARNs, SNS) vs. **per-invocation payload** (PITR/snapshot ids, DNS), pre-flight, and trigger steps. |
+| [cics-dr-failback.yaml](cics-dr-failback.yaml) | **CICS-dedicated DR failback engine** (Step Functions + Lambda) — the reverse of `cics-dr-failover.yaml`. Repoints DNS back to the MAIN ALB, snapshots + deletes the out-of-band `cics` + `cicsfe` PITR DBs, scales the app stack down (`DeployPaidResources=false`), then scales the network stack back down (4 `Create*` flags → false). FSx handled out of band. |
+| [CICS-DR-FAILBACK.md](CICS-DR-FAILBACK.md) | Runbook for `cics-dr-failback.yaml` — reverse-of-failover flow, stack parameters, per-invocation payload (PITR ids, SSM paths, MAIN-ALB DNS repoint), pre-flight, and guardrails. |
 
 ---
 
@@ -216,6 +218,32 @@ The backup is a **full image** — root volume, all child volumes, NFS export se
 ### IAM the machine needs
 
 `fsx:DescribeBackups`, `fsx:CopyBackup`, `fsx:CreateFileSystemFromBackup`, `fsx:DescribeFileSystems`, `fsx:DeleteFileSystem` (failback), plus SSM/Secrets Manager write for the new DNS name, and KMS use on the DR CMK if copies are CMK-encrypted.
+
+---
+
+## DR failback — reference
+
+> Status: **implemented.** Engine: [cics-dr-failback.yaml](cics-dr-failback.yaml); runbook: [CICS-DR-FAILBACK.md](CICS-DR-FAILBACK.md). This section explains how failback relates to the failover engine and to `cics.yaml`; the runbook has the operational detail.
+
+Failback is the **reverse** of [cics-dr-failover.yaml](cics-dr-failover.yaml) — run once the main region is restored to tear the DR region back down to cold / pilot-light. It is a dedicated fork rather than the app-agnostic [dr/dr-failback.yaml](../dr/dr-failback.yaml), for the same reasons the failover is a fork:
+
+| `dr/dr-failback.yaml` assumes | CICS reality | Effect on the CICS failback |
+|---|---|---|
+| ALB detached via commenting `LoadBalancerStackName` | ELB is a nested stack dropped by `DeployPaidResources=false`; DNS is an explicit Route53 repoint | The whole comment/uncomment patcher is removed; failback repoints DNS back to the **MAIN** ALB |
+| One out-of-band DB + EFS | **Two** PITR DBs (`cics` + `cicsfe`); file system is **FSx OpenZFS** | Snapshots + deletes **both** PITR instances in parallel, clears both SSM endpoint params; FSx handled out of band |
+| Network teardown = `DeployPaidResources=false` | Failover scaled the network via four `Create*` flags, leaving `DeployPaidResources` alone | Failback flips the same four flags back to `false`; the master switch stays untouched |
+
+### Order (reverse of failover)
+
+1. **Repoint DNS → MAIN ALB** first, so clients drain off DR before anything is torn down (failback presupposes main is healthy). Uses the single-owner UPSERT from §"Option B" — pass the MAIN ALB target explicitly, or `dns_alb_name_contains` **+ `dns_alb_region`** to discover it cross-region (the MAIN ALB is not in the DR region where the engine runs).
+2. **Clean up the PITR DBs** (PITR path only) **before** the app scale-down — the out-of-band instances hold a DB security group that `DeployPaidResources=false` would otherwise fail to delete (`DependencyViolation`). Each DB gets a final manual snapshot, then delete, then SSM-param clear.
+3. **App stack `DeployPaidResources=false`, `IsPITRMode=false`** — drops ELB, app servers, and (snapshot path) both in-stack DBs; CFN-managed EC2 come down here (no explicit stop step).
+4. **Network stack scale-down** — the four `Create*` flags back to `false`.
+
+### What failback does NOT touch
+
+- **FSx OpenZFS** — same as failover, the DR file system is out of band. Delete it manually after reconciling data back to main (see §"DR FSx", activation-sequence step 6).
+- **`ALBDNSRecord` ownership** — failback repoints the shared record via API; it never makes the DR stack own/create/delete the CloudFormation record. The single-owner invariant from §"Option B" holds in both directions.
 
 ---
 
