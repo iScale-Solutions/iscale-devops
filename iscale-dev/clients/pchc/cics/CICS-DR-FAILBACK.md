@@ -114,7 +114,6 @@ Supply **every** key shown (use `""` for the ones a given path doesn't need — 
 | `dns_alb_name_contains` | both | Substring matched against the **MAIN** ALB name/DNS when the two above are blank |
 | `dns_alb_region` | both | Region to search for the MAIN ALB (e.g. the live region); blank = this DR region |
 
-<<<<<<< HEAD
 > ⚠️ **The MAIN ALB lives in the main region, not the DR region where this engine runs.** Either pass `dns_alb_dns_name` + `dns_alb_hosted_zone_id` explicitly, **or** set `dns_alb_name_contains` **and** `dns_alb_region` so the engine can discover it cross-region. Auto-discovery with a blank `dns_alb_region` searches the DR region and — while the DR ALB is still up at the start of failback — would match the **DR** ALB and repoint the hostname at the load balancer you are about to delete. Always point discovery at the **main** region.
 
 ### Skip the DNS repoint
@@ -142,9 +141,6 @@ Set `"use_pitr": false` — there were never any out-of-band PITR instances, so 
   "dns_alb_region":             "ap-southeast-1"
 }
 ```
-=======
-> ⚠️ **The MAIN ALB lives in the main region, not the DR region where this engine runs.** Either pass `dns_alb_dns_name` + `dns_alb_hosted_zone_id` explicitly, **or** set `dns_alb_name_contains` **and** `dns_alb_region` so the engine can discover it cross-region. Auto-discovery with a blank `dns_alb_region` searches the DR region and will not find the main ALB.
->>>>>>> f8ff0433420b86d0c7772aafe7390bc617b35e86
 
 ---
 
