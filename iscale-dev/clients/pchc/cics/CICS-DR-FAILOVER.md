@@ -140,6 +140,8 @@ Per-invocation input is now just the **PITR/snapshot identifiers, SSM paths, and
 
 > The **source DB ids, DR secret ARNs, stack names, and SNS topic** referenced by these steps come from the **stack parameters**, not this payload — see "Stack parameters" above.
 
+> **These identifiers are reused at failback.** Record the `pitr_target_identifier`, `pitr_fe_target_identifier`, and the two `*_endpoint_ssm_path` values you use here — [CICS-DR-FAILBACK.md](CICS-DR-FAILBACK.md) takes the **same** ids to snapshot + delete the PITR instances and clear their SSM params. Note the DNS fields **flip** at failback: `dns_alb_name_contains` targets the **DR** ALB here but the **MAIN** ALB at failback, and failback adds a `dns_alb_region` (the main region) that failover does not use. If you leave `dns_record_name` blank here (skip the DR cutover), skip it at failback too.
+
 ### Snapshot-path payload
 
 Set `"use_pitr": false`. The `pitr_*`, `pitr_fe_*`, and `*_endpoint_ssm_path` keys are unused (keep them as `""`). Optionally pin exact snapshots via `snapshot_identifier` / `snapshot_identifier_fe`; leave blank to auto-discover the latest available.

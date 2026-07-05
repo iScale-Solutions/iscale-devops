@@ -1,0 +1,951 @@
+AWSTemplateFormatVersion: 2010-09-09
+# CICS-DEDICATED DR Failback engine — the reverse of cics-dr-failover.yaml.
+#
+# Failback tears the DR region back down to cold / pilot-light once the main
+# region has been restored and is healthy again. It reverses each failover step
+# in reverse order:
+#
+#   failover:  network scale-UP -> restore DBs -> app DeployPaidResources=true -> start EC2 -> DNS -> DR ALB
+#   failback:  DNS -> MAIN ALB  -> cleanup PITR DBs -> app DeployPaidResources=false -> network scale-DOWN
+#
+# Why a dedicated version (vs. the app-agnostic dr/dr-failback.yaml):
+#   * dr-failback.yaml is built around the comment/uncomment LoadBalancerStackName
+#     trick and a single DB / EFS. CICS uses neither — the ALB comes down via
+#     DeployPaidResources=false on the nested ELBStack, and DNS is an explicit
+#     Route53 repoint. All of that patching machinery is dropped here.
+#   * CICS has TWO out-of-band PITR databases (cics + cicsfe). This engine snapshots
+#     and deletes BOTH in parallel and clears both endpoint SSM params.
+#   * Network teardown is NOT DeployPaidResources=false — failover never touched that
+#     switch. Failback flips the same four flags back to false:
+#       CreateJumpHost=false, CreateMultipleNat=false, CreateVpcEndpoint=false, S3GatewayVpcEndpoint=false
+#   * FSx for OpenZFS is handled OUT OF BAND (see cics/README.md §"DR FSx") — same as
+#     failover. This engine does not delete the DR file system.
+#
+# Lambda actions: dns_cutover | snapshot_db | check_snapshot_status | delete_db |
+#   check_db_deleted | update_stack | check_stack_status | notify
+#
+# Ordering rationale:
+#   1. DNS first — repoint the hostname back to the MAIN ALB so clients drain off DR
+#      BEFORE any DR resource is torn down. (Failback presupposes main is healthy.)
+#   2. PITR cleanup BEFORE the app stack scale-down — the out-of-band PITR instances
+#      hold a DB security group that DeployPaidResources=false would otherwise fail to
+#      delete (DependencyViolation). Snapshot each DB, then delete it.
+#   3. App scale-down (DeployPaidResources=false, IsPITRMode=false) — drops ELB, the DB
+#      ingress/DNS, and (snapshot path) both nested DBs. NOTE: this does NOT stop the EC2
+#      app servers — in cics.yaml they are gated on None/IsMainRegion, not
+#      DeployPaidResources — so instances the failover started keep running. Stopping them
+#      (start/stop schedule, or manually) is a separate step this engine does not yet do.
+#   4. Network scale-down — jump host, NAT-per-AZ, VPC + S3 endpoints back off.
+#
+# These are CloudFormation PARAMETERS (set once at stack deploy, NOT per-invocation):
+#   NetworkStackName, NetworkTemplateUrl, AppStackName, SnsTopicArn
+#
+# State machine input payload (per-invocation; supply ALL keys; use "" where a path doesn't need one):
+#   {
+#     "use_pitr":                   true,                      # true = also clean up the PITR DBs; false = skip DB cleanup
+#
+#     "pitr_target_identifier":     "<cics PITR instance id created at failover>",
+#     "pitr_endpoint_ssm_path":     "/pchc/productiondr/cics/pitr-db-endpoint",
+#     "pitr_fe_target_identifier":  "<cicsfe PITR instance id created at failover>",
+#     "pitr_fe_endpoint_ssm_path":  "/pchc/productiondr/cicsfe/pitr-db-endpoint",
+#
+#     # ── DNS repoint (Route53) back to the MAIN region ALB ──
+#     "dns_hosted_zone_id":         "<client public hosted zone id>",
+#     "dns_record_name":            "cics.pchcdev.com",        # FQDN to repoint; blank = skip DNS repoint
+#     "dns_alb_dns_name":           "",                        # optional — explicit MAIN ALB DNS name
+#     "dns_alb_hosted_zone_id":     "",                        # optional — explicit MAIN ALB canonical zone
+#     "dns_alb_name_contains":      "prd-ase1-cics",           # substring to auto-discover the MAIN ALB
+#     "dns_alb_region":             "ap-southeast-1"           # region to search for the MAIN ALB (blank = this DR region)
+#   }
+#
+# On the snapshot path (use_pitr=false) there were never any out-of-band PITR instances,
+# so DB cleanup is skipped entirely — the app scale-down deletes the in-stack DBStack/DBFEStack.
+Description: >-
+  CICS-dedicated DR Failback engine. Reverses cics-dr-failover.yaml: repoints DNS
+  back to the MAIN ALB, snapshots + deletes the out-of-band cics + cicsfe PITR
+  databases, scales the CICS app stack down (DeployPaidResources=false), then scales
+  the DR network stack back down. All per-invocation config is passed via input.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - Name
+          - OrgName
+      - Label:
+          default: Configuration
+        Parameters:
+          - LogRetentionDays
+          - NetworkTemplateUrl
+      - Label:
+          default: Failback Targets (stacks / SNS)
+        Parameters:
+          - NetworkStackName
+          - AppStackName
+          - SnsTopicArn
+
+    ParameterLabels:
+      Name:
+        default: Stack / Function Name
+      OrgName:
+        default: Organization Name
+      LogRetentionDays:
+        default: CloudWatch Log Retention (days)
+      NetworkTemplateUrl:
+        default: Network Stack Template URL (S3)
+      NetworkStackName:
+        default: DR Network Stack Name
+      AppStackName:
+        default: DR CICS App Stack Name
+      SnsTopicArn:
+        default: Completion Notification SNS Topic ARN
+
+Parameters:
+
+  Name:
+    Description: Unique identifier used in resource names.
+    Type: String
+    Default: cics-dr-failback
+
+  OrgName:
+    Description: Organization name prefix (e.g. pchc).
+    Type: String
+    Default: pchc
+
+  LogRetentionDays:
+    Description: Number of days to retain Lambda and Step Functions CloudWatch logs.
+    Type: Number
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+  NetworkTemplateUrl:
+    Description: |
+      S3 URL for the network stack template (common/network.yaml).
+      Bypasses the 51,200-byte TemplateBody API limit on network stack updates.
+    Type: String
+    Default: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/network.yaml
+
+  NetworkStackName:
+    Description: Name of the DR network CloudFormation stack scaled back down at failback.
+    Type: String
+
+  AppStackName:
+    Description: Name of the DR CICS application stack (cics.yaml) scaled down at failback.
+    Type: String
+
+  SnsTopicArn:
+    Description: SNS topic ARN for the completion notification. Leave blank to skip notifications.
+    Type: String
+    Default: ''
+
+Resources:
+
+####
+# IAM
+####
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-sfn-role'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaAndLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt LambdaFunction.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+####
+# CloudWatch Logs
+####
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/states/${AWS::StackName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+####
+# Lambda
+####
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}'
+      Description: >-
+        CICS DR Failback engine worker. Actions: dns_cutover | snapshot_db |
+        check_snapshot_status | delete_db | check_db_deleted | update_stack |
+        check_stack_status | notify. All config is read from the event payload.
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          DEFAULT_NETWORK_TEMPLATE_URL: !Ref NetworkTemplateUrl
+      Code:
+        ZipFile: |
+          import logging
+          import os
+          import time
+          import boto3
+          from botocore.exceptions import ClientError
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          TERMINAL_STATES = {
+              'CREATE_COMPLETE', 'UPDATE_COMPLETE',
+              'UPDATE_ROLLBACK_COMPLETE', 'UPDATE_ROLLBACK_FAILED',
+              'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED',
+              'DELETE_COMPLETE', 'DELETE_FAILED', 'CREATE_FAILED',
+          }
+          ROLLBACK_STATES = {
+              'UPDATE_ROLLBACK_COMPLETE', 'UPDATE_ROLLBACK_FAILED',
+              'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED',
+              'DELETE_FAILED', 'CREATE_FAILED',
+          }
+
+          def handler(event, context):
+              action = event.get('action', '')
+              if action == 'dns_cutover':            return _dns_cutover(event)
+              if action == 'snapshot_db':            return _snapshot_db(event)
+              if action == 'check_snapshot_status':  return _check_snapshot_status(event)
+              if action == 'delete_db':              return _delete_db(event)
+              if action == 'check_db_deleted':       return _check_db_deleted(event)
+              if action == 'update_stack':           return _update_stack_action(event)
+              if action == 'check_stack_status':     return _check_stack_status(event)
+              if action == 'notify':                 return _notify(event)
+              raise ValueError(f'Unknown action: {action!r}')
+
+
+          # ── dns_cutover (repoint to MAIN ALB) ─────────────────────────────────
+          # Single-owner Route53 repoint (cics/README.md §"Option B"). UPSERTs the
+          # hostname alias back to the MAIN-region ALB. The MAIN ALB target is taken
+          # from the payload, or auto-discovered in dns_alb_region by name/DNS substring.
+
+          def _dns_cutover(event):
+              region      = event.get('dns_alb_region', '') or os.environ['AWS_REGION']
+              zone_id     = event.get('dns_hosted_zone_id', '')
+              record_name = event.get('dns_record_name', '')
+              alb_dns     = event.get('dns_alb_dns_name', '')
+              alb_zone    = event.get('dns_alb_hosted_zone_id', '')
+
+              if not zone_id or not record_name:
+                  logger.info('dns_hosted_zone_id / dns_record_name not provided — skipping DNS repoint.')
+                  return {'dns_cutover': False, 'reason': 'no dns inputs'}
+
+              if not alb_dns or not alb_zone:
+                  name_contains = event.get('dns_alb_name_contains', '')
+                  if not name_contains:
+                      raise ValueError(
+                          'Provide either dns_alb_dns_name + dns_alb_hosted_zone_id, or '
+                          'dns_alb_name_contains (+ optional dns_alb_region) to locate the MAIN ALB.'
+                      )
+                  alb_dns, alb_zone = _find_alb(region, name_contains)
+                  logger.info(f'Discovered MAIN ALB in {region}: dns={alb_dns} zone={alb_zone}')
+
+              name = record_name if record_name.endswith('.') else record_name + '.'
+              r53  = boto3.client('route53')
+              r53.change_resource_record_sets(
+                  HostedZoneId=zone_id,
+                  ChangeBatch={
+                      'Comment': 'CICS DR failback — point hostname back at MAIN ALB',
+                      'Changes': [{
+                          'Action': 'UPSERT',
+                          'ResourceRecordSet': {
+                              'Name': name,
+                              'Type': 'A',
+                              'AliasTarget': {
+                                  'HostedZoneId': alb_zone,
+                                  'DNSName': alb_dns,
+                                  'EvaluateTargetHealth': False,
+                              },
+                          },
+                      }],
+                  },
+              )
+              logger.info(f'DNS repoint: {name} -> {alb_dns} (alias zone {alb_zone})')
+              return {'dns_cutover': True, 'record_name': name, 'alb_dns_name': alb_dns}
+
+
+          # ── snapshot_db ───────────────────────────────────────────────────────
+          # Take a final manual snapshot of an out-of-band PITR instance before
+          # deleting it. If the instance is already gone, there is nothing to do.
+
+          def _snapshot_db(event):
+              region = os.environ['AWS_REGION']
+              db_id  = event.get('db_instance_identifier', '')
+              if not db_id:
+                  raise ValueError('db_instance_identifier is required for snapshot_db.')
+              rds = boto3.client('rds', region_name=region)
+              try:
+                  rds.describe_db_instances(DBInstanceIdentifier=db_id)
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'DBInstanceNotFound':
+                      logger.info(f'{db_id} not found — nothing to snapshot or delete.')
+                      return {'submitted': False, 'reason': 'not_found', 'db_instance_identifier': db_id}
+                  raise
+              snapshot_id = f'{db_id}-failback-{int(time.time())}'
+              try:
+                  rds.create_db_snapshot(DBSnapshotIdentifier=snapshot_id, DBInstanceIdentifier=db_id)
+                  logger.info(f'Snapshot started: {snapshot_id} <- {db_id}')
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'InvalidDBInstanceState':
+                      logger.warning(f'{db_id} not in a snapshotable state ({e}) — skipping snapshot; it is likely already deleting.')
+                      return {'submitted': False, 'reason': 'invalid_state', 'db_instance_identifier': db_id}
+                  raise
+              return {'submitted': True, 'snapshot_id': snapshot_id, 'db_instance_identifier': db_id}
+
+
+          # ── check_snapshot_status ─────────────────────────────────────────────
+
+          def _check_snapshot_status(event):
+              region      = os.environ['AWS_REGION']
+              snapshot_id = event.get('snapshot_id', '')
+              if not snapshot_id:
+                  raise ValueError('snapshot_id is required for check_snapshot_status.')
+              rds  = boto3.client('rds', region_name=region)
+              resp = rds.describe_db_snapshots(DBSnapshotIdentifier=snapshot_id)
+              status   = resp['DBSnapshots'][0]['Status']
+              complete = status == 'available'
+              failed   = status in ('failed', 'incompatible-restore', 'incompatible-parameters')
+              logger.info(f'Snapshot {snapshot_id}: {status}')
+              return {
+                  'snapshot_id':       snapshot_id,
+                  'snapshot_status':   status,
+                  'snapshot_complete': complete,
+                  'snapshot_failed':   failed,
+              }
+
+
+          # ── delete_db ─────────────────────────────────────────────────────────
+          # Delete the PITR instance (SkipFinalSnapshot=True — snapshot_db already took
+          # a manual one) and clear its endpoint SSM pointer.
+
+          def _delete_db(event):
+              region   = os.environ['AWS_REGION']
+              db_id    = event.get('db_instance_identifier', '')
+              ssm_path = event.get('ssm_path', '')
+              if not db_id:
+                  raise ValueError('db_instance_identifier is required for delete_db.')
+              rds = boto3.client('rds', region_name=region)
+              try:
+                  rds.delete_db_instance(DBInstanceIdentifier=db_id, SkipFinalSnapshot=True)
+                  logger.info(f'Delete submitted: {db_id}')
+                  result = {'submitted': True, 'db_instance_identifier': db_id}
+              except ClientError as e:
+                  code = e.response['Error']['Code']
+                  if code == 'DBInstanceNotFound':
+                      logger.info(f'{db_id} already deleted.')
+                      result = {'submitted': False, 'reason': 'not_found', 'db_instance_identifier': db_id}
+                  elif code == 'InvalidDBInstanceState':
+                      logger.info(f'{db_id} already deleting.')
+                      result = {'submitted': False, 'reason': 'already_deleting', 'db_instance_identifier': db_id}
+                  else:
+                      raise
+              if ssm_path:
+                  ssm = boto3.client('ssm', region_name=region)
+                  try:
+                      ssm.delete_parameter(Name=ssm_path)
+                      logger.info(f'Cleared SSM param: {ssm_path}')
+                  except ClientError as e:
+                      if e.response['Error']['Code'] != 'ParameterNotFound':
+                          raise
+              return result
+
+
+          # ── check_db_deleted ──────────────────────────────────────────────────
+
+          def _check_db_deleted(event):
+              region = os.environ['AWS_REGION']
+              db_id  = event.get('db_instance_identifier', '')
+              rds = boto3.client('rds', region_name=region)
+              try:
+                  resp   = rds.describe_db_instances(DBInstanceIdentifier=db_id)
+                  status = resp['DBInstances'][0]['DBInstanceStatus']
+                  logger.info(f'{db_id}: {status}')
+                  return {'db_instance_identifier': db_id, 'db_deleted': False, 'db_status': status}
+              except ClientError as e:
+                  if e.response['Error']['Code'] == 'DBInstanceNotFound':
+                      logger.info(f'{db_id} confirmed deleted.')
+                      return {'db_instance_identifier': db_id, 'db_deleted': True, 'db_status': 'DELETED'}
+                  raise
+
+
+          # ── update_stack ──────────────────────────────────────────────────────
+
+          def _update_stack_action(event):
+              region       = os.environ['AWS_REGION']
+              stack_name   = event.get('stack_name', '')
+              stack_type   = event.get('stack_type', 'app')   # 'network' or 'app'
+              extra        = event.get('extra_params', {})
+              template_url = event.get('network_template_url',
+                                       os.environ.get('DEFAULT_NETWORK_TEMPLATE_URL', ''))
+
+              cf = boto3.client('cloudformation', region_name=region)
+              logger.info(f'Updating stack: {stack_name} (type={stack_type})')
+
+              if stack_type == 'network':
+                  _cfn_update(cf, stack_name, extra, template_url=template_url or None)
+              else:
+                  _cfn_update(cf, stack_name, extra)  # UsePreviousTemplate — avoids 51200-byte TemplateBody limit
+
+              return {'stack_name': stack_name, 'submitted': True}
+
+
+          # ── check_stack_status ────────────────────────────────────────────────
+
+          def _check_stack_status(event):
+              region     = os.environ['AWS_REGION']
+              stack_name = event.get('stack_name', '')
+              cf   = boto3.client('cloudformation', region_name=region)
+              resp = cf.describe_stacks(StackName=stack_name)
+              status   = resp['Stacks'][0]['StackStatus']
+              complete = status in TERMINAL_STATES
+              rollback = status in ROLLBACK_STATES
+              logger.info(f'Stack {stack_name}: {status}')
+              return {
+                  'stack_name':     stack_name,
+                  'stack_status':   status,
+                  'stack_complete': complete,
+                  'stack_rollback': rollback,
+              }
+
+
+          # ── notify ────────────────────────────────────────────────────────────
+
+          def _notify(event):
+              topic   = event.get('sns_topic_arn', '')
+              subject = event.get('subject', 'CICS DR Failback Notification')
+              message = event.get('message', '')
+              if not topic:
+                  logger.info('No sns_topic_arn provided — skipping notification.')
+                  return {'notified': False}
+              try:
+                  boto3.client('sns').publish(TopicArn=topic, Subject=subject, Message=message)
+                  logger.info(f'SNS notification sent: {subject}')
+              except Exception:
+                  logger.warning('SNS publish failed', exc_info=True)
+              return {'notified': True}
+
+
+          # ── helpers ───────────────────────────────────────────────────────────
+
+          def _find_alb(region, name_contains):
+              elbv2  = boto3.client('elbv2', region_name=region)
+              needle = name_contains.lower()
+              matches = []
+              paginator = elbv2.get_paginator('describe_load_balancers')
+              for page in paginator.paginate():
+                  for lb in page.get('LoadBalancers', []):
+                      hay = (lb.get('LoadBalancerName', '') + ' ' + lb.get('DNSName', '')).lower()
+                      if needle in hay:
+                          matches.append(lb)
+              if not matches:
+                  raise Exception(f'No ALB matched dns_alb_name_contains={name_contains!r} in {region}.')
+              if len(matches) > 1:
+                  names = [m.get('LoadBalancerName') for m in matches]
+                  logger.warning(f'Multiple ALBs matched {name_contains!r}: {names} — using the first.')
+              lb = matches[0]
+              return lb['DNSName'], lb['CanonicalHostedZoneId']
+
+          def _get_current_params(cf, stack_name):
+              resp = cf.describe_stacks(StackName=stack_name)
+              return {p['ParameterKey']: p['ParameterValue']
+                      for p in resp['Stacks'][0].get('Parameters', [])}
+
+          def _cfn_update(cf, stack_name, extra_params, template_url=None):
+              current = _get_current_params(cf, stack_name)
+              params  = []
+              for key in current:
+                  if key in extra_params:
+                      params.append({'ParameterKey': key, 'ParameterValue': str(extra_params[key])})
+                  else:
+                      params.append({'ParameterKey': key, 'UsePreviousValue': True})
+              for key in extra_params:
+                  if key not in current:
+                      logger.warning(f'[UPDATE_STACK] Skipping {key!r} — not a parameter in the deployed template of {stack_name}')
+
+              caps = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
+              if template_url:
+                  kwargs = dict(StackName=stack_name, TemplateURL=template_url,
+                                Parameters=params, Capabilities=caps)
+              else:
+                  kwargs = dict(StackName=stack_name, UsePreviousTemplate=True,
+                                Parameters=params, Capabilities=caps)
+
+              try:
+                  cf.update_stack(**kwargs)
+                  logger.info(f'[UPDATE_STACK] Submitted | stack={stack_name}')
+              except ClientError as e:
+                  code = e.response['Error']['Code']
+                  msg  = e.response['Error']['Message']
+                  if code == 'ValidationError' and 'No updates are to be performed' in msg:
+                      logger.info(f'[UPDATE_STACK] No changes needed | stack={stack_name}')
+                      return
+                  raise
+
+####
+# Step Functions — STANDARD (long-running, durable)
+####
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: StateMachineLogGroup
+    Properties:
+      StateMachineName: !Sub '${AWS::StackName}'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "CICS DR Failback — reverses cics-dr-failover.yaml. Repoints the hostname back to the MAIN ALB, then (use_pitr=true) snapshots + deletes the out-of-band cics + cicsfe PITR databases in parallel and clears their SSM endpoint params, scales the CICS app stack down (DeployPaidResources=false, IsPITRMode=false), and finally scales the DR network stack back down (CreateJumpHost / CreateMultipleNat / CreateVpcEndpoint / S3GatewayVpcEndpoint = false). FSx OpenZFS cleanup is out of band.",
+          "StartAt": "RepointDNSMain",
+          "States": {
+
+            "RepointDNSMain": {
+              "Comment": "FAILBACK STEP 1 — Repoint the CICS hostname back at the MAIN region ALB so clients drain off DR before teardown. Blank dns_record_name skips this.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                   "dns_cutover",
+                "dns_hosted_zone_id.$":      "$.dns_hosted_zone_id",
+                "dns_record_name.$":         "$.dns_record_name",
+                "dns_alb_dns_name.$":        "$.dns_alb_dns_name",
+                "dns_alb_hosted_zone_id.$":  "$.dns_alb_hosted_zone_id",
+                "dns_alb_name_contains.$":   "$.dns_alb_name_contains",
+                "dns_alb_region.$":          "$.dns_alb_region"
+              },
+              "ResultPath": "$.dns_result",
+              "Next": "RouteByMode",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "RouteByMode": {
+              "Comment": "PITR path cleans up the two out-of-band DBs before the app scale-down. Snapshot path had no out-of-band DBs — go straight to the app scale-down.",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.use_pitr", "BooleanEquals": true, "Next": "PITRCleanupParallel"}
+              ],
+              "Default": "ScaleDownAppStack"
+            },
+
+            "PITRCleanupParallel": {
+              "Comment": "FAILBACK STEP 2 — Snapshot + delete the cics and cicsfe PITR instances in parallel. Each branch: snapshot -> wait -> poll snapshot -> delete -> wait -> confirm deleted -> clear SSM. Runs BEFORE the app scale-down so the DB security group is free to delete. Failure in either branch aborts both.",
+              "Type": "Parallel",
+              "Branches": [
+                {
+                  "StartAt": "SnapshotMain",
+                  "States": {
+                    "SnapshotMain": {
+                      "Comment": "Final manual snapshot of the cics PITR instance. If it is already gone, skip straight to done.",
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                     "snapshot_db",
+                        "db_instance_identifier.$":   "$.pitr_target_identifier"
+                      },
+                      "ResultPath": "$.snap_main",
+                      "Next": "SnapshotMainSubmitted",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "MainCleanupFailed", "ResultPath": "$.error"}]
+                    },
+                    "SnapshotMainSubmitted": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {"Variable": "$.snap_main.submitted", "BooleanEquals": true, "Next": "WaitSnapshotMain"}
+                      ],
+                      "Default": "MainCleanupDone"
+                    },
+                    "WaitSnapshotMain": {
+                      "Type": "Wait",
+                      "Seconds": 30,
+                      "Next": "CheckSnapshotMain"
+                    },
+                    "CheckSnapshotMain": {
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":         "check_snapshot_status",
+                        "snapshot_id.$":  "$.snap_main.snapshot_id"
+                      },
+                      "ResultPath": "$.snap_main_status",
+                      "Next": "SnapshotMainDone",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "MainCleanupFailed", "ResultPath": "$.error"}]
+                    },
+                    "SnapshotMainDone": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {"Variable": "$.snap_main_status.snapshot_failed",   "BooleanEquals": true, "Next": "MainCleanupFailed"},
+                        {"Variable": "$.snap_main_status.snapshot_complete", "BooleanEquals": true, "Next": "DeleteMain"}
+                      ],
+                      "Default": "WaitSnapshotMain"
+                    },
+                    "DeleteMain": {
+                      "Comment": "Delete the cics PITR instance (SkipFinalSnapshot=true) and clear its SSM endpoint pointer.",
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                    "delete_db",
+                        "db_instance_identifier.$":  "$.pitr_target_identifier",
+                        "ssm_path.$":                "$.pitr_endpoint_ssm_path"
+                      },
+                      "ResultPath": "$.del_main",
+                      "Next": "WaitDeleteMain",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "MainCleanupFailed", "ResultPath": "$.error"}]
+                    },
+                    "WaitDeleteMain": {
+                      "Type": "Wait",
+                      "Seconds": 30,
+                      "Next": "CheckDeleteMain"
+                    },
+                    "CheckDeleteMain": {
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                    "check_db_deleted",
+                        "db_instance_identifier.$":  "$.pitr_target_identifier"
+                      },
+                      "ResultPath": "$.del_main_status",
+                      "Next": "DeleteMainDone",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "MainCleanupFailed", "ResultPath": "$.error"}]
+                    },
+                    "DeleteMainDone": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {"Variable": "$.del_main_status.db_deleted", "BooleanEquals": true, "Next": "MainCleanupDone"}
+                      ],
+                      "Default": "WaitDeleteMain"
+                    },
+                    "MainCleanupDone": {
+                      "Type": "Succeed"
+                    },
+                    "MainCleanupFailed": {
+                      "Type": "Fail",
+                      "Error": "MainCleanupFailed",
+                      "Cause": "cics PITR snapshot or delete failed — see branch logs."
+                    }
+                  }
+                },
+                {
+                  "StartAt": "SnapshotFe",
+                  "States": {
+                    "SnapshotFe": {
+                      "Comment": "Final manual snapshot of the cicsfe PITR instance. If it is already gone, skip straight to done.",
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                     "snapshot_db",
+                        "db_instance_identifier.$":   "$.pitr_fe_target_identifier"
+                      },
+                      "ResultPath": "$.snap_fe",
+                      "Next": "SnapshotFeSubmitted",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FeCleanupFailed", "ResultPath": "$.error"}]
+                    },
+                    "SnapshotFeSubmitted": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {"Variable": "$.snap_fe.submitted", "BooleanEquals": true, "Next": "WaitSnapshotFe"}
+                      ],
+                      "Default": "FeCleanupDone"
+                    },
+                    "WaitSnapshotFe": {
+                      "Type": "Wait",
+                      "Seconds": 30,
+                      "Next": "CheckSnapshotFe"
+                    },
+                    "CheckSnapshotFe": {
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":         "check_snapshot_status",
+                        "snapshot_id.$":  "$.snap_fe.snapshot_id"
+                      },
+                      "ResultPath": "$.snap_fe_status",
+                      "Next": "SnapshotFeDone",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FeCleanupFailed", "ResultPath": "$.error"}]
+                    },
+                    "SnapshotFeDone": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {"Variable": "$.snap_fe_status.snapshot_failed",   "BooleanEquals": true, "Next": "FeCleanupFailed"},
+                        {"Variable": "$.snap_fe_status.snapshot_complete", "BooleanEquals": true, "Next": "DeleteFe"}
+                      ],
+                      "Default": "WaitSnapshotFe"
+                    },
+                    "DeleteFe": {
+                      "Comment": "Delete the cicsfe PITR instance (SkipFinalSnapshot=true) and clear its SSM endpoint pointer.",
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                    "delete_db",
+                        "db_instance_identifier.$":  "$.pitr_fe_target_identifier",
+                        "ssm_path.$":                "$.pitr_fe_endpoint_ssm_path"
+                      },
+                      "ResultPath": "$.del_fe",
+                      "Next": "WaitDeleteFe",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FeCleanupFailed", "ResultPath": "$.error"}]
+                    },
+                    "WaitDeleteFe": {
+                      "Type": "Wait",
+                      "Seconds": 30,
+                      "Next": "CheckDeleteFe"
+                    },
+                    "CheckDeleteFe": {
+                      "Type": "Task",
+                      "Resource": "${LambdaFunction.Arn}",
+                      "Parameters": {
+                        "action":                    "check_db_deleted",
+                        "db_instance_identifier.$":  "$.pitr_fe_target_identifier"
+                      },
+                      "ResultPath": "$.del_fe_status",
+                      "Next": "DeleteFeDone",
+                      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+                      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FeCleanupFailed", "ResultPath": "$.error"}]
+                    },
+                    "DeleteFeDone": {
+                      "Type": "Choice",
+                      "Choices": [
+                        {"Variable": "$.del_fe_status.db_deleted", "BooleanEquals": true, "Next": "FeCleanupDone"}
+                      ],
+                      "Default": "WaitDeleteFe"
+                    },
+                    "FeCleanupDone": {
+                      "Type": "Succeed"
+                    },
+                    "FeCleanupFailed": {
+                      "Type": "Fail",
+                      "Error": "FeCleanupFailed",
+                      "Cause": "cicsfe PITR snapshot or delete failed — see branch logs."
+                    }
+                  }
+                }
+              ],
+              "ResultPath": "$.pitr_cleanup",
+              "Next": "ScaleDownAppStack",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "ScaleDownAppStack": {
+              "Comment": "FAILBACK STEP 3 — Scale the CICS app stack down: DeployPaidResources=false drops ELB / DB ingress+DNS / (snapshot path) both nested DBs; IsPITRMode=false resets to clean cold-standby config. NOTE: EC2 app servers are gated on None/IsMainRegion (not DeployPaidResources), so this does NOT stop them — instances the failover started keep running until stopped separately.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "update_stack",
+                "stack_type":   "app",
+                "stack_name":   "${AppStackName}",
+                "extra_params": {
+                  "DeployPaidResources": "false",
+                  "IsPITRMode":          "false"
+                }
+              },
+              "ResultPath": "$.app_update",
+              "Next": "WaitAppStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitAppStack": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckAppStack"
+            },
+
+            "CheckAppStack": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "check_stack_status",
+                "stack_name":   "${AppStackName}"
+              },
+              "ResultPath": "$.app_status",
+              "Next": "AppStackDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "AppStackDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.app_status.stack_rollback", "BooleanEquals": true, "Next": "FailbackFailed"},
+                {"Variable": "$.app_status.stack_complete", "BooleanEquals": true, "Next": "ScaleDownNetworkStack"}
+              ],
+              "Default": "WaitAppStack"
+            },
+
+            "ScaleDownNetworkStack": {
+              "Comment": "FAILBACK STEP 4 — Scale the DR network stack back down: CreateJumpHost, CreateMultipleNat, CreateVpcEndpoint, S3GatewayVpcEndpoint = false. DeployPaidResources is left untouched (failover never changed it). Uses TemplateURL to bypass the 51,200-byte TemplateBody limit.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":                 "update_stack",
+                "stack_type":             "network",
+                "stack_name":             "${NetworkStackName}",
+                "network_template_url":   "${NetworkTemplateUrl}",
+                "extra_params": {
+                  "CreateJumpHost":       "false",
+                  "CreateMultipleNat":    "false",
+                  "CreateVpcEndpoint":    "false",
+                  "S3GatewayVpcEndpoint": "false"
+                }
+              },
+              "ResultPath": "$.network_update",
+              "Next": "WaitNetworkStack",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 15, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "WaitNetworkStack": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckNetworkStack"
+            },
+
+            "CheckNetworkStack": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":       "check_stack_status",
+                "stack_name":   "${NetworkStackName}"
+              },
+              "ResultPath": "$.network_status",
+              "Next": "NetworkStackDone",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailbackFailed", "ResultPath": "$.error"}]
+            },
+
+            "NetworkStackDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.network_status.stack_rollback", "BooleanEquals": true, "Next": "FailbackFailed"},
+                {"Variable": "$.network_status.stack_complete", "BooleanEquals": true, "Next": "NotifyComplete"}
+              ],
+              "Default": "WaitNetworkStack"
+            },
+
+            "NotifyComplete": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":         "notify",
+                "sns_topic_arn":  "${SnsTopicArn}",
+                "subject":        "CICS DR Failback Complete",
+                "message":        "CICS DR failback completed. DNS repointed to MAIN ALB, PITR DBs cleaned up, app + network stacks scaled back down."
+              },
+              "ResultPath": "$.notify_result",
+              "Next": "Complete",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 5, "MaxAttempts": 2, "BackoffRate": 1}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Complete", "ResultPath": "$.notify_error"}]
+            },
+
+            "Complete": {
+              "Type": "Succeed"
+            },
+
+            "FailbackFailed": {
+              "Type": "Fail",
+              "Error": "FailbackFailed",
+              "Cause": "CICS DR failback aborted — a step failed after retries. Check CloudWatch Logs and the Step Functions execution history."
+            }
+
+          }
+        }
+
+####
+# Outputs
+####
+
+Outputs:
+
+  StateMachineArn:
+    Description: ARN of the CICS DR Failback State Machine
+    Value: !Ref StateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineArn'
+
+  StateMachineName:
+    Description: Name of the CICS DR Failback State Machine
+    Value: !GetAtt StateMachine.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineName'
+
+  LambdaArn:
+    Description: ARN of the CICS DR Failback worker Lambda
+    Value: !GetAtt LambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+
+  LambdaName:
+    Description: Name of the CICS DR Failback worker Lambda
+    Value: !Ref LambdaFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaName'
+
+  LambdaLogGroupName:
+    Description: CloudWatch Log Group for the CICS DR Failback worker Lambda
+    Value: !Ref LambdaLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaLogGroup'
+
+  StateMachineLogGroupName:
+    Description: CloudWatch Log Group for the CICS DR Failback State Machine execution history
+    Value: !Ref StateMachineLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineLogGroup'
