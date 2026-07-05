@@ -1,0 +1,1564 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: PhilPass BSP LibreSwan VPN Gateway (dedicated stack)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+          - DeletionProtection
+      - Label:
+          default: VPN Configuration
+        Parameters:
+          - LibreSwanActive
+          - BSPMode
+          - InstanceAmi
+          - InstanceKeyName
+          - LibreSwanPPPPSK
+          - LibreSwan3RDPSK
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      DeletionProtection:
+        default: Protect core items against deletion
+      LibreSwanActive:
+        default: Active LibreSwan Instances (default is true)
+      BSPMode:
+        default: BSP Resources to connect to
+      InstanceAmi:
+        default: LibreSwan Instance AMI ID (Amazon Linux 2023)
+      InstanceKeyName:
+        default: Instance Key Name
+      LibreSwanPPPPSK:
+        default: LibreSwan PhilPassPlus Shared Key
+      LibreSwan3RDPSK:
+        default: LibreSwan 3rd Party Shared Key
+
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name)
+    Type: String
+    MinLength: 3
+    MaxLength: 9
+    Default: philpass
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: pchc
+    AllowedPattern: '^[a-z]+(-[a-z]+)*$'
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+    MaxLength: 10
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  BSPMode:
+    Description: BSP Resources to connect to
+    Type: String
+    Default: UAT
+    AllowedValues:
+      - Production
+      - UAT
+  NetworkStackName:
+    Description: The name of the network stack
+    Type: String
+    Default: pchc-dev-ase1-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
+    Type: String
+    Default: pchc-dev-ase1-sns
+    MinLength: 1
+  DeletionProtection:
+    Description: Set to true to enable (valid only in Production mode)
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  InstanceKeyName:
+    Description: Instance Key Name (omit to use SSM Session Manager only)
+    Type: String
+    Default: ''
+  LibreSwanActive:
+    Description: Set to false only to turn off the LibreSwan gateway instances
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  InstanceAmi:
+    Description: LibreSwan Instance AMI ID (Amazon Linux 2023)
+    Type: AWS::EC2::Image::Id
+    Default: ami-0499b5b9a26be1426
+  LibreSwanPPPPSK:
+    Description: Password for PhilPassPlus PSK
+    Type: String
+    NoEcho: true
+  LibreSwan3RDPSK:
+    Description: Password for 3rd Party PSK
+    Type: String
+    NoEcho: true
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+  BSPConfig:
+    Production:
+      PPPGateway: 121.127.5.157
+      PPPSubnetCIDR: 192.168.80.0/24
+      PPPResource1: 192.168.80.131
+      PPPResource2: 192.168.80.132
+      PPPResource3: 192.168.80.141
+      PPPResource4: 192.168.80.152
+      PPPResource5: 192.168.80.153
+      PPPResource6: 192.168.80.154
+      PPPDNSServer1: 192.168.80.241
+      PPPDNSServer2: 192.168.80.242
+      PP3rdPartyGateway: 121.127.5.50
+      PP3rdPartySubnetCIDR: 192.168.4.0/24
+      PP3rdPartyResource: 192.168.4.125/32
+      LibreSwanENIPrivIPAZ1: 10.0.0.53 #registered with BSP
+      LibreSwanPublicSubnetAZ1: 10.0.0.32/27
+      LibreSwanPrivateSubnetAZ1: 10.0.0.0/27
+      LibreSwanENIPrivIPAZ2: 10.0.0.176 #registered with BSP
+      LibreSwanPublicSubnetAZ2: 10.0.0.160/27
+      LibreSwanPrivateSubnetAZ2: 10.0.0.128/27
+      PPPDRGateway: 121.127.17.175 #DR Gateway
+      PPPDRSubnetCIDR: 192.168.90.0/24
+      PPPDRResource1: 192.168.90.131
+      PPPDRResource2: 192.168.90.141
+      PPPDRResource3: 192.168.90.142
+      PPPDRResource4: 192.168.90.152
+      PPPDRResource5: 192.168.90.153
+      PPPDRResource6: 192.168.90.154
+    UAT:
+      PPPGateway: 121.127.5.157 #Same as Prod
+      PPPSubnetCIDR: 192.168.222.0/24
+      PPPResource1: 192.168.222.100
+      PPPDNSServer1: 192.168.222.241 #Check on this
+      PPPDNSServer2: 192.168.222.242 #Check on this
+      PP3rdPartyGateway: 121.127.5.50 #Same as Prod
+      PP3rdPartySubnetCIDR: 192.168.222.0/24
+      PP3rdPartyResource: 192.168.222.101/32
+      LibreSwanENIPrivIPAZ1: 10.2.0.53 #registered with BSP
+      LibreSwanPublicSubnetAZ1: 10.2.0.32/27
+      LibreSwanPrivateSubnetAZ1: 10.2.0.0/27
+      LibreSwanENIPrivIPAZ2: 10.2.0.176 #registered with BSP
+      LibreSwanPublicSubnetAZ2: 10.2.0.160/27
+      LibreSwanPrivateSubnetAZ2: 10.2.0.128/27
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
+  IsLibreSwanActive: !Equals [!Ref LibreSwanActive, true]
+  IsLibreSwanAlarmActive: !And [Condition: IsLibreSwanActive, Condition: IsProd]
+  IsBSPProd: !And [Condition: IsLibreSwanActive, !Equals [!Ref BSPMode, Production]]
+  IsBSPUAT: !And [Condition: IsLibreSwanActive, !Equals [!Ref BSPMode, UAT]]
+
+Resources:
+
+###
+# BSP DNS Resolver
+###
+
+  BSPDNSResolverSecurityGroup:
+    Condition: IsProd
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BSP DNS Resolver Security Group
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupEgress:
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0 #Need to clamp down on this
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0 #Need to clamp down on this
+
+  BSPDNSResolver:
+    Condition: IsProd
+    Type: AWS::Route53Resolver::ResolverEndpoint
+    Properties:
+      Direction: OUTBOUND
+      IpAddresses:
+        - SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId1'
+        - SubnetId:
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-PrivateSubnetId2'
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, DNS, Resolver]]
+      SecurityGroupIds:
+        - !Ref BSPDNSResolverSecurityGroup
+
+  BSPDomainResolverRule:
+    Condition: IsProd
+    Type: AWS::Route53Resolver::ResolverRule
+    Properties:
+      DomainName: bsp.gov.ph
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Domain, Rule]]
+      ResolverEndpointId: !Ref BSPDNSResolver
+      RuleType: FORWARD
+      TargetIps:
+        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1]
+          Port: 53
+        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2]
+          Port: 53
+
+  BSPDomainVPCAssociation:
+    Condition: IsProd
+    Type: AWS::Route53Resolver::ResolverRuleAssociation
+    Properties:
+      ResolverRuleId: !Ref BSPDomainResolverRule
+      VPCId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+
+  BSPDNSResolverLogGroup:
+    Condition: IsProd
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Resolver]]
+
+  BSPDNSResolverLog:
+    Condition: IsProd
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfig
+    Properties:
+      DestinationArn: !GetAtt BSPDNSResolverLogGroup.Arn
+
+  BSPDNSResolverLogAssociation:
+    Condition: IsProd
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
+    Properties:
+      ResolverQueryLogConfigId: !Ref BSPDNSResolverLog
+      ResourceId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+
+###
+# Custom Network resources for BSP
+###
+
+  LibreSwanSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: LibreSwan Public Security Group
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+
+  AllowICMPIntoLibreSwan:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: icmp
+      GroupId: !Ref LibreSwanSecurityGroup
+      FromPort: -1
+      ToPort: -1
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcCidrBlock'
+
+  AllowHTTPSIntoLibreSwan:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      GroupId: !Ref LibreSwanSecurityGroup
+      FromPort: 443
+      ToPort: 443
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcCidrBlock'
+
+  AllowDNSIntoLibreSwan:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: udp
+      GroupId: !Ref LibreSwanSecurityGroup
+      FromPort: 53
+      ToPort: 53
+      CidrIp:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcCidrBlock'
+
+  LibreSwanAZ1ENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: !Join
+        - ' '
+        - - Gateway Main ENI
+          - !Select
+            - 0
+            - Fn::GetAZs: !Ref 'AWS::Region'
+      GroupSet:
+        - !Ref LibreSwanSecurityGroup
+      PrivateIpAddress: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanENIPrivIPAZ1] #Registered with BSP
+      SourceDestCheck: false
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PublicSubnetId1'
+      Tags:
+        - Key: Name
+          Value: LibreSwan public ENI
+
+  LibreSwanAZ2ENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: !Join
+        - ' '
+        - - BSP Access ENI
+          - !Select
+            - 1
+            - Fn::GetAZs: !Ref 'AWS::Region'
+      GroupSet:
+        - !Ref LibreSwanSecurityGroup
+      PrivateIpAddress: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanENIPrivIPAZ2] #Registered with BSP
+      SourceDestCheck: false
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PublicSubnetId2'
+      Tags:
+        - Key: Name
+          Value: LibreSwan public ENI
+
+  BSPVPNGatewayEIP1: # - Hardcoded for BSP
+    DeletionPolicy: Retain #Make sure to retain always
+    UpdateReplacePolicy: Retain
+    Type: AWS::EC2::EIP
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [' ', [!Ref Name, !Ref EnvName, BSP registered IP - AZ1]]
+
+  BSPVPNGatewayEIP2: # - Hardcoded for BSP
+    DeletionPolicy: Retain #Make sure to retain always
+    UpdateReplacePolicy: Retain
+    Type: AWS::EC2::EIP
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [' ', [!Ref Name, !Ref EnvName, BSP registered IP - AZ2]]
+
+##
+# BSP target resources
+##
+
+  BSP3rdPartyRouteAZ1:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  BSP3rdPartyRouteAZ2:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPResource1AZ1Route:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPResource1AZ2Route:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPResource2AZ1Route:
+    Condition: IsBSPProd #No IP2 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPResource2AZ2Route:
+    Condition: IsBSPProd #No IP2 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPResource3AZ1Route:
+    Condition: IsBSPProd #No IP3 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPResource3AZ2Route:
+    Condition: IsBSPProd #No IP3 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPResource4AZ1Route:
+    Condition: IsBSPProd #No IP4 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPResource4AZ2Route:
+    Condition: IsBSPProd #No IP4 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPResource5AZ1Route:
+    Condition: IsBSPProd #No IP5 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPResource5AZ2Route:
+    Condition: IsBSPProd #No IP5 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPResource6AZ1Route:
+    Condition: IsBSPProd #No IP6 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPResource6AZ2Route:
+    Condition: IsBSPProd #No IP6 except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPDRResource1AZ1Route:
+    Condition: IsBSPProd #No DR resource except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPDRResource1AZ2Route:
+    Condition: IsBSPProd #No DR resource except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPDRResource2AZ1Route:
+    Condition: IsBSPProd #No DR resource except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPDRResource2AZ2Route:
+    Condition: IsBSPProd #No DR resource except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPDRResource3AZ1Route:
+    Condition: IsBSPProd #No DR resource except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPDRResource3AZ2Route:
+    Condition: IsBSPProd #No DR resource except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  PPPDRResource4AZ1Route:
+    Condition: IsBSPProd #No DR resource except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  PPPDRResource4AZ2Route:
+    Condition: IsBSPProd #No DR resource except in prod
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  BSPPhilPassPlusRouteDNS1AZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  BSPPhilPassPlusRouteDNS1AZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+  BSPPhilPassPlusRouteDNS2AZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable1'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+
+  BSPPhilPassPlusRouteDNS2AZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateRouteTable2'
+      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+
+##
+# LibreSwan EC2 instances
+##
+
+# LibreSwanLaunchTemplate is used only as a cfn-init metadata carrier for launching EC2
+
+  LibreSwanLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          AZ1ConfigProd:
+            - InstallPackages
+            - NetworkFiles
+            - PSK
+            - AZ1ConfigProd
+            - StartLibreSwan
+          AZ2ConfigProd:
+            - InstallPackages
+            - NetworkFiles
+            - PSK
+            - AZ2ConfigProd
+            - StartLibreSwan
+          AZ1ConfigUAT:
+            - InstallPackages
+            - NetworkFiles
+            - PSK
+            - AZ1ConfigUAT
+            - StartLibreSwan
+          AZ2ConfigUAT:
+            - InstallPackages
+            - NetworkFiles
+            - PSK
+            - AZ2ConfigUAT
+            - StartLibreSwan
+
+        InstallPackages:
+           packages:
+             yum:
+               libreswan: []
+               nftables: []
+
+        StartLibreSwan:
+          commands:
+            01_load_nftables:
+              command: 'nft -f /etc/nftables.conf && systemctl enable --now nftables'
+            02_start_ipsec:
+              command: 'systemctl enable --now ipsec'
+              ignoreErrors: true
+            # [ADDED] Disable rp_filter on VTI interfaces after tunnel comes up.
+            # VTI interfaces are created by Libreswan on start, so sysctl for them
+            # must run after ipsec starts. Without this, return traffic gets dropped.
+            03_disable_rp_filter_vti:
+              command: |
+                sleep 5
+                for vti in vti0 vti1; do
+                  if [ -d /proc/sys/net/ipv4/conf/$vti ]; then
+                    sysctl -w net.ipv4.conf.$vti.rp_filter=0
+                    sysctl -w net.ipv4.conf.$vti.disable_policy=1
+                  fi
+                done
+
+        NetworkFiles:
+          commands:
+            01_ip_forward:
+              command: 'echo 1 > /proc/sys/net/ipv4/ip_forward'
+            02_send_redirects:
+              command: 'echo 0 > /proc/sys/net/ipv4/conf/ens5/send_redirects'
+            03_apply_sysctl:
+              command: 'sysctl --system'
+          files:
+            /etc/sysctl.d/99-ipsec-vpn.conf:
+              content: |
+                # Required for VPN gateway forwarding
+                net.ipv4.ip_forward = 1
+
+                # Redirect protection (breaks IPsec if enabled)
+                net.ipv4.conf.all.accept_redirects = 0
+                net.ipv4.conf.default.accept_redirects = 0
+                net.ipv4.conf.all.send_redirects = 0
+                net.ipv4.conf.default.send_redirects = 0
+
+                # Source routing disabled
+                net.ipv4.conf.all.accept_source_route = 0
+                net.ipv4.conf.default.accept_source_route = 0
+
+                # [CHANGED] rp_filter set to 0 globally.
+                # With VTI, strict rp_filter drops return traffic because the
+                # source (remote subnet) isn't routable via the interface the
+                # decrypted packet appears on. VTI interfaces get rp_filter=0
+                # explicitly after ipsec starts (see 03_disable_rp_filter_vti).
+                net.ipv4.conf.all.rp_filter = 0
+                net.ipv4.conf.default.rp_filter = 0
+
+                # ICMP hardening
+                net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+                # ASLR
+                kernel.randomize_va_space = 2
+
+        PSK:
+          files:
+            /etc/ipsec.d/ipsec.secrets:
+              content: !Sub
+                - |
+                  @pchc ${PPP_GATEWAY} : PSK "${PSK_PPP}"
+                  @pchc ${PPP_DR_GATEWAY} : PSK "${PSK_PPP}"
+                  @pchc ${3RD_GATEWAY} : PSK "${PSK_3RD}"
+                - PSK_PPP: !Ref LibreSwanPPPPSK
+                  PSK_3RD: !Ref LibreSwan3RDPSK
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPGateway]
+                  PPP_DR_GATEWAY: !If
+                    - IsBSPUAT
+                    - !FindInMap [BSPConfig, UAT, PPPGateway]
+                    - !FindInMap [BSPConfig, Production, PPPDRGateway]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
+              # [CHANGED] Secrets file should be 0600, not default
+              permissions: '0600'
+              owner: root
+              group: root
+
+# AZ 1 Prod
+        AZ1ConfigProd:
+          files:
+            /etc/nftables.conf:
+              content: !Sub
+                - |
+                  table ip nat {
+                      set source_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${PRIVATE_SUBNET}
+                          }
+                      }
+
+                      chain POSTROUTING {
+                          type nat hook postrouting priority 100;
+
+                          # [CHANGED] Masquerade on VTI interfaces instead of ens5.
+                          # On kernel 6.1 (AL2023), XFRM policy check happens before
+                          # POSTROUTING for forwarded traffic. Masquerading on ens5
+                          # fires too late — traffic bypasses IPsec entirely.
+                          # VTI interfaces receive routed traffic first, so NAT fires
+                          # before XFRM encryption.
+                          #
+                          # [CHANGED] oifname "vti*" (runtime name match) instead of
+                          # oif "vtiN" (load-time index): nftables loads before ipsec
+                          # creates the vti devices, so oif fails with "Interface does
+                          # not exist". The wildcard also collapses all tunnels into a
+                          # single rule, so adding destinations adds no rules.
+                          ip saddr @source_subnet oifname "vti*" masquerade
+                      }
+                  }
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, Production, LibreSwanPrivateSubnetAZ1]
+            /etc/ipsec.d/ipsec.conf:
+              content: !Sub
+                - |
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      # Unique mark per conn so kernel maps traffic to the right tunnel.
+                      mark=42/0xffffffff
+                      vti-interface=vti0
+                      vti-routing=yes
+                      vti-shared=no
+
+                  conn bspPPPlusDR
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_DR_GATEWAY}
+                      rightsubnet=${PPP_DR_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=43/0xffffffff
+                      vti-interface=vti1
+                      vti-routing=yes
+                      vti-shared=no
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=44/0xffffffff
+                      vti-interface=vti2
+                      vti-routing=yes
+                      vti-shared=no
+                - LEFT_SUBNET: !FindInMap [BSPConfig, Production, LibreSwanPublicSubnetAZ1]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+              # [CHANGED] Was 0700. Config files should be 0644 (not executable).
+              # Only secrets files need restrictive permissions.
+              permissions: '0644'
+              owner: root
+              group: root
+# AZ 2 Prod
+        AZ2ConfigProd:
+          files:
+            /etc/nftables.conf:
+              content: !Sub
+                - |
+                  table ip nat {
+                      set source_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${PRIVATE_SUBNET}
+                          }
+                      }
+
+                      chain POSTROUTING {
+                          type nat hook postrouting priority 100;
+
+                          # [CHANGED] Masquerade on VTI interfaces instead of ens5.
+                          # On kernel 6.1 (AL2023), XFRM policy check happens before
+                          # POSTROUTING for forwarded traffic. Masquerading on ens5
+                          # fires too late — traffic bypasses IPsec entirely.
+                          # VTI interfaces receive routed traffic first, so NAT fires
+                          # before XFRM encryption.
+                          #
+                          # [CHANGED] oifname "vti*" (runtime name match) instead of
+                          # oif "vtiN" (load-time index): nftables loads before ipsec
+                          # creates the vti devices, so oif fails with "Interface does
+                          # not exist". The wildcard also collapses all tunnels into a
+                          # single rule, so adding destinations adds no rules.
+                          ip saddr @source_subnet oifname "vti*" masquerade
+                      }
+                  }
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, Production, LibreSwanPrivateSubnetAZ2]
+            /etc/ipsec.d/ipsec.conf:
+              content: !Sub
+                - |
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      # Unique mark per conn so kernel maps traffic to the right tunnel.
+                      mark=42/0xffffffff
+                      vti-interface=vti0
+                      vti-routing=yes
+                      vti-shared=no
+
+                  conn bspPPPlusDR
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_DR_GATEWAY}
+                      rightsubnet=${PPP_DR_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=43/0xffffffff
+                      vti-interface=vti1
+                      vti-routing=yes
+                      vti-shared=no
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=44/0xffffffff
+                      vti-interface=vti2
+                      vti-routing=yes
+                      vti-shared=no
+                - LEFT_SUBNET: !FindInMap [BSPConfig, Production, LibreSwanPublicSubnetAZ2]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                  PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
+                  PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+              # [CHANGED] Was 0700. Config files should be 0644 (not executable).
+              # Only secrets files need restrictive permissions.
+              permissions: '0644'
+              owner: root
+              group: root
+# AZ 1 UAT
+        AZ1ConfigUAT:
+          files:
+            /etc/nftables.conf:
+              content: !Sub
+                - |
+                  table ip nat {
+                      set source_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${PRIVATE_SUBNET}
+                          }
+                      }
+
+                      chain POSTROUTING {
+                          type nat hook postrouting priority 100;
+
+                          # [CHANGED] Masquerade on VTI interfaces instead of ens5.
+                          # On kernel 6.1 (AL2023), XFRM policy check happens before
+                          # POSTROUTING for forwarded traffic. Masquerading on ens5
+                          # fires too late — traffic bypasses IPsec entirely.
+                          # VTI interfaces receive routed traffic first, so NAT fires
+                          # before XFRM encryption.
+                          #
+                          # [CHANGED] oifname "vti*" (runtime name match) instead of
+                          # oif "vtiN" (load-time index): nftables loads before ipsec
+                          # creates the vti devices, so oif fails with "Interface does
+                          # not exist". The wildcard also collapses all tunnels into a
+                          # single rule, so adding destinations adds no rules.
+                          ip saddr @source_subnet oifname "vti*" masquerade
+                      }
+                  }
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, UAT, LibreSwanPrivateSubnetAZ1]
+
+            /etc/ipsec.d/ipsec.conf:
+              content: !Sub
+                - |
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      # Unique mark per conn so kernel maps traffic to the right tunnel.
+                      mark=42/0xffffffff
+                      vti-interface=vti0
+                      vti-routing=yes
+                      vti-shared=no
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=43/0xffffffff
+                      vti-interface=vti1
+                      vti-routing=yes
+                      vti-shared=no
+                - LEFT_SUBNET: !FindInMap [BSPConfig, UAT, LibreSwanPublicSubnetAZ1]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+              # [CHANGED] Was 0700. Config files should be 0644 (not executable).
+              # Only secrets files need restrictive permissions.
+              permissions: '0644'
+              owner: root
+              group: root
+
+# AZ 2 UAT
+        AZ2ConfigUAT:
+          files:
+            /etc/nftables.conf:
+              content: !Sub
+                - |
+                  table ip nat {
+                      set source_subnet {
+                          type ipv4_addr;
+                          flags interval;
+                          elements = {
+                              ${PRIVATE_SUBNET}
+                          }
+                      }
+
+                      chain POSTROUTING {
+                          type nat hook postrouting priority 100;
+
+                          # [CHANGED] Masquerade on VTI interfaces instead of ens5.
+                          # On kernel 6.1 (AL2023), XFRM policy check happens before
+                          # POSTROUTING for forwarded traffic. Masquerading on ens5
+                          # fires too late — traffic bypasses IPsec entirely.
+                          # VTI interfaces receive routed traffic first, so NAT fires
+                          # before XFRM encryption.
+                          #
+                          # [CHANGED] oifname "vti*" (runtime name match) instead of
+                          # oif "vtiN" (load-time index): nftables loads before ipsec
+                          # creates the vti devices, so oif fails with "Interface does
+                          # not exist". The wildcard also collapses all tunnels into a
+                          # single rule, so adding destinations adds no rules.
+                          ip saddr @source_subnet oifname "vti*" masquerade
+                      }
+                  }
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, UAT, LibreSwanPrivateSubnetAZ2]
+            /etc/ipsec.d/ipsec.conf:
+              content: !Sub
+                - |
+                  conn bspPPPlus
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${PPP_GATEWAY}
+                      rightsubnet=${PPP_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      # Unique mark per conn so kernel maps traffic to the right tunnel.
+                      mark=42/0xffffffff
+                      vti-interface=vti0
+                      vti-routing=yes
+                      vti-shared=no
+
+                  conn bspPP3rd
+                      authby=secret
+                      auto=start
+                      ikev2=no
+                      type=tunnel
+                      leftid=@pchc
+                      left=%defaultroute
+                      leftsubnet=${LEFT_SUBNET}
+                      right=${3RD_GATEWAY}
+                      rightsubnet=${3RD_SUBNET}
+                      ike=aes256-sha256-modp2048
+                      ikelifetime=43200s
+                      esp=aes128-sha256-modp2048
+                      salifetime=1h
+                      encapsulation=yes
+                      dpddelay=10
+                      dpdtimeout=60
+                      dpdaction=restart
+                      # [ADDED] VTI interface for this conn.
+                      mark=43/0xffffffff
+                      vti-interface=vti1
+                      vti-routing=yes
+                      vti-shared=no
+                - LEFT_SUBNET: !FindInMap [BSPConfig, UAT, LibreSwanPublicSubnetAZ2]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+              # [CHANGED] Was 0700. Config files should be 0644 (not executable).
+              # Only secrets files need restrictive permissions.
+              permissions: '0644'
+              owner: root
+              group: root
+    Properties:
+      LaunchTemplateName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, libreswan]]
+      LaunchTemplateData:
+        ImageId: !Ref InstanceAmi
+        InstanceType: t3.nano
+        KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+        DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
+        IamInstanceProfile:
+          Name: !Ref LibreSwanInstanceProfile
+
+  LibreSwanEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: AccessStackDetails
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+                - cloudformation:DescribeStackResource
+              Resource: '*'
+        - PolicyName: EC2ReadTagPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeTags
+                  - ec2:DescribeInstances
+                Resource: '*'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforSSM'
+
+  LibreSwanInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref LibreSwanEC2Role
+
+  LibreSwanInstanceAZ1:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref LibreSwanInstanceProfile
+      DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      ImageId: !Ref InstanceAmi
+      InstanceType: t3.nano
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a]]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource LibreSwanLaunchTemplate -c ${AZ1CONFIG} --region ${AWS::Region} --role ${ROLE}
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+             /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+             /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource LibreSwanLaunchTemplate  --region ${AWS::Region}
+          - AZ1CONFIG: !If [IsBSPUAT, AZ1ConfigUAT, AZ1ConfigProd]
+            ROLE: !Ref LibreSwanEC2Role
+
+  LibreSwanPublicEIPAttachAZ1:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+      AllocationId: !GetAtt BSPVPNGatewayEIP1.AllocationId
+
+  LibreSwanAZ1DataVolume:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !GetAtt LibreSwanInstanceAZ1.AvailabilityZone
+      Size: 10
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, data]]
+
+  LibreSwanAZ1DataVolumeAttachment:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref LibreSwanInstanceAZ1
+      VolumeId: !Ref LibreSwanAZ1DataVolume
+
+  LowDiskSpaceLibreSwanAZ1Alarm:
+    Condition: IsLibreSwanAlarmActive
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, disk]]
+      MetricName: disk_used_percent
+      Namespace: CWAgent
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: ImageId
+          Value: !Ref InstanceAmi
+        - Name: InstanceId
+          Value: !Ref LibreSwanInstanceAZ1
+        - Name: path
+          Value: /
+        - Name: fstype
+          Value: xfs
+        - Name: InstanceType
+          Value: t3.nano
+        - Name: device
+          Value: nvme0n1p1
+
+  LowMemLibreSwanAZ1Alarm:
+    Condition: IsLibreSwanAlarmActive
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, mem]]
+      MetricName: mem_used_percent
+      Namespace: CWAgent
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: ImageId
+          Value: !Ref InstanceAmi
+        - Name: InstanceId
+          Value: !Ref LibreSwanInstanceAZ1
+        - Name: InstanceType
+          Value: t3.nano
+
+  HighCPULibreSwanAZ1Alarm:
+    Condition: IsLibreSwanAlarmActive
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref LibreSwanInstanceAZ1
+
+  LibreSwanInstanceAZ2:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref LibreSwanInstanceProfile
+      DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      ImageId: !Ref InstanceAmi
+      InstanceType: t3.nano
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b]]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+             /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource LibreSwanLaunchTemplate -c ${AZ2CONFIG} --region ${AWS::Region} --role ${ROLE}
+            # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
+             /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            # Signal the status from cfn-init
+             /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource LibreSwanLaunchTemplate  --region ${AWS::Region}
+          - AZ2CONFIG: !If [IsBSPUAT, AZ2ConfigUAT, AZ2ConfigProd]
+            ROLE: !Ref LibreSwanEC2Role
+
+  LibreSwanPublicEIPAttachAZ2:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+      AllocationId: !GetAtt BSPVPNGatewayEIP2.AllocationId
+
+  LibreSwanAZ2DataVolume:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !GetAtt LibreSwanInstanceAZ2.AvailabilityZone
+      Size: 10
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, data]]
+
+  LibreSwanAZ2DataVolumeAttachment:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref LibreSwanInstanceAZ2
+      VolumeId: !Ref LibreSwanAZ2DataVolume
+
+  LowDiskSpaceLibreSwanAZ2Alarm:
+    Condition: IsLibreSwanAlarmActive
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, disk]]
+      MetricName: disk_used_percent
+      Namespace: CWAgent
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: ImageId
+          Value: !Ref InstanceAmi
+        - Name: InstanceId
+          Value: !Ref LibreSwanInstanceAZ2
+        - Name: path
+          Value: /
+        - Name: fstype
+          Value: xfs
+        - Name: InstanceType
+          Value: t3.nano
+        - Name: device
+          Value: nvme0n1p1
+
+  LowMemLibreSwanAZ2Alarm:
+    Condition: IsLibreSwanAlarmActive
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, mem]]
+      MetricName: mem_used_percent
+      Namespace: CWAgent
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: ImageId
+          Value: !Ref InstanceAmi
+        - Name: InstanceId
+          Value: !Ref LibreSwanInstanceAZ2
+        - Name: InstanceType
+          Value: t3.nano
+
+  HighCPULibreSwanAZ2Alarm:
+    Condition: IsLibreSwanAlarmActive
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref LibreSwanInstanceAZ2
+
+###
+# Connectivity Analyzers
+###
+
+  LibreSwanAZ1CanReachInternet:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::NetworkInsightsPath
+    Properties:
+      Source: !Ref LibreSwanInstanceAZ1
+      Destination:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-InternetGateway'
+      Protocol: tcp
+      Tags:
+        - Key: Name
+          Value: LibreSwan AZ1 to Internet
+
+  LibreSwanAZ2CanReachInternet:
+    Condition: IsLibreSwanActive
+    Type: AWS::EC2::NetworkInsightsPath
+    Properties:
+      Source: !Ref LibreSwanInstanceAZ2
+      Destination:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-InternetGateway'
+      Protocol: tcp
+      Tags:
+        - Key: Name
+          Value: LibreSwan AZ2 to Internet
+
+Outputs:
+  LibreSwanSecurityGroupId:
+    Description: Security group ID of the LibreSwan gateway instances
+    Value: !Ref LibreSwanSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LibreSwanSecurityGroupId'
+
+  LibreSwanAZ1ENIId:
+    Description: ENI ID of the AZ1 gateway (fixed private IP, registered with BSP)
+    Value: !Ref LibreSwanAZ1ENI
+    Export:
+      Name: !Sub '${AWS::StackName}-LibreSwanAZ1ENIId'
+
+  LibreSwanAZ2ENIId:
+    Description: ENI ID of the AZ2 gateway (fixed private IP, registered with BSP)
+    Value: !Ref LibreSwanAZ2ENI
+    Export:
+      Name: !Sub '${AWS::StackName}-LibreSwanAZ2ENIId'
+
+  BSPVPNGatewayEIP1:
+    Description: BSP-registered Elastic IP for AZ1 (retained on stack delete)
+    Value: !Ref BSPVPNGatewayEIP1
+    Export:
+      Name: !Sub '${AWS::StackName}-BSPVPNGatewayEIP1'
+
+  BSPVPNGatewayEIP2:
+    Description: BSP-registered Elastic IP for AZ2 (retained on stack delete)
+    Value: !Ref BSPVPNGatewayEIP2
+    Export:
+      Name: !Sub '${AWS::StackName}-BSPVPNGatewayEIP2'
