@@ -12,12 +12,18 @@ Engine: [cics-dr-failback.yaml](cics-dr-failback.yaml) — the **reverse** of [c
 |---|---|
 | `DNSCutover` → hostname aliased to **DR** ALB | **Repoints the hostname back to the MAIN ALB** (first, so clients drain off DR before teardown) |
 | PITR-restored `cics` + `cicsfe` out of band | **Snapshots + deletes both PITR instances**, clears both endpoint SSM params |
+<<<<<<< HEAD
 | App stack `DeployPaidResources=true` (+`IsPITRMode=true`) | App stack **`DeployPaidResources=false`, `IsPITRMode=false`** (ELB, DB ingress/DNS, in-stack DBs torn down) |
 | `StartCicsInstances` | ⚠️ **not reversed** — see "Known limitation" below. `DeployPaidResources=false` does **not** stop the EC2 app servers |
+=======
+| App stack `DeployPaidResources=true` (+`IsPITRMode=true`) | App stack **`DeployPaidResources=false`, `IsPITRMode=false`** (ELB, app servers, in-stack DBs torn down) |
+| `StartCicsInstances` | *implicit* — CFN-managed EC2 come down with `DeployPaidResources=false`; no separate stop step |
+>>>>>>> f8ff0433420b86d0c7772aafe7390bc617b35e86
 | Network scale-up: 4 `Create*` = `true` | **Network scale-down: 4 `Create*` = `false`** (`DeployPaidResources` untouched, as at failover) |
 
 **Out of scope (same as failover):** FSx for OpenZFS. The DR file system was restored out of band — delete it manually after reconciling data back to main (see [README.md](README.md) §"DR FSx", activation-sequence step 6).
 
+<<<<<<< HEAD
 > ### ⚠️ Known limitation — EC2 app servers are not stopped
 >
 > `DeployPaidResources=false` tears down the ELB, DB ingress/DNS, and (snapshot path) the nested DBs — but **not** the EC2 app servers. In [cics.yaml](cics.yaml) the instances are gated on `None` (always) or `IsMainRegion` (second-AZ, absent in DR), **never** `IsDeployPaidResources`. So any `System=CICS` instances the failover's `StartCicsInstances` powered on **keep running (and billing) after failback**. Until this engine gains a `StopCicsInstances` step, stop them yourself:
@@ -29,6 +35,8 @@ Engine: [cics-dr-failback.yaml](cics-dr-failback.yaml) — the **reverse** of [c
 > ```
 > (Or let the DR start/stop schedule stop them at its next window.) The two final DB snapshots failback takes (`<pitr-id>-failback-<ts>`) are also **retained** — delete them once the drill/data is no longer needed.
 
+=======
+>>>>>>> f8ff0433420b86d0c7772aafe7390bc617b35e86
 ---
 
 ## Flow
@@ -106,6 +114,7 @@ Supply **every** key shown (use `""` for the ones a given path doesn't need — 
 | `dns_alb_name_contains` | both | Substring matched against the **MAIN** ALB name/DNS when the two above are blank |
 | `dns_alb_region` | both | Region to search for the MAIN ALB (e.g. the live region); blank = this DR region |
 
+<<<<<<< HEAD
 > ⚠️ **The MAIN ALB lives in the main region, not the DR region where this engine runs.** Either pass `dns_alb_dns_name` + `dns_alb_hosted_zone_id` explicitly, **or** set `dns_alb_name_contains` **and** `dns_alb_region` so the engine can discover it cross-region. Auto-discovery with a blank `dns_alb_region` searches the DR region and — while the DR ALB is still up at the start of failback — would match the **DR** ALB and repoint the hostname at the load balancer you are about to delete. Always point discovery at the **main** region.
 
 ### Skip the DNS repoint
@@ -133,6 +142,9 @@ Set `"use_pitr": false` — there were never any out-of-band PITR instances, so 
   "dns_alb_region":             "ap-southeast-1"
 }
 ```
+=======
+> ⚠️ **The MAIN ALB lives in the main region, not the DR region where this engine runs.** Either pass `dns_alb_dns_name` + `dns_alb_hosted_zone_id` explicitly, **or** set `dns_alb_name_contains` **and** `dns_alb_region` so the engine can discover it cross-region. Auto-discovery with a blank `dns_alb_region` searches the DR region and will not find the main ALB.
+>>>>>>> f8ff0433420b86d0c7772aafe7390bc617b35e86
 
 ---
 

@@ -237,12 +237,19 @@ Failback is the **reverse** of [cics-dr-failover.yaml](cics-dr-failover.yaml) �
 
 1. **Repoint DNS → MAIN ALB** first, so clients drain off DR before anything is torn down (failback presupposes main is healthy). Uses the single-owner UPSERT from §"Option B" — pass the MAIN ALB target explicitly, or `dns_alb_name_contains` **+ `dns_alb_region`** to discover it cross-region (the MAIN ALB is not in the DR region where the engine runs).
 2. **Clean up the PITR DBs** (PITR path only) **before** the app scale-down — the out-of-band instances hold a DB security group that `DeployPaidResources=false` would otherwise fail to delete (`DependencyViolation`). Each DB gets a final manual snapshot, then delete, then SSM-param clear.
+<<<<<<< HEAD
 3. **App stack `DeployPaidResources=false`, `IsPITRMode=false`** — drops ELB, DB ingress/DNS, and (snapshot path) both in-stack DBs.
+=======
+3. **App stack `DeployPaidResources=false`, `IsPITRMode=false`** — drops ELB, app servers, and (snapshot path) both in-stack DBs; CFN-managed EC2 come down here (no explicit stop step).
+>>>>>>> f8ff0433420b86d0c7772aafe7390bc617b35e86
 4. **Network stack scale-down** — the four `Create*` flags back to `false`.
 
 ### What failback does NOT touch
 
+<<<<<<< HEAD
 - **EC2 app servers** — ⚠️ `DeployPaidResources=false` does **not** stop them. In [cics.yaml](cics.yaml) the instances are gated on `None`/`IsMainRegion`, not `IsDeployPaidResources`, so any `System=CICS` instances the failover started keep running after failback. Stop them via the start/stop schedule or manually until the failback engine gains a `StopCicsInstances` step — see [CICS-DR-FAILBACK.md](CICS-DR-FAILBACK.md) §"Known limitation".
+=======
+>>>>>>> f8ff0433420b86d0c7772aafe7390bc617b35e86
 - **FSx OpenZFS** — same as failover, the DR file system is out of band. Delete it manually after reconciling data back to main (see §"DR FSx", activation-sequence step 6).
 - **`ALBDNSRecord` ownership** — failback repoints the shared record via API; it never makes the DR stack own/create/delete the CloudFormation record. The single-owner invariant from §"Option B" holds in both directions.
 
