@@ -19,7 +19,6 @@ Metadata:
       - Label:
           default: VPN Configuration
         Parameters:
-          - LibreSwanActive
           - BSPMode
           - InstanceAmi
           - InstanceKeyName
@@ -38,8 +37,6 @@ Metadata:
         default: SNS Topic Stack Name
       DeletionProtection:
         default: Protect core items against deletion
-      LibreSwanActive:
-        default: Active LibreSwan Instances (default is true)
       BSPMode:
         default: BSP Resources to connect to
       InstanceAmi:
@@ -56,8 +53,8 @@ Parameters:
     Description: Unique name/identifier (Can be client name or resource name)
     Type: String
     MinLength: 3
-    MaxLength: 9
-    Default: philpass
+    MaxLength: 12
+    Default: philpass-vpn
   OrgName:
     Description: The name of the organization
     Type: String
@@ -74,6 +71,10 @@ Parameters:
       - Staging
       - Development
       - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
   BSPMode:
     Description: BSP Resources to connect to
     Type: String
@@ -102,15 +103,8 @@ Parameters:
     Description: Instance Key Name (omit to use SSM Session Manager only)
     Type: String
     Default: ''
-  LibreSwanActive:
-    Description: Set to false only to turn off the LibreSwan gateway instances
-    Type: String
-    Default: true
-    AllowedValues:
-      - true
-      - false
   InstanceAmi:
-    Description: LibreSwan Instance AMI ID (Amazon Linux 2023)
+    Description: Base PCHC Amazon Linux 2023 AMI ID
     Type: AWS::EC2::Image::Id
     Default: ami-0499b5b9a26be1426
   LibreSwanPPPPSK:
@@ -178,94 +172,107 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
-  IsLibreSwanActive: !Equals [!Ref LibreSwanActive, true]
-  IsLibreSwanAlarmActive: !And [Condition: IsLibreSwanActive, Condition: IsProd]
-  IsBSPProd: !And [Condition: IsLibreSwanActive, !Equals [!Ref BSPMode, Production]]
-  IsBSPUAT: !And [Condition: IsLibreSwanActive, !Equals [!Ref BSPMode, UAT]]
+  IsBSPProd: !Equals [!Ref BSPMode, Production]
+  IsBSPUAT: !Equals [!Ref BSPMode, UAT]
 
 Resources:
+
+# storage for LibreSwan PSKs
+  LibreSwanSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, secrets]]
+      SecretString: !Sub |
+        {
+          "LibreSwanPPPPSK": "${LibreSwanPPPPSK}",
+          "LibreSwan3RDPSK": "${LibreSwan3RDPSK}"
+        }
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
 ###
 # BSP DNS Resolver
 ###
 
-  BSPDNSResolverSecurityGroup:
-    Condition: IsProd
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: BSP DNS Resolver Security Group
-      VpcId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-VpcId'
-      SecurityGroupEgress:
-        - IpProtocol: udp
-          FromPort: 53
-          ToPort: 53
-          CidrIp: 0.0.0.0/0 #Need to clamp down on this
-        - IpProtocol: tcp
-          FromPort: 53
-          ToPort: 53
-          CidrIp: 0.0.0.0/0 #Need to clamp down on this
+  # BSPDNSResolverSecurityGroup:
+  #   Condition: IsProd
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: BSP DNS Resolver Security Group
+  #     VpcId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-VpcId'
+  #     SecurityGroupEgress:
+  #       - IpProtocol: udp
+  #         FromPort: 53
+  #         ToPort: 53
+  #         CidrIp: 0.0.0.0/0 #Need to clamp down on this
+  #       - IpProtocol: tcp
+  #         FromPort: 53
+  #         ToPort: 53
+  #         CidrIp: 0.0.0.0/0 #Need to clamp down on this
 
-  BSPDNSResolver:
-    Condition: IsProd
-    Type: AWS::Route53Resolver::ResolverEndpoint
-    Properties:
-      Direction: OUTBOUND
-      IpAddresses:
-        - SubnetId:
-            Fn::ImportValue:
-              !Sub '${NetworkStackName}-PrivateSubnetId1'
-        - SubnetId:
-            Fn::ImportValue:
-              !Sub '${NetworkStackName}-PrivateSubnetId2'
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, DNS, Resolver]]
-      SecurityGroupIds:
-        - !Ref BSPDNSResolverSecurityGroup
+  # BSPDNSResolver:
+  #   Condition: IsProd
+  #   Type: AWS::Route53Resolver::ResolverEndpoint
+  #   Properties:
+  #     Direction: OUTBOUND
+  #     IpAddresses:
+  #       - SubnetId:
+  #           Fn::ImportValue:
+  #             !Sub '${NetworkStackName}-PrivateSubnetId1'
+  #       - SubnetId:
+  #           Fn::ImportValue:
+  #             !Sub '${NetworkStackName}-PrivateSubnetId2'
+  #     Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, DNS, Resolver]]
+  #     SecurityGroupIds:
+  #       - !Ref BSPDNSResolverSecurityGroup
 
-  BSPDomainResolverRule:
-    Condition: IsProd
-    Type: AWS::Route53Resolver::ResolverRule
-    Properties:
-      DomainName: bsp.gov.ph
-      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Domain, Rule]]
-      ResolverEndpointId: !Ref BSPDNSResolver
-      RuleType: FORWARD
-      TargetIps:
-        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1]
-          Port: 53
-        - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2]
-          Port: 53
+  # BSPDomainResolverRule:
+  #   Condition: IsProd
+  #   Type: AWS::Route53Resolver::ResolverRule
+  #   Properties:
+  #     DomainName: bsp.gov.ph
+  #     Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Domain, Rule]]
+  #     ResolverEndpointId: !Ref BSPDNSResolver
+  #     RuleType: FORWARD
+  #     TargetIps:
+  #       - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1]
+  #         Port: 53
+  #       - Ip: !FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2]
+  #         Port: 53
 
-  BSPDomainVPCAssociation:
-    Condition: IsProd
-    Type: AWS::Route53Resolver::ResolverRuleAssociation
-    Properties:
-      ResolverRuleId: !Ref BSPDomainResolverRule
-      VPCId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-VpcId'
+  # BSPDomainVPCAssociation:
+  #   Condition: IsProd
+  #   Type: AWS::Route53Resolver::ResolverRuleAssociation
+  #   Properties:
+  #     ResolverRuleId: !Ref BSPDomainResolverRule
+  #     VPCId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-VpcId'
 
-  BSPDNSResolverLogGroup:
-    Condition: IsProd
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Resolver]]
+  # BSPDNSResolverLogGroup:
+  #   Condition: IsProd
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Resolver]]
 
-  BSPDNSResolverLog:
-    Condition: IsProd
-    Type: AWS::Route53Resolver::ResolverQueryLoggingConfig
-    Properties:
-      DestinationArn: !GetAtt BSPDNSResolverLogGroup.Arn
+  # BSPDNSResolverLog:
+  #   Condition: IsProd
+  #   Type: AWS::Route53Resolver::ResolverQueryLoggingConfig
+  #   Properties:
+  #     DestinationArn: !GetAtt BSPDNSResolverLogGroup.Arn
 
-  BSPDNSResolverLogAssociation:
-    Condition: IsProd
-    Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
-    Properties:
-      ResolverQueryLogConfigId: !Ref BSPDNSResolverLog
-      ResourceId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-VpcId'
+  # BSPDNSResolverLogAssociation:
+  #   Condition: IsProd
+  #   Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
+  #   Properties:
+  #     ResolverQueryLogConfigId: !Ref BSPDNSResolverLog
+  #     ResourceId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-VpcId'
 
 ###
 # Custom Network resources for BSP
@@ -280,7 +287,6 @@ Resources:
           !Sub '${NetworkStackName}-VpcId'
 
   AllowICMPIntoLibreSwan:
-    Condition: IsLibreSwanActive
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: icmp
@@ -292,7 +298,6 @@ Resources:
           !Sub '${NetworkStackName}-VpcCidrBlock'
 
   AllowHTTPSIntoLibreSwan:
-    Condition: IsLibreSwanActive
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -304,7 +309,6 @@ Resources:
           !Sub '${NetworkStackName}-VpcCidrBlock'
 
   AllowDNSIntoLibreSwan:
-    Condition: IsLibreSwanActive
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: udp
@@ -315,7 +319,11 @@ Resources:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-VpcCidrBlock'
 
+# EIPs for LibreSwan ENIs
+
   LibreSwanAZ1ENI:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Type: AWS::EC2::NetworkInterface
     Properties:
       Description: !Join
@@ -326,8 +334,7 @@ Resources:
             - Fn::GetAZs: !Ref 'AWS::Region'
       GroupSet:
         - !Ref LibreSwanSecurityGroup
-      PrivateIpAddress: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanENIPrivIPAZ1] #Registered with BSP
-      SourceDestCheck: false
+      SourceDestCheck: false # this enables the instance to forward traffic, which is required for a VPN gateway
       SubnetId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PublicSubnetId1'
@@ -336,6 +343,8 @@ Resources:
           Value: LibreSwan public ENI
 
   LibreSwanAZ2ENI:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Type: AWS::EC2::NetworkInterface
     Properties:
       Description: !Join
@@ -346,8 +355,7 @@ Resources:
             - Fn::GetAZs: !Ref 'AWS::Region'
       GroupSet:
         - !Ref LibreSwanSecurityGroup
-      PrivateIpAddress: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanENIPrivIPAZ2] #Registered with BSP
-      SourceDestCheck: false
+      SourceDestCheck: false # this enables the instance to forward traffic, which is required for a VPN gateway
       SubnetId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-PublicSubnetId2'
@@ -373,265 +381,273 @@ Resources:
         - Key: Name
           Value: !Join [' ', [!Ref Name, !Ref EnvName, BSP registered IP - AZ2]]
 
+  LibreSwanPublicEIPAttachAZ1:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+      AllocationId: !GetAtt BSPVPNGatewayEIP1.AllocationId
+
+  LibreSwanPublicEIPAttachAZ2:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+      AllocationId: !GetAtt BSPVPNGatewayEIP2.AllocationId
+
 ##
 # BSP target resources
 ##
 
-  BSP3rdPartyRouteAZ1:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # BSP3rdPartyRouteAZ1:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  BSP3rdPartyRouteAZ2:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # BSP3rdPartyRouteAZ2:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPResource1AZ1Route:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPResource1AZ1Route:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPResource1AZ2Route:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPResource1AZ2Route:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPResource2AZ1Route:
-    Condition: IsBSPProd #No IP2 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPResource2AZ1Route:
+  #   Condition: IsBSPProd #No IP2 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPResource2AZ2Route:
-    Condition: IsBSPProd #No IP2 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPResource2AZ2Route:
+  #   Condition: IsBSPProd #No IP2 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPResource3AZ1Route:
-    Condition: IsBSPProd #No IP3 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPResource3AZ1Route:
+  #   Condition: IsBSPProd #No IP3 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPResource3AZ2Route:
-    Condition: IsBSPProd #No IP3 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPResource3AZ2Route:
+  #   Condition: IsBSPProd #No IP3 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPResource4AZ1Route:
-    Condition: IsBSPProd #No IP4 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPResource4AZ1Route:
+  #   Condition: IsBSPProd #No IP4 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPResource4AZ2Route:
-    Condition: IsBSPProd #No IP4 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPResource4AZ2Route:
+  #   Condition: IsBSPProd #No IP4 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPResource5AZ1Route:
-    Condition: IsBSPProd #No IP5 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPResource5AZ1Route:
+  #   Condition: IsBSPProd #No IP5 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPResource5AZ2Route:
-    Condition: IsBSPProd #No IP5 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPResource5AZ2Route:
+  #   Condition: IsBSPProd #No IP5 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPResource6AZ1Route:
-    Condition: IsBSPProd #No IP6 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPResource6AZ1Route:
+  #   Condition: IsBSPProd #No IP6 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPResource6AZ2Route:
-    Condition: IsBSPProd #No IP6 except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPResource6AZ2Route:
+  #   Condition: IsBSPProd #No IP6 except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPDRResource1AZ1Route:
-    Condition: IsBSPProd #No DR resource except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPDRResource1AZ1Route:
+  #   Condition: IsBSPProd #No DR resource except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPDRResource1AZ2Route:
-    Condition: IsBSPProd #No DR resource except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPDRResource1AZ2Route:
+  #   Condition: IsBSPProd #No DR resource except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPDRResource2AZ1Route:
-    Condition: IsBSPProd #No DR resource except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPDRResource2AZ1Route:
+  #   Condition: IsBSPProd #No DR resource except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPDRResource2AZ2Route:
-    Condition: IsBSPProd #No DR resource except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPDRResource2AZ2Route:
+  #   Condition: IsBSPProd #No DR resource except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPDRResource3AZ1Route:
-    Condition: IsBSPProd #No DR resource except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPDRResource3AZ1Route:
+  #   Condition: IsBSPProd #No DR resource except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPDRResource3AZ2Route:
-    Condition: IsBSPProd #No DR resource except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPDRResource3AZ2Route:
+  #   Condition: IsBSPProd #No DR resource except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  PPPDRResource4AZ1Route:
-    Condition: IsBSPProd #No DR resource except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # PPPDRResource4AZ1Route:
+  #   Condition: IsBSPProd #No DR resource except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  PPPDRResource4AZ2Route:
-    Condition: IsBSPProd #No DR resource except in prod
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # PPPDRResource4AZ2Route:
+  #   Condition: IsBSPProd #No DR resource except in prod
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  BSPPhilPassPlusRouteDNS1AZ1:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # BSPPhilPassPlusRouteDNS1AZ1:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  BSPPhilPassPlusRouteDNS1AZ2:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # BSPPhilPassPlusRouteDNS1AZ2:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
-  BSPPhilPassPlusRouteDNS2AZ1:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable1'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
+  # BSPPhilPassPlusRouteDNS2AZ1:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ1ENI
 
-  BSPPhilPassPlusRouteDNS2AZ2:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-PrivateRouteTable2'
-      DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
+  # BSPPhilPassPlusRouteDNS2AZ2:
+  #   Type: AWS::EC2::Route
+  #   Properties:
+  #     RouteTableId:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
+  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
+  #     NetworkInterfaceId: !Ref LibreSwanAZ2ENI
 
 ##
 # LibreSwan EC2 instances
@@ -735,7 +751,7 @@ Resources:
 
         PSK:
           files:
-            /etc/ipsec.d/ipsec.secrets:
+            /etc/ipsec.secrets:
               content: !Sub
                 - |
                   @pchc ${PPP_GATEWAY} : PSK "${PSK_PPP}"
@@ -1187,7 +1203,7 @@ Resources:
               owner: root
               group: root
     Properties:
-      LaunchTemplateName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, libreswan]]
+      LaunchTemplateName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vpn]]
       LaunchTemplateData:
         ImageId: !Ref InstanceAmi
         InstanceType: t3.nano
@@ -1236,8 +1252,9 @@ Resources:
       Roles:
         - !Ref LibreSwanEC2Role
 
+# First EC2
+
   LibreSwanInstanceAZ1:
-    Condition: IsLibreSwanActive
     Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile: !Ref LibreSwanInstanceProfile
@@ -1245,12 +1262,19 @@ Resources:
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref InstanceAmi
       InstanceType: t3.nano
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 10
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
       NetworkInterfaces:
         - DeviceIndex: 0
           NetworkInterfaceId: !Ref LibreSwanAZ1ENI
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, vpn, a]]
       UserData:
         Fn::Base64: !Sub
           - |
@@ -1263,114 +1287,89 @@ Resources:
           - AZ1CONFIG: !If [IsBSPUAT, AZ1ConfigUAT, AZ1ConfigProd]
             ROLE: !Ref LibreSwanEC2Role
 
-  LibreSwanPublicEIPAttachAZ1:
-    Type: AWS::EC2::EIPAssociation
-    Properties:
-      NetworkInterfaceId: !Ref LibreSwanAZ1ENI
-      AllocationId: !GetAtt BSPVPNGatewayEIP1.AllocationId
+  # LowDiskSpaceLibreSwanAZ1Alarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, disk]]
+  #     MetricName: disk_used_percent
+  #     Namespace: CWAgent
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: ImageId
+  #         Value: !Ref InstanceAmi
+  #       - Name: InstanceId
+  #         Value: !Ref LibreSwanInstanceAZ1
+  #       - Name: path
+  #         Value: /
+  #       - Name: fstype
+  #         Value: xfs
+  #       - Name: InstanceType
+  #         Value: t3.nano
+  #       - Name: device
+  #         Value: nvme0n1p1
 
-  LibreSwanAZ1DataVolume:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::Volume
-    Properties:
-      AvailabilityZone: !GetAtt LibreSwanInstanceAZ1.AvailabilityZone
-      Size: 10
-      VolumeType: gp3
-      Encrypted: true
-      Tags:
-        - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, data]]
+  # LowMemLibreSwanAZ1Alarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, mem]]
+  #     MetricName: mem_used_percent
+  #     Namespace: CWAgent
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: ImageId
+  #         Value: !Ref InstanceAmi
+  #       - Name: InstanceId
+  #         Value: !Ref LibreSwanInstanceAZ1
+  #       - Name: InstanceType
+  #         Value: t3.nano
 
-  LibreSwanAZ1DataVolumeAttachment:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::VolumeAttachment
-    Properties:
-      Device: /dev/sdf
-      InstanceId: !Ref LibreSwanInstanceAZ1
-      VolumeId: !Ref LibreSwanAZ1DataVolume
+  # HighCPULibreSwanAZ1Alarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, high, cpu]]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/EC2
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: InstanceId
+  #         Value: !Ref LibreSwanInstanceAZ1
 
-  LowDiskSpaceLibreSwanAZ1Alarm:
-    Condition: IsLibreSwanAlarmActive
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, disk]]
-      MetricName: disk_used_percent
-      Namespace: CWAgent
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: ImageId
-          Value: !Ref InstanceAmi
-        - Name: InstanceId
-          Value: !Ref LibreSwanInstanceAZ1
-        - Name: path
-          Value: /
-        - Name: fstype
-          Value: xfs
-        - Name: InstanceType
-          Value: t3.nano
-        - Name: device
-          Value: nvme0n1p1
-
-  LowMemLibreSwanAZ1Alarm:
-    Condition: IsLibreSwanAlarmActive
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, mem]]
-      MetricName: mem_used_percent
-      Namespace: CWAgent
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: ImageId
-          Value: !Ref InstanceAmi
-        - Name: InstanceId
-          Value: !Ref LibreSwanInstanceAZ1
-        - Name: InstanceType
-          Value: t3.nano
-
-  HighCPULibreSwanAZ1Alarm:
-    Condition: IsLibreSwanAlarmActive
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, high, cpu]]
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref LibreSwanInstanceAZ1
+# Second EC2
 
   LibreSwanInstanceAZ2:
-    Condition: IsLibreSwanActive
     Type: AWS::EC2::Instance
     Properties:
       IamInstanceProfile: !Ref LibreSwanInstanceProfile
@@ -1378,12 +1377,19 @@ Resources:
       KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
       ImageId: !Ref InstanceAmi
       InstanceType: t3.nano
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 10
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
       NetworkInterfaces:
         - DeviceIndex: 0
           NetworkInterfaceId: !Ref LibreSwanAZ2ENI
       Tags:
         - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b]]
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, vpn, b]]
       UserData:
         Fn::Base64: !Sub
           - |
@@ -1396,169 +1402,153 @@ Resources:
           - AZ2CONFIG: !If [IsBSPUAT, AZ2ConfigUAT, AZ2ConfigProd]
             ROLE: !Ref LibreSwanEC2Role
 
-  LibreSwanPublicEIPAttachAZ2:
-    Type: AWS::EC2::EIPAssociation
-    Properties:
-      NetworkInterfaceId: !Ref LibreSwanAZ2ENI
-      AllocationId: !GetAtt BSPVPNGatewayEIP2.AllocationId
+  # LowDiskSpaceLibreSwanAZ2Alarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, disk]]
+  #     MetricName: disk_used_percent
+  #     Namespace: CWAgent
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: ImageId
+  #         Value: !Ref InstanceAmi
+  #       - Name: InstanceId
+  #         Value: !Ref LibreSwanInstanceAZ2
+  #       - Name: path
+  #         Value: /
+  #       - Name: fstype
+  #         Value: xfs
+  #       - Name: InstanceType
+  #         Value: t3.nano
+  #       - Name: device
+  #         Value: nvme0n1p1
 
-  LibreSwanAZ2DataVolume:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::Volume
-    Properties:
-      AvailabilityZone: !GetAtt LibreSwanInstanceAZ2.AvailabilityZone
-      Size: 10
-      VolumeType: gp3
-      Encrypted: true
-      Tags:
-        - Key: Name
-          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, data]]
+  # LowMemLibreSwanAZ2Alarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, mem]]
+  #     MetricName: mem_used_percent
+  #     Namespace: CWAgent
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: ImageId
+  #         Value: !Ref InstanceAmi
+  #       - Name: InstanceId
+  #         Value: !Ref LibreSwanInstanceAZ2
+  #       - Name: InstanceType
+  #         Value: t3.nano
 
-  LibreSwanAZ2DataVolumeAttachment:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::VolumeAttachment
-    Properties:
-      Device: /dev/sdf
-      InstanceId: !Ref LibreSwanInstanceAZ2
-      VolumeId: !Ref LibreSwanAZ2DataVolume
-
-  LowDiskSpaceLibreSwanAZ2Alarm:
-    Condition: IsLibreSwanAlarmActive
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, disk]]
-      MetricName: disk_used_percent
-      Namespace: CWAgent
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: ImageId
-          Value: !Ref InstanceAmi
-        - Name: InstanceId
-          Value: !Ref LibreSwanInstanceAZ2
-        - Name: path
-          Value: /
-        - Name: fstype
-          Value: xfs
-        - Name: InstanceType
-          Value: t3.nano
-        - Name: device
-          Value: nvme0n1p1
-
-  LowMemLibreSwanAZ2Alarm:
-    Condition: IsLibreSwanAlarmActive
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, mem]]
-      MetricName: mem_used_percent
-      Namespace: CWAgent
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: ImageId
-          Value: !Ref InstanceAmi
-        - Name: InstanceId
-          Value: !Ref LibreSwanInstanceAZ2
-        - Name: InstanceType
-          Value: t3.nano
-
-  HighCPULibreSwanAZ2Alarm:
-    Condition: IsLibreSwanAlarmActive
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, high, cpu]]
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      EvaluationPeriods: 1
-      Period: 60
-      Statistic: Average
-      Threshold: 80
-      AlarmActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      OKActions:
-        - Fn::ImportValue:
-            !Sub '${SNSStackName}-TopicArn'
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref LibreSwanInstanceAZ2
+  # HighCPULibreSwanAZ2Alarm:
+  #   Condition: IsProd
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, high, cpu]]
+  #     MetricName: CPUUtilization
+  #     Namespace: AWS/EC2
+  #     ComparisonOperator: GreaterThanOrEqualToThreshold
+  #     EvaluationPeriods: 1
+  #     Period: 60
+  #     Statistic: Average
+  #     Threshold: 80
+  #     AlarmActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     OKActions:
+  #       - Fn::ImportValue:
+  #           !Sub '${SNSStackName}-TopicArn'
+  #     Dimensions:
+  #       - Name: InstanceId
+  #         Value: !Ref LibreSwanInstanceAZ2
 
 ###
 # Connectivity Analyzers
 ###
 
-  LibreSwanAZ1CanReachInternet:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::NetworkInsightsPath
-    Properties:
-      Source: !Ref LibreSwanInstanceAZ1
-      Destination:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-InternetGateway'
-      Protocol: tcp
-      Tags:
-        - Key: Name
-          Value: LibreSwan AZ1 to Internet
+  # LibreSwanAZ1CanReachInternet:
+  #   Type: AWS::EC2::NetworkInsightsPath
+  #   Properties:
+  #     Source: !Ref LibreSwanInstanceAZ1
+  #     Destination:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-InternetGateway'
+  #     Protocol: tcp
+  #     Tags:
+  #       - Key: Name
+  #         Value: LibreSwan AZ1 to Internet
 
-  LibreSwanAZ2CanReachInternet:
-    Condition: IsLibreSwanActive
-    Type: AWS::EC2::NetworkInsightsPath
-    Properties:
-      Source: !Ref LibreSwanInstanceAZ2
-      Destination:
-        Fn::ImportValue:
-          !Sub '${NetworkStackName}-InternetGateway'
-      Protocol: tcp
-      Tags:
-        - Key: Name
-          Value: LibreSwan AZ2 to Internet
+  # LibreSwanAZ2CanReachInternet:
+  #   Type: AWS::EC2::NetworkInsightsPath
+  #   Properties:
+  #     Source: !Ref LibreSwanInstanceAZ2
+  #     Destination:
+  #       Fn::ImportValue:
+  #         !Sub '${NetworkStackName}-InternetGateway'
+  #     Protocol: tcp
+  #     Tags:
+  #       - Key: Name
+  #         Value: LibreSwan AZ2 to Internet
 
 Outputs:
   LibreSwanSecurityGroupId:
-    Description: Security group ID of the LibreSwan gateway instances
+    Description: Security group ID of the LibreSwan VPN gateway instances
     Value: !Ref LibreSwanSecurityGroup
     Export:
       Name: !Sub '${AWS::StackName}-LibreSwanSecurityGroupId'
 
   LibreSwanAZ1ENIId:
-    Description: ENI ID of the AZ1 gateway (fixed private IP, registered with BSP)
+    Description: ENI ID of the AZ1 VPN gateway
     Value: !Ref LibreSwanAZ1ENI
     Export:
       Name: !Sub '${AWS::StackName}-LibreSwanAZ1ENIId'
 
   LibreSwanAZ2ENIId:
-    Description: ENI ID of the AZ2 gateway (fixed private IP, registered with BSP)
+    Description: ENI ID of the AZ2 VPN gateway
     Value: !Ref LibreSwanAZ2ENI
     Export:
       Name: !Sub '${AWS::StackName}-LibreSwanAZ2ENIId'
 
+  LibreSwanAZ1PrivateIp:
+    Description: Auto-assigned private IP of the AZ1 VPN gateway ENI (send to BSP for registration)
+    Value: !GetAtt LibreSwanAZ1ENI.PrimaryPrivateIpAddress
+    Export:
+      Name: !Sub '${AWS::StackName}-LibreSwanAZ1PrivateIp'
+
+  LibreSwanAZ2PrivateIp:
+    Description: Auto-assigned private IP of the AZ2 VPN gateway ENI (send to BSP for registration)
+    Value: !GetAtt LibreSwanAZ2ENI.PrimaryPrivateIpAddress
+    Export:
+      Name: !Sub '${AWS::StackName}-LibreSwanAZ2PrivateIp'
+
   BSPVPNGatewayEIP1:
-    Description: BSP-registered Elastic IP for AZ1 (retained on stack delete)
+    Description: Public IP of the VPN gateway in AZ1 (send to BSP for registration)
     Value: !Ref BSPVPNGatewayEIP1
     Export:
       Name: !Sub '${AWS::StackName}-BSPVPNGatewayEIP1'
 
   BSPVPNGatewayEIP2:
-    Description: BSP-registered Elastic IP for AZ2 (retained on stack delete)
+    Description: Public IP of the VPN gateway in AZ2 (send to BSP for registration)
     Value: !Ref BSPVPNGatewayEIP2
     Export:
       Name: !Sub '${AWS::StackName}-BSPVPNGatewayEIP2'
