@@ -1,0 +1,282 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  DMS failback resync (DR region -> live region) for PCHC. Deploys in the LIVE (target)
+  region. Streams the DR-window delta from the surviving DR-region RDS back into the
+  live-region instance. MINIMUM v1: core DMS resources + the three correctness settings
+  (TargetTablePrepMode / FullLobMode / EnableValidation). Alarm wiring, CDC-only start-point
+  path, and Secrets Manager credentials are deferred (add-as-we-go).
+  PREREQUISITE (DR-side, out of this stack): the DR-region source DB security group must
+  allow 3306 from this stack's DMS subnet CIDR over the L1 VPC peering. That SG lives in the
+  DR region and cannot be managed cross-region from this live-region stack.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+      - Label:
+          default: Source Configuration (DR region)
+        Parameters:
+          - SourceEndpoint
+          - SourcePort
+          - SourceSchemaName
+          - SourceUser
+          - SourceUserPassword
+      - Label:
+          default: Target Configuration (live region)
+        Parameters:
+          - TargetEndpoint
+          - TargetPort
+          - TargetSchemaName
+          - TargetSecurityGroup
+          - TargetUser
+          - TargetUserPassword
+      - Label:
+          default: Replication Configuration
+        Parameters:
+          - ReplicationInstanceClass
+          - MigrationType
+          - TableMappings
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      NetworkStackName:
+        default: Live Region Network Stack Name
+
+Parameters:
+  Name:
+    Description: Unique name/identifier matching the source app stack
+    Type: String
+    MinLength: 3
+    MaxLength: 20
+  OrgName:
+    Description: Organization short name
+    Type: String
+    Default: pchc
+  EnvName:
+    Description: The name of the environment (target is the live/primary region)
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+  NetworkStackName:
+    Description: Live (primary) region network stack name, for VPC/subnet imports
+    Type: String
+
+  SourceEndpoint:
+    Description: DR-region source RDS endpoint address (hostname). Explicit value - cross-region
+      imports cannot resolve, so this comes from the DR deployment record.
+    Type: String
+    MinLength: 1
+  SourcePort:
+    Description: Source DB port
+    Type: Number
+    Default: 3306
+  SourceSchemaName:
+    Description: Source database/schema name
+    Type: String
+    MinLength: 1
+  SourceUser:
+    Description: DMS source DB user (needs REPLICATION SLAVE, REPLICATION CLIENT, SELECT on DR instance)
+    Type: String
+    MinLength: 1
+  SourceUserPassword:
+    Description: DMS source DB password
+    Type: String
+    NoEcho: true
+    MinLength: 1
+
+  TargetEndpoint:
+    Description: Live-region target RDS endpoint address (hostname)
+    Type: String
+    MinLength: 1
+  TargetPort:
+    Description: Target DB port
+    Type: Number
+    Default: 3306
+  TargetSchemaName:
+    Description: Target database/schema name
+    Type: String
+    MinLength: 1
+  TargetSecurityGroup:
+    Description: Security group ID of the live-region target RDS instance (this stack adds a DMS ingress rule to it)
+    Type: AWS::EC2::SecurityGroup::Id
+  TargetUser:
+    Description: DMS target DB user (needs write privileges on the live instance)
+    Type: String
+    MinLength: 1
+  TargetUserPassword:
+    Description: DMS target DB password
+    Type: String
+    NoEcho: true
+    MinLength: 1
+
+  ReplicationInstanceClass:
+    Description: DMS replication instance class
+    Type: String
+    Default: dms.t3.medium
+    AllowedValues:
+      - dms.t3.medium
+      - dms.t3.large
+      - dms.c5.large
+      - dms.c5.xlarge
+      - dms.c5.2xlarge
+  MigrationType:
+    Description: v1 uses full-load-and-cdc (truncate + reload + delta). cdc (start-point) path added later.
+    Type: String
+    Default: full-load-and-cdc
+    AllowedValues:
+      - full-load-and-cdc
+      - cdc
+  TableMappings:
+    Description: DMS table-mapping selection rules. Default includes all schemas/tables in scope -
+      a selection gap silently skips a table and leaves it stale, so keep coverage complete.
+    Type: String
+    Default: '{ "rules": [ { "rule-type": "selection", "rule-id": "1", "rule-name": "1", "object-locator": { "schema-name": "%", "table-name": "%" }, "rule-action": "include" } ] }'
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+  # DMS resources are transient - torn down after failback cutover completes. No Retain policies
+  # (unlike dr-failback-rds-sync.yaml, whose replica becomes the promoted live primary).
+
+  DMSReplicationSubnetGroup:
+    Type: AWS::DMS::ReplicationSubnetGroup
+    Properties:
+      ReplicationSubnetGroupDescription: !Sub 'Failback DMS subnet group for ${Name}'
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-dms']]
+
+  DMSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Failback DMS replication instance SG for ${Name}'
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0  # DMS reaches DR source over L1 peering + live target locally
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-dms-sg']]
+
+  # Target ingress (live region, same VPC -> SG-to-SG reference works). Source ingress is a
+  # DR-side prerequisite (different region/VPC) and is NOT managed here - see stack Description.
+  TargetSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow DMS failback replication instance to reach the target DB
+      IpProtocol: tcp
+      GroupId: !Ref TargetSecurityGroup
+      FromPort: !Ref TargetPort
+      ToPort: !Ref TargetPort
+      SourceSecurityGroupId: !Ref DMSSecurityGroup
+
+  DMSInstance:
+    Type: AWS::DMS::ReplicationInstance
+    Properties:
+      EngineVersion: 3.5.3  # MySQL 8.x source/target requires a modern DMS engine (3.4.3 in common/dms.yaml is too old)
+      MultiAZ: false        # single-AZ for a transient failback task
+      PubliclyAccessible: false
+      ReplicationInstanceClass: !Ref ReplicationInstanceClass
+      ReplicationInstanceIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-dms']]
+      ReplicationSubnetGroupIdentifier: !Ref DMSReplicationSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DMSSecurityGroup
+
+  DMSSourceEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      DatabaseName: !Ref SourceSchemaName
+      EndpointIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-source']]
+      EndpointType: source
+      EngineName: mysql
+      ServerName: !Ref SourceEndpoint
+      Port: !Ref SourcePort
+      Username: !Ref SourceUser
+      Password: !Ref SourceUserPassword
+
+  DMSTargetEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      DatabaseName: !Ref TargetSchemaName
+      EndpointIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-target']]
+      EndpointType: target
+      EngineName: mysql
+      ExtraConnectionAttributes: 'initstmt=SET FOREIGN_KEY_CHECKS=0'  # avoid FK-order violations during full-load
+      ServerName: !Ref TargetEndpoint
+      Port: !Ref TargetPort
+      Username: !Ref TargetUser
+      Password: !Ref TargetUserPassword
+
+  DMSReplicationTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties:
+      MigrationType: !Ref MigrationType
+      ReplicationInstanceArn: !Ref DMSInstance
+      ReplicationTaskIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-task']]
+      SourceEndpointArn: !Ref DMSSourceEndpoint
+      TargetEndpointArn: !Ref DMSTargetEndpoint
+      TableMappings: !Ref TableMappings
+      # The three correctness settings baked in from v1 - their absence is what silently corrupts
+      # a first real resync test (schema loss / LOB truncation / undetected drift).
+      ReplicationTaskSettings: |
+        {
+          "TargetMetadata": {
+            "SupportLobs": true,
+            "FullLobMode": true,
+            "LobChunkSize": 64,
+            "LimitedSizeLobMode": false,
+            "LobMaxSize": 0,
+            "TargetTablePrepMode": "TRUNCATE_BEFORE_LOAD"
+          },
+          "ValidationSettings": {
+            "EnableValidation": true,
+            "ValidationMode": "ROW_LEVEL",
+            "ThreadCount": 5
+          }
+        }
+
+Outputs:
+  DMSInstanceArn:
+    Description: ARN of the failback DMS replication instance
+    Value: !Ref DMSInstance
+  DMSReplicationTaskArn:
+    Description: ARN of the failback DMS replication task
+    Value: !Ref DMSReplicationTask
+  DMSSecurityGroupId:
+    Description: DMS replication instance security group ID
+    Value: !Ref DMSSecurityGroup
