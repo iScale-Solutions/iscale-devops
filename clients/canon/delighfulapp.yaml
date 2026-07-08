@@ -40,6 +40,7 @@ Parameters:
 
 Conditions:
   IsStaging: !Equals [ !Ref DeploymentMode, staging ]
+  AlwaysFalse: !Equals [ true, false ]
 
 Resources:
 
@@ -232,6 +233,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
 
   EBInstanceRole:
     Type: AWS::IAM::Role
@@ -246,6 +248,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
         - PolicyName: SecretsAccess
           PolicyDocument:
@@ -254,6 +257,87 @@ Resources:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Ref CMPDatabaseSecret
+        - PolicyName: EC2
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeImages
+                  - ec2:DescribeTags
+                  - ec2:DescribeSnapshots
+                  - ec2:DescribeInstances
+                  - ec2:DescribeImages
+                  - ec2:DescribeTags
+                  - ec2:DescribeSnapshots
+                Resource: '*'
+        - PolicyName: SES
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:ListTemplates
+                  - ses:ListConfigurationSets
+                  - ses:SendEmail
+                  - ses:SendTemplatedEmail
+                  - ses:SendCustomVerificationEmail
+                  - ses:ListCustomVerificationEmailTemplates
+                  - ses:SendRawEmail
+                  - ses:SendBounce
+                  - ses:ListIdentityPolicies
+                  - ses:ListIdentities
+                Resource: '*'
+        - PolicyName: Logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/canon-dev-staging/*:log-stream:*'
+        - PolicyName: Secrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:secret:/cmp-delightful-db*'
+        - PolicyName: S3
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                  - s3:Put*
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${AppSourceBucket}/*'
+                  - !Sub 'arn:aws:s3:::${AppSourceBucket}'
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                  - s3:ListAccessPointsForObjectLambda
+                  - s3:GetAccessPoint
+                  - s3:ListAccessPoints
+                  - s3:CreateStorageLensGroup
+                  - s3:ListJobs
+                  - s3:List*
+                  - s3:PutStorageLensConfiguration
+                  - s3:ListMultiRegionAccessPoints
+                  - s3:ListStorageLensGroups
+                  - s3:ListStorageLensConfigurations
+                  - s3:GetAccountPublicAccessBlock
+                  - s3:ListAllMyBuckets
+                  - s3:ListAccessGrantsInstances
+                  - s3:CreateJob
+                Resource: '*'
 
   EBInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -395,6 +479,18 @@ Resources:
         - Namespace: aws:elasticbeanstalk:application:environment
           OptionName: DB_HOST
           Value: !GetAtt CMPDatabase.Endpoint.Address
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: LoadBalancerType
+          Value: application
+        - Namespace: aws:ec2:vpc
+          OptionName: VPCId
+          Value: !Ref VpcId
+        - Namespace: aws:ec2:vpc
+          OptionName: Subnets
+          Value: !If [ IsStaging, !Join [ ",", !Ref SubnetIds ], !Join [ ",", !Ref PrivateSubnetIds ]]
+        - Namespace: aws:ec2:vpc
+          OptionName: AssociatePublicIpAddress
+          Value: !If [ IsStaging, true, false ]
 
   #########################################
   # SNS + CloudWatch Alarms
@@ -441,11 +537,12 @@ Resources:
       AlarmActions: [ !Ref AlertsTopic ]
 
   #########################################
-  # Nightly RDS Stop/Start – STAGING ONLY
+  # Nightly RDS Stop/Start – Disabled for now
   #########################################
 
   RDSStartStopRole:
-    Condition: IsStaging
+    #Condition: IsStaging
+    Condition: AlwaysFalse
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -469,7 +566,8 @@ Resources:
                 Resource: !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:cmp-delightful-db-staging
 
   RDSStartStopFunction:
-    Condition: IsStaging
+    #Condition: IsStaging
+    Condition: AlwaysFalse
     Type: AWS::Lambda::Function
     Properties:
       Runtime: python3.12
@@ -495,7 +593,8 @@ Resources:
               return {"status": action}
 
   StopRDSRule:
-    Condition: IsStaging
+    #Condition: IsStaging
+    Condition: AlwaysFalse
     Type: AWS::Events::Rule
     Properties:
       ScheduleExpression: cron(0 14 * * ? *)   # 22:00 PH ~ 14:00 UTC
@@ -505,7 +604,8 @@ Resources:
           Input: '{"action":"stop"}'
 
   StartRDSRule:
-    Condition: IsStaging
+    #Condition: IsStaging
+    Condition: AlwaysFalse
     Type: AWS::Events::Rule
     Properties:
       ScheduleExpression: cron(0 0 * * ? *)    # 08:00 PH ~ 00:00 UTC
@@ -515,7 +615,8 @@ Resources:
           Input: '{"action":"start"}'
 
   AllowEventsInvokeLambda1:
-    Condition: IsStaging
+    #Condition: IsStaging
+    Condition: AlwaysFalse
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref RDSStartStopFunction
@@ -524,7 +625,8 @@ Resources:
       SourceArn: !GetAtt StopRDSRule.Arn
 
   AllowEventsInvokeLambda2:
-    Condition: IsStaging
+    #Condition: IsStaging
+    Condition: AlwaysFalse
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref RDSStartStopFunction
@@ -533,9 +635,6 @@ Resources:
       SourceArn: !GetAtt StartRDSRule.Arn
 
 Outputs:
-  EnvironmentURL:
-    Value: !GetAtt CMPDelightfulAppEnv.EndpointURL
-
   DatabaseEndpoint:
     Value: !GetAtt CMPDatabase.Endpoint.Address
 
