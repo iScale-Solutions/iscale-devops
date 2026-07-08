@@ -2,9 +2,9 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: >-
   DMS failback resync (DR region -> live region) for PCHC. Deploys in the LIVE (target)
   region. Streams the DR-window delta from the surviving DR-region RDS back into the
-  live-region instance. MINIMUM v1: core DMS resources + the three correctness settings
-  (TargetTablePrepMode / FullLobMode / EnableValidation). Alarm wiring, CDC-only start-point
-  path, and Secrets Manager credentials are deferred (add-as-we-go).
+  live-region instance: core DMS resources + the three correctness settings
+  (TargetTablePrepMode / FullLobMode / EnableValidation) + a CDCLatencyTarget alarm.
+  CDC-only start-point path and Secrets Manager credentials are deferred (add-as-we-go).
   PREREQUISITE (DR-side, out of this stack): the DR-region source DB security group must
   allow 3306 from this stack's DMS subnet CIDR over the L1 VPC peering. That SG lives in the
   DR region and cannot be managed cross-region from this live-region stack.
@@ -22,6 +22,7 @@ Metadata:
           default: Stack Configuration
         Parameters:
           - NetworkStackName
+          - SNSStackName
       - Label:
           default: Source Configuration (DR region)
         Parameters:
@@ -45,6 +46,7 @@ Metadata:
           - ReplicationInstanceClass
           - MigrationType
           - TableMappings
+          - CDCLatencyThreshold
     ParameterLabels:
       Name:
         default: Resource Name
@@ -54,6 +56,10 @@ Metadata:
         default: Environment Name
       NetworkStackName:
         default: Live Region Network Stack Name
+      SNSStackName:
+        default: SNS Stack Name
+      CDCLatencyThreshold:
+        default: CDC Latency Alarm Threshold (seconds)
 
 Parameters:
   Name:
@@ -80,6 +86,9 @@ Parameters:
       - TestDR
   NetworkStackName:
     Description: Live (primary) region network stack name, for VPC/subnet imports
+    Type: String
+  SNSStackName:
+    Description: Live region SNS stack name, for the CDC-latency alarm
     Type: String
 
   SourceEndpoint:
@@ -152,6 +161,14 @@ Parameters:
       a selection gap silently skips a table and leaves it stale, so keep coverage complete.
     Type: String
     Default: '{ "rules": [ { "rule-type": "selection", "rule-id": "1", "rule-name": "1", "object-locator": { "schema-name": "%", "table-name": "%" }, "rule-action": "include" } ] }'
+  CDCLatencyThreshold:
+    Description: CDCLatencyTarget (seconds, averaged over two 5-minute periods) that triggers the
+      alarm. This is the end-to-end staleness of the surviving target instance and is the metric
+      that gates cutover readiness. Cross-region CDC routinely spikes under write load, so the
+      default fires only on sustained, genuinely unhealthy lag. Tighten per app if needed.
+    Type: Number
+    MinValue: 1
+    Default: 300
 
 Mappings:
   Fn::Transform:
@@ -270,6 +287,39 @@ Resources:
           }
         }
 
+  # End-to-end target staleness alarm - closes the gap in common/dms.yaml, which imports an SNS
+  # stack but wires no alarm. Dimensions must be the plain identifiers, not !Ref (Ref returns the
+  # ARN for both DMS resources, but the AWS/DMS metrics key on the identifiers) - hence the
+  # repeated !Join and the explicit DependsOn (no ref-based dependency to order this after the task).
+  # TreatMissingData is notBreaching (not breaching): a full-load-and-cdc task publishes no
+  # CDCLatencyTarget during the full-load phase, which can run for hours cross-region, and
+  # breaching would false-fire that whole window. Trade-off: this alarm catches "target is falling
+  # behind", NOT "task is dead" (a stopped task also stops emitting) - dead-task detection needs a
+  # separate DMS EventBridge rule on REPLICATION_TASK_STOPPED/FAILED (follow-up).
+  CDCLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: DMSReplicationTask
+    Properties:
+      AlarmName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-cdc-latency']]
+      AlarmDescription: !Sub 'CDCLatencyTarget exceeds ${CDCLatencyThreshold}s for ${Name} failback DMS resync'
+      Namespace: AWS/DMS
+      MetricName: CDCLatencyTarget
+      Dimensions:
+        - Name: ReplicationInstanceIdentifier
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-dms']]
+        - Name: ReplicationTaskIdentifier
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-task']]
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref CDCLatencyThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+
 Outputs:
   DMSInstanceArn:
     Description: ARN of the failback DMS replication instance
@@ -280,3 +330,6 @@ Outputs:
   DMSSecurityGroupId:
     Description: DMS replication instance security group ID
     Value: !Ref DMSSecurityGroup
+  CDCLatencyAlarmArn:
+    Description: ARN of the CDCLatencyTarget CloudWatch alarm
+    Value: !GetAtt CDCLatencyAlarm.Arn
