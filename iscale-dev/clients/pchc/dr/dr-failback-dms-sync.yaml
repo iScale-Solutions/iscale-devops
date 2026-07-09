@@ -4,7 +4,10 @@ Description: >-
   region. Streams the DR-window delta from the surviving DR-region RDS back into the
   live-region instance: core DMS resources + the three correctness settings
   (TargetTablePrepMode / FullLobMode / EnableValidation) + a CDCLatencyTarget alarm.
-  CDC-only start-point path and Secrets Manager credentials are deferred (add-as-we-go).
+  DB credentials are pulled from the existing (live-region) app secrets via CloudFormation
+  secretsmanager dynamic references - the endpoint hosts/ports are explicit params since PCHC
+  secrets don't carry host/port. Both migration types are supported (full-load-and-cdc default,
+  or cdc with a supplied start position).
   PREREQUISITE (DR-side, out of this stack): the DR-region source DB security group must
   allow 3306 from this stack's DMS subnet CIDR over the L1 VPC peering. That SG lives in the
   DR region and cannot be managed cross-region from this live-region stack.
@@ -29,8 +32,7 @@ Metadata:
           - SourceEndpoint
           - SourcePort
           - SourceSchemaName
-          - SourceUser
-          - SourceUserPassword
+          - SourceSecretArn
       - Label:
           default: Target Configuration (live region)
         Parameters:
@@ -38,8 +40,7 @@ Metadata:
           - TargetPort
           - TargetSchemaName
           - TargetSecurityGroup
-          - TargetUser
-          - TargetUserPassword
+          - TargetSecretArn
       - Label:
           default: Replication Configuration
         Parameters:
@@ -63,6 +64,10 @@ Metadata:
         default: CDC Latency Alarm Threshold (seconds)
       CdcStartPosition:
         default: CDC Start Position (cdc migration type only)
+      SourceSecretArn:
+        default: Source DB Secret ARN (Secrets Manager, live region)
+      TargetSecretArn:
+        default: Target DB Secret ARN (Secrets Manager, live region)
 
 Parameters:
   Name:
@@ -96,7 +101,7 @@ Parameters:
 
   SourceEndpoint:
     Description: DR-region source RDS endpoint address (hostname). Explicit value - cross-region
-      imports cannot resolve, so this comes from the DR deployment record.
+      imports cannot resolve, and PCHC secrets carry no host/port, so this comes from the DR deployment record.
     Type: String
     MinLength: 1
   SourcePort:
@@ -104,42 +109,39 @@ Parameters:
     Type: Number
     Default: 3306
   SourceSchemaName:
-    Description: Source database/schema name
+    Description: Source database/schema name (sets endpoint DatabaseName)
     Type: String
     MinLength: 1
-  SourceUser:
-    Description: DMS source DB user (needs REPLICATION SLAVE, REPLICATION CLIENT, SELECT on DR instance)
+  SourceSecretArn:
+    Description: >-
+      ARN of the live-region Secrets Manager secret holding the DR-region source DB credentials.
+      Username/password are pulled from it via CloudFormation dynamic references on the standard
+      DB_ROOT_USER/DB_ROOT_PASSWORD keys. The DB user needs REPLICATION SLAVE, REPLICATION CLIENT,
+      SELECT on the DR instance.
     Type: String
-    MinLength: 1
-  SourceUserPassword:
-    Description: DMS source DB password
-    Type: String
-    NoEcho: true
     MinLength: 1
 
   TargetEndpoint:
-    Description: Live-region target RDS endpoint address (hostname)
+    Description: Surviving live-region target RDS endpoint address (hostname)
     Type: String
     MinLength: 1
   TargetPort:
-    Description: Target DB port
+    Description: Target DB port - used for the endpoint connection AND the DMS->target security-group ingress rule below
     Type: Number
     Default: 3306
   TargetSchemaName:
-    Description: Target database/schema name
+    Description: Target database/schema name (sets endpoint DatabaseName)
     Type: String
     MinLength: 1
   TargetSecurityGroup:
     Description: Security group ID of the live-region target RDS instance (this stack adds a DMS ingress rule to it)
     Type: AWS::EC2::SecurityGroup::Id
-  TargetUser:
-    Description: DMS target DB user (needs write privileges on the live instance)
+  TargetSecretArn:
+    Description: >-
+      ARN of the live-region Secrets Manager secret holding the surviving target DB credentials.
+      Username/password are pulled from it via CloudFormation dynamic references. The DB user needs
+      write privileges on the live instance.
     Type: String
-    MinLength: 1
-  TargetUserPassword:
-    Description: DMS target DB password
-    Type: String
-    NoEcho: true
     MinLength: 1
 
   ReplicationInstanceClass:
@@ -251,6 +253,12 @@ Resources:
       VpcSecurityGroupIds:
         - !Ref DMSSecurityGroup
 
+  # Credentials come from the existing app secret via CloudFormation dynamic references, resolved
+  # at deploy time (PCHC secrets aren't in DMS's native host/port/username/password format, so the
+  # DMS-native SecretsManagerSecretId integration can't read them). Host/port are explicit params.
+  # The DB_ROOT_USER/DB_ROOT_PASSWORD keys are the standard PCHC app-secret schema (root is used
+  # because the source needs REPLICATION SLAVE/CLIENT, which the app user lacks). CloudFormation
+  # does not persist the resolved password in the template, parameters, or history.
   DMSSourceEndpoint:
     Type: AWS::DMS::Endpoint
     Properties:
@@ -260,8 +268,8 @@ Resources:
       EngineName: mysql
       ServerName: !Ref SourceEndpoint
       Port: !Ref SourcePort
-      Username: !Ref SourceUser
-      Password: !Ref SourceUserPassword
+      Username: !Sub '{{resolve:secretsmanager:${SourceSecretArn}:SecretString:DB_ROOT_USER}}'
+      Password: !Sub '{{resolve:secretsmanager:${SourceSecretArn}:SecretString:DB_ROOT_PASSWORD}}'
 
   DMSTargetEndpoint:
     Type: AWS::DMS::Endpoint
@@ -273,8 +281,8 @@ Resources:
       ExtraConnectionAttributes: 'initstmt=SET FOREIGN_KEY_CHECKS=0'  # avoid FK-order violations during full-load
       ServerName: !Ref TargetEndpoint
       Port: !Ref TargetPort
-      Username: !Ref TargetUser
-      Password: !Ref TargetUserPassword
+      Username: !Sub '{{resolve:secretsmanager:${TargetSecretArn}:SecretString:DB_ROOT_USER}}'
+      Password: !Sub '{{resolve:secretsmanager:${TargetSecretArn}:SecretString:DB_ROOT_PASSWORD}}'
 
   DMSReplicationTask:
     Type: AWS::DMS::ReplicationTask
