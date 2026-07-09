@@ -45,6 +45,7 @@ Metadata:
         Parameters:
           - ReplicationInstanceClass
           - MigrationType
+          - CdcStartPosition
           - TableMappings
           - CDCLatencyThreshold
     ParameterLabels:
@@ -60,6 +61,8 @@ Metadata:
         default: SNS Stack Name
       CDCLatencyThreshold:
         default: CDC Latency Alarm Threshold (seconds)
+      CdcStartPosition:
+        default: CDC Start Position (cdc migration type only)
 
 Parameters:
   Name:
@@ -150,12 +153,25 @@ Parameters:
       - dms.c5.xlarge
       - dms.c5.2xlarge
   MigrationType:
-    Description: v1 uses full-load-and-cdc (truncate + reload + delta). cdc (start-point) path added later.
+    Description: >-
+      full-load-and-cdc = truncate + reload the target, then stream the delta (no start
+      position needed - DMS pins it automatically at load time). cdc = skip the load and
+      stream changes only; REQUIRES CdcStartPosition set to the surviving instance's frozen
+      binlog coordinate, or DMS silently starts from task-launch time and drops every change
+      in between.
     Type: String
     Default: full-load-and-cdc
     AllowedValues:
       - full-load-and-cdc
       - cdc
+  CdcStartPosition:
+    Description: >-
+      MySQL binlog coordinate to begin CDC from, e.g. 'mysql-bin-changelog.000024:373'.
+      Used ONLY when MigrationType is cdc - leave blank for full-load-and-cdc. Must match the
+      exact point the surviving target instance is frozen at: too early duplicates already-applied
+      transactions, too late leaves a permanent data gap.
+    Type: String
+    Default: ''
   TableMappings:
     Description: DMS table-mapping selection rules. Default includes all schemas/tables in scope -
       a selection gap silently skips a table and leaves it stale, so keep coverage complete.
@@ -181,6 +197,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasCdcStartPosition: !Not [!Equals [!Ref CdcStartPosition, '']]
 
 Resources:
   # DMS resources are transient - torn down after failback cutover completes. No Retain policies
@@ -263,6 +280,9 @@ Resources:
     Type: AWS::DMS::ReplicationTask
     Properties:
       MigrationType: !Ref MigrationType
+      # Only emitted when provided (i.e. cdc runs); full-load-and-cdc omits it and lets DMS
+      # pin the start automatically. AWS::NoValue keeps the property absent when blank.
+      CdcStartPosition: !If [HasCdcStartPosition, !Ref CdcStartPosition, !Ref 'AWS::NoValue']
       ReplicationInstanceArn: !Ref DMSInstance
       ReplicationTaskIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-task']]
       SourceEndpointArn: !Ref DMSSourceEndpoint
