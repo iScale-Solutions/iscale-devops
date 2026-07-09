@@ -340,6 +340,28 @@ Resources:
       OKActions:
         - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
+  # Dead-task detection - CDCLatencyAlarm only catches "target falling behind"; a stopped or
+  # failed task stops emitting metrics and would otherwise go silent. This publishes DMS task
+  # lifecycle events (failure + any state change, incl. STOPPED) straight to the SNS topic.
+  # NOTE: the imported SNS topic's policy must allow DMS to publish (dms.amazonaws.com sns:Publish)
+  # - unlike CloudWatch->SNS, this is not granted implicitly; verify against the SNS stack policy.
+  DMSTaskEventSubscription:
+    Type: AWS::DMS::EventSubscription
+    DependsOn: DMSReplicationTask
+    Properties:
+      SubscriptionName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-task-events']]
+      SnsTopicArn:
+        Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
+      SourceType: replication-task
+      # SourceIds takes the task IDENTIFIER, not the ARN - !Ref returns the ARN for DMS
+      # resources, so reconstruct the identifier with the same !Join used for the task itself.
+      SourceIds:
+        - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-task']]
+      EventCategories:
+        - failure
+        - state change
+      Enabled: true
+
 Outputs:
   DMSInstanceArn:
     Description: ARN of the failback DMS replication instance
@@ -353,3 +375,6 @@ Outputs:
   CDCLatencyAlarmArn:
     Description: ARN of the CDCLatencyTarget CloudWatch alarm
     Value: !GetAtt CDCLatencyAlarm.Arn
+  DMSTaskEventSubscriptionArn:
+    Description: ARN of the DMS task event subscription (dead-task notifications)
+    Value: !Ref DMSTaskEventSubscription
