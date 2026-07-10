@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Shared DMS account prerequisite roles for DR failback. Creates the fixed-name,
+  account-global IAM roles that every app's dr-failback-dms-sync stack silently depends on
+  but cannot create itself (per-app named roles are impossible - DMS resolves these by a
+  hardcoded name, not via any template/property/API input).
+  SCOPE: IAM is global, so these roles are ONE PER ACCOUNT. Deploy this stack ONCE per
+  account, in a single home region, BEFORE any app failback stack. Deploying a second copy
+  (another region / another app) collides on the fixed role names.
+  ROLES: dms-vpc-role (replication-instance VPC/subnet management) and dms-cloudwatch-logs-role
+  (task logging via ReplicationTaskSettings.Logging.EnableLogging).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - OrgName
+    ParameterLabels:
+      OrgName:
+        default: Organization Name
+
+Parameters:
+  OrgName:
+    Type: String
+    Default: pchc
+    Description: Organization short code, used only for resource tagging.
+
+Resources:
+  # Fixed name 'dms-vpc-role' is mandatory: DMS looks it up by that exact name to manage the
+  # replication instance's subnet group and ENIs. The app failback stack's
+  # AWS::DMS::ReplicationInstance takes no role parameter - it resolves this role internally.
+  DMSVpcRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dms-vpc-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dms.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole
+      Tags:
+        - Key: Name
+          Value: dms-vpc-role
+        - Key: Org
+          Value: !Ref OrgName
+        - Key: Purpose
+          Value: dr-dms-failback-prereq
+
+  # Fixed name 'dms-cloudwatch-logs-role' is mandatory: when a task sets
+  # ReplicationTaskSettings.Logging.EnableLogging=true, DMS does a hardcoded lookup for this
+  # exact name to push per-component task logs to CloudWatch (group dms-tasks-<instance>).
+  # There is no property/parameter anywhere to point DMS at a differently-named role.
+  DMSCloudWatchLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dms-cloudwatch-logs-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dms.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonDMSCloudWatchLogsRole
+      Tags:
+        - Key: Name
+          Value: dms-cloudwatch-logs-role
+        - Key: Org
+          Value: !Ref OrgName
+        - Key: Purpose
+          Value: dr-dms-failback-prereq
+
+Outputs:
+  # Informational only - app failback stacks do NOT consume these ARNs (DMS resolves the roles by
+  # their fixed names). Exported so the account's DMS foundation is discoverable/greppable.
+  DMSVpcRoleArn:
+    Description: ARN of the account-global dms-vpc-role.
+    Value: !GetAtt DMSVpcRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DMSVpcRoleArn'
+
+  DMSCloudWatchLogsRoleArn:
+    Description: ARN of the account-global dms-cloudwatch-logs-role.
+    Value: !GetAtt DMSCloudWatchLogsRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DMSCloudWatchLogsRoleArn'
