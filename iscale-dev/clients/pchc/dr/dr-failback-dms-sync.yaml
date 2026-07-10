@@ -191,6 +191,17 @@ Parameters:
     MinValue: 1
     Default: 300
 
+# Deploy-time guard: cdc is currently the only allowed MigrationType, and a cdc task with a blank
+# CdcStartPosition silently starts from task-launch time - dropping every DR-window change before
+# it and leaving a permanent, invisible data gap (task stays green). Reject that deploy up front.
+# RuleCondition keeps this scoped to cdc, so it auto-relaxes if full-load-and-cdc is re-enabled.
+Rules:
+  CdcRequiresStartPosition:
+    RuleCondition: !Equals [!Ref MigrationType, cdc]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref CdcStartPosition, '']]
+        AssertDescription: CdcStartPosition is required when MigrationType is cdc.
+
 Mappings:
   Fn::Transform:
     Name: AWS::Include
@@ -269,6 +280,7 @@ Resources:
       EndpointIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-source']]
       EndpointType: source
       EngineName: mysql
+      SslMode: require  # encrypt the cross-region binlog stream; RDS accepts TLS by default so no server/cert change needed
       ServerName: !Ref SourceEndpoint
       Port: !Ref SourcePort
       Username: !Sub '{{resolve:secretsmanager:${SourceSecretArn}:SecretString:DB_ROOT_USER}}'
@@ -281,6 +293,7 @@ Resources:
       EndpointIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-target']]
       EndpointType: target
       EngineName: mysql
+      SslMode: require  # encrypt the target session; RDS accepts TLS by default so no server/cert change needed
       ExtraConnectionAttributes: 'initstmt=SET FOREIGN_KEY_CHECKS=0'  # avoid FK-order violations during full-load
       ServerName: !Ref TargetEndpoint
       Port: !Ref TargetPort
