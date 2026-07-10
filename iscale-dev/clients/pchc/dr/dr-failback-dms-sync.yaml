@@ -1,16 +1,12 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: >-
-  DMS failback resync (DR region -> live region) for PCHC. Deploys in the LIVE (target)
-  region. Streams the DR-window delta from the surviving DR-region RDS back into the
-  live-region instance: core DMS resources + the three correctness settings
-  (TargetTablePrepMode / FullLobMode / EnableValidation) + a CDCLatencyTarget alarm.
-  DB credentials are pulled from the existing (live-region) app secrets via CloudFormation
-  secretsmanager dynamic references - the endpoint hosts/ports are explicit params since PCHC
-  secrets don't carry host/port. Both migration types are supported (full-load-and-cdc default,
-  or cdc with a supplied start position).
-  PREREQUISITE (DR-side, out of this stack): the DR-region source DB security group must
-  allow 3306 from this stack's DMS subnet CIDR over the L1 VPC peering. That SG lives in the
-  DR region and cannot be managed cross-region from this live-region stack.
+  DMS failback resync (DR region -> live region). Deploys in the live region and streams the
+  DR-window delta from the surviving DR-region RDS back into the live-region instance. DB
+  credentials come from the live-region app secrets via dynamic references; endpoint hosts/ports
+  are explicit params since the secrets carry no host/port. cdc resync only - full-load-and-cdc
+  is disabled pending a rebuild-target schema bootstrap.
+  PREREQUISITE (DR-side, not managed here): the DR-region source DB security group must allow 3306
+  from this stack's DMS subnet CIDR over the L1 VPC peering - that SG is cross-region.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -102,7 +98,7 @@ Parameters:
 
   SourceEndpoint:
     Description: DR-region source RDS endpoint address (hostname). Explicit value - cross-region
-      imports cannot resolve, and PCHC secrets carry no host/port, so this comes from the DR deployment record.
+      imports cannot resolve, and the secrets carry no host/port, so this comes from the DR deployment record.
     Type: String
     MinLength: 1
   SourcePort:
@@ -201,10 +197,9 @@ Parameters:
     MinValue: 1
     Default: 300
 
-# Deploy-time guard: cdc is currently the only allowed MigrationType, and a cdc task with a blank
-# CdcStartPosition silently starts from task-launch time - dropping every DR-window change before
-# it and leaving a permanent, invisible data gap (task stays green). Reject that deploy up front.
-# RuleCondition keeps this scoped to cdc, so it auto-relaxes if full-load-and-cdc is re-enabled.
+# cdc is the only allowed MigrationType, and a blank CdcStartPosition silently starts from task-launch
+# time - dropping the DR-window delta while the task stays green. Reject at deploy. Scoped to cdc so
+# it auto-relaxes if full-load-and-cdc returns.
 Rules:
   CdcRequiresStartPosition:
     RuleCondition: !Equals [!Ref MigrationType, cdc]
@@ -226,8 +221,7 @@ Conditions:
   HasCdcStartPosition: !Not [!Equals [!Ref CdcStartPosition, '']]
 
 Resources:
-  # DMS resources are transient - torn down after failback cutover completes. No Retain policies
-  # (unlike dr-failback-rds-sync.yaml, whose replica becomes the promoted live primary).
+  # Transient resources - torn down after cutover, so no Retain policies (unlike dr-failback-rds-sync.yaml).
 
   DMSReplicationSubnetGroup:
     Type: AWS::DMS::ReplicationSubnetGroup
@@ -248,13 +242,13 @@ Resources:
         Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
       SecurityGroupEgress:
         - IpProtocol: '-1'
-          CidrIp: 0.0.0.0/0  # DMS reaches DR source over L1 peering + live target locally
+          CidrIp: 0.0.0.0/0  # reaches DR source over L1 peering + live target locally
       Tags:
         - Key: Name
           Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-dms-sg']]
 
-  # Target ingress (live region, same VPC -> SG-to-SG reference works). Source ingress is a
-  # DR-side prerequisite (different region/VPC) and is NOT managed here - see stack Description.
+  # Target ingress works SG-to-SG (same VPC). Source ingress is a DR-side prerequisite
+  # (different region/VPC), not managed here - see Description.
   TargetSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -277,12 +271,10 @@ Resources:
       VpcSecurityGroupIds:
         - !Ref DMSSecurityGroup
 
-  # Credentials come from the existing app secret via CloudFormation dynamic references, resolved
-  # at deploy time (PCHC secrets aren't in DMS's native host/port/username/password format, so the
-  # DMS-native SecretsManagerSecretId integration can't read them). Host/port are explicit params.
-  # The DB_ROOT_USER/DB_ROOT_PASSWORD keys are the standard PCHC app-secret schema (root is used
-  # because the source needs REPLICATION SLAVE/CLIENT, which the app user lacks). CloudFormation
-  # does not persist the resolved password in the template, parameters, or history.
+  # Credentials resolved from the app secret via dynamic references at deploy time (the secrets aren't
+  # in DMS's native host/port/user/password format, so SecretsManagerSecretId can't read them; host/port
+  # are explicit params). Root user because the source needs REPLICATION SLAVE/CLIENT, which the app
+  # user lacks. CloudFormation never persists the resolved password.
   DMSSourceEndpoint:
     Type: AWS::DMS::Endpoint
     Properties:
@@ -290,7 +282,7 @@ Resources:
       EndpointIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-source']]
       EndpointType: source
       EngineName: mysql
-      SslMode: require  # encrypt the cross-region binlog stream; RDS accepts TLS by default so no server/cert change needed
+      SslMode: require  # encrypt the cross-region binlog stream; RDS accepts TLS by default
       ServerName: !Ref SourceEndpoint
       Port: !Ref SourcePort
       Username: !Sub '{{resolve:secretsmanager:${SourceSecretArn}:SecretString:DB_ROOT_USER}}'
@@ -303,8 +295,8 @@ Resources:
       EndpointIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-target']]
       EndpointType: target
       EngineName: mysql
-      SslMode: require  # encrypt the target session; RDS accepts TLS by default so no server/cert change needed
-      ExtraConnectionAttributes: 'initstmt=SET FOREIGN_KEY_CHECKS=0'  # avoid FK-order violations during full-load
+      SslMode: require  # encrypt the target session; RDS accepts TLS by default
+      ExtraConnectionAttributes: 'initstmt=SET FOREIGN_KEY_CHECKS=0'  # avoid FK-order violations when applying changes
       ServerName: !Ref TargetEndpoint
       Port: !Ref TargetPort
       Username: !Sub '{{resolve:secretsmanager:${TargetSecretArn}:SecretString:DB_ROOT_USER}}'
@@ -314,18 +306,16 @@ Resources:
     Type: AWS::DMS::ReplicationTask
     Properties:
       MigrationType: !Ref MigrationType
-      # Only emitted when provided (i.e. cdc runs); full-load-and-cdc omits it and lets DMS
-      # pin the start automatically. AWS::NoValue keeps the property absent when blank.
+      # Emitted only when set; AWS::NoValue omits it so DMS pins the start itself (full-load-and-cdc path).
       CdcStartPosition: !If [HasCdcStartPosition, !Ref CdcStartPosition, !Ref 'AWS::NoValue']
       ReplicationInstanceArn: !Ref DMSInstance
       ReplicationTaskIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-task']]
       SourceEndpointArn: !Ref DMSSourceEndpoint
       TargetEndpointArn: !Ref DMSTargetEndpoint
       TableMappings: !Ref TableMappings
-      # The three correctness settings baked in from v1 - their absence is what silently corrupts
-      # a first real resync test (schema loss / LOB truncation / undetected drift). Logging streams
-      # per-component task logs to CloudWatch (group dms-tasks-<instance>) so an alarm/dead-task
-      # event is diagnosable - REQUIRES the account's dms-cloudwatch-logs-role to exist first.
+      # TargetTablePrepMode / FullLobMode / EnableValidation guard against schema loss, LOB truncation,
+      # and undetected drift. Logging (group dms-tasks-<instance>) needs the account's
+      # dms-cloudwatch-logs-role to exist first.
       ReplicationTaskSettings: |
         {
           "TargetMetadata": {
@@ -346,15 +336,10 @@ Resources:
           }
         }
 
-  # End-to-end target staleness alarm - closes the gap in common/dms.yaml, which imports an SNS
-  # stack but wires no alarm. Dimensions must be the plain identifiers, not !Ref (Ref returns the
-  # ARN for both DMS resources, but the AWS/DMS metrics key on the identifiers) - hence the
-  # repeated !Join and the explicit DependsOn (no ref-based dependency to order this after the task).
-  # TreatMissingData is notBreaching (not breaching): a full-load-and-cdc task publishes no
-  # CDCLatencyTarget during the full-load phase, which can run for hours cross-region, and
-  # breaching would false-fire that whole window. Trade-off: this alarm catches "target is falling
-  # behind", NOT "task is dead" (a stopped task also stops emitting) - dead-task detection needs a
-  # separate DMS EventBridge rule on REPLICATION_TASK_STOPPED/FAILED (follow-up).
+  # End-to-end target staleness - the metric that gates cutover readiness. Dimensions use the plain
+  # identifiers, not !Ref (Ref returns the ARN; AWS/DMS metrics key on identifiers) - hence the repeated
+  # !Join and explicit DependsOn. notBreaching so a full-load phase with no CDCLatencyTarget doesn't
+  # false-fire. Catches "target falling behind", not "task dead" - that's DMSTaskEventSubscription below.
   CDCLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
     DependsOn: DMSReplicationTask
@@ -379,11 +364,9 @@ Resources:
       OKActions:
         - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-  # Dead-task detection - CDCLatencyAlarm only catches "target falling behind"; a stopped or
-  # failed task stops emitting metrics and would otherwise go silent. This publishes DMS task
-  # lifecycle events (failure + any state change, incl. STOPPED) straight to the SNS topic.
-  # NOTE: the imported SNS topic's policy must allow DMS to publish (dms.amazonaws.com sns:Publish)
-  # - unlike CloudWatch->SNS, this is not granted implicitly; verify against the SNS stack policy.
+  # Dead-task detection: a stopped/failed task stops emitting metrics, so the alarm above goes silent.
+  # Publishes task failure/state-change events to SNS. The topic policy must allow dms.amazonaws.com
+  # sns:Publish - not granted implicitly (unlike CloudWatch->SNS); verify against the SNS stack.
   DMSTaskEventSubscription:
     Type: AWS::DMS::EventSubscription
     DependsOn: DMSReplicationTask
@@ -392,8 +375,7 @@ Resources:
       SnsTopicArn:
         Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       SourceType: replication-task
-      # SourceIds takes the task IDENTIFIER, not the ARN - !Ref returns the ARN for DMS
-      # resources, so reconstruct the identifier with the same !Join used for the task itself.
+      # SourceIds takes the task IDENTIFIER, not the ARN (!Ref returns the ARN) - rebuild it with !Join.
       SourceIds:
         - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-task']]
       EventCategories:
