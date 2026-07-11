@@ -2,6 +2,15 @@
 
 This stack provisions the AWS infrastructure required to connect PCHC to the **Bangko Sentral ng Pilipinas (BSP)** via the PhilPass Plus (PPP) payment gateway.
 
+## Templates in this folder
+
+| File | Scope |
+|---|---|
+| [`philpass.yaml`](philpass.yaml) | The **combined** stack — VPN gateway + DNS + Application (ALB, BSP Interface EC2) + Data (RDS). This README documents it. Its VPN resources still carry legacy `Strongswan*` names. |
+| [`philpass-vpn.yaml`](philpass-vpn.yaml) | The **dedicated VPN-only** stack, split out of `philpass.yaml` so the LibreSwan gateway can be deployed and iterated independently (including in parallel with the combined stack during migration, and to a DR region). Uses `LibreSwan*` names. See **[LIBRESWAN.md](LIBRESWAN.md)** for its full reference. |
+
+Both run the same LibreSwan-on-AL2023 gateway. Key differences in the dedicated `philpass-vpn.yaml`: `LibreSwan*` parameter names (`InstanceAmi`, `LibreSwanPPPPSK`, `LibreSwan3RDPSK`), **`t3.micro`** gateways with a 10 GiB gp3 root volume, **auto-assigned** ENI private IPs (registered with BSP post-deploy from stack outputs), no on/off toggle, and extra `BSPMode` values `ProductionDr`/`UATDr` for DR-region deployments.
+
 ## Architecture Overview
 
 ```
@@ -17,7 +26,7 @@ The stack is composed of four logical layers:
 
 | Layer | Resources |
 |---|---|
-| VPN | LibreSwan EC2 instances on AL2023 (2× t3.nano, one per AZ), Elastic IPs, ENIs, route table entries |
+| VPN | LibreSwan EC2 instances on AL2023 (2× t3.nano in `philpass.yaml`; **t3.micro** in `philpass-vpn.yaml`, one per AZ), Elastic IPs, ENIs, route table entries |
 | DNS | Route53 Resolver outbound endpoint forwarding `bsp.gov.ph` to BSP DNS servers |
 | Application | BSP Interface EC2 (t3.medium), Application Load Balancer, Route53 A record |
 | Data | RDS MySQL 8.4 (db.t4g.micro), AWS Backup (prod only) |
@@ -96,6 +105,8 @@ Shared CloudFormation include files (mappings, conditions) are pulled from `s3:/
 | AWS Backup | No | Yes |
 | CloudWatch Alarms | No | Yes |
 
+> The dedicated `philpass-vpn.yaml` adds two more `BSPMode` values — **`ProductionDr`** and **`UATDr`** — for DR-region deployments. Each shares its family's remote config (same BSP endpoints/tunnels: `ProductionDr` behaves like `Production`, `UATDr` like `UAT`) and differs only in the **local** gateway subnet ranges. See [LIBRESWAN.md § BSP Modes](LIBRESWAN.md#bsp-modes).
+
 ## IPsec Tunnel Details
 
 The gateway runs **LibreSwan on Amazon Linux 2023** using **route-based IPsec (VTI)** with **nftables** for SNAT. It is configured with IKEv1, PSK authentication, and the following cipher suites:
@@ -105,9 +116,9 @@ The gateway runs **LibreSwan on Amazon Linux 2023** using **route-based IPsec (V
 
 Each tunnel is pinned to its own VTI interface (`vti0`/`vti1`/…) with a unique XFRM mark, and private-subnet traffic is masqueraded onto the VTI by a single nftables rule. This replaced the earlier StrongSwan-on-AL2 design (policy-based IPsec + iptables MASQUERADE on `eth0`), which stopped working on the AL2023 kernel 6.1 because the XFRM policy check now runs before POSTROUTING NAT. See [LIBRESWAN.md](LIBRESWAN.md) for the full gateway internals and the kernel rationale (and [STRONGSWAN.md](STRONGSWAN.md) for the legacy setup).
 
-Each gateway instance attaches to a pre-allocated ENI with a fixed private IP that is registered with BSP. These IPs must **not** change after registration — the ENIs persist independently of the EC2 instances.
+Each gateway instance attaches to a standalone ENI whose private IP is registered with BSP; the ENIs persist independently of the EC2 instances so the IPs survive instance replacement. In `philpass.yaml` the private IP is a fixed value from the mapping. In **`philpass-vpn.yaml` the private IP is auto-assigned** and the ENI is `DeletionPolicy: Retain` — you register it with BSP **after** deploy by reading the `LibreSwanAZ1PrivateIp` / `LibreSwanAZ2PrivateIp` outputs. Either way the IP must **not** change after registration.
 
-The two Elastic IPs (`BSPVPNGatewayEIP1`, `BSPVPNGatewayEIP2`) have `DeletionPolicy: Retain` and must be registered with BSP before deployment. Do not release them.
+The two Elastic IPs (`BSPVPNGatewayEIP1`, `BSPVPNGatewayEIP2`) have `DeletionPolicy: Retain`. Do not release them. BSP whitelists/routes by **both** the public IP **and** the local subnet (the tunnel's `leftsubnet`) — a new region's subnet must be registered too, or return traffic is dropped on BSP's side even though the tunnel comes up.
 
 ## Deployment
 
@@ -126,6 +137,25 @@ aws cloudformation deploy \
     SNSStackName=pchc-prd-ase1-sns \
     LoadBalancerCertificateArn=arn:aws:acm:...
 ```
+
+### Dedicated VPN stack (`philpass-vpn.yaml`)
+
+```bash
+aws cloudformation deploy \
+  --template-file philpass-vpn.yaml \
+  --stack-name pchc-test-ase1-philpass-vpn \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+    EnvName=Test \
+    BSPMode=UATDr \
+    InstanceAmi=ami-0499b5b9a26be1426 \
+    LibreSwanPPPPSK=<secret> \
+    LibreSwan3RDPSK=<secret> \
+    NetworkStackName=<dr-region-network-stack> \
+    SNSStackName=<sns-stack>
+```
+
+After deploy, read the outputs `LibreSwanAZ1PrivateIp`, `LibreSwanAZ2PrivateIp`, `BSPVPNGatewayEIP1`, `BSPVPNGatewayEIP2` and send all four to BSP for whitelisting. The gateway's in-guest `cfn-init` can OOM on the very first boot for small instances; if a tunnel never comes up, see [LIBRESWAN.md § Operational Notes](LIBRESWAN.md#operational-notes) for the manual `cfn-init` recovery.
 
 ## Monitoring
 
@@ -149,5 +179,5 @@ Database access from the jump host is explicitly allowed via a security group in
 ## Notes
 
 - The `ServerStack`, `CacheStack`, and `DeployStack` nested stacks are currently commented out. Uncomment and configure if an application server or ElastiCache cluster is needed.
-- VPN gateway instances run as `t3.nano` and are not configurable — they are sized for VPN tunnelling only.
+- VPN gateway instances are sized for VPN tunnelling only: `t3.nano` in `philpass.yaml`, **`t3.micro`** in `philpass-vpn.yaml` (t3.nano's 512 MB OOM-kills `dnf` during package install on AL2023).
 - The RDS scheduler (start/stop) is created only in non-production environments to reduce costs.

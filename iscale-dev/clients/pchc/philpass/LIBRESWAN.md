@@ -1,18 +1,18 @@
 # LibreSwan VPN Gateway — Setup Reference (current)
 
-> **✅ Current approach.** This document describes the VPN gateway as it runs today: **LibreSwan on Amazon Linux 2023** (kernel 6.1) using **route-based IPsec (VTI)** with **nftables** for SNAT. It supersedes the legacy **[STRONGSWAN.md](STRONGSWAN.md)** (StrongSwan on AL2, policy-based IPsec, iptables MASQUERADE on `eth0`), which is retained only for historical reference.
+> **✅ Current approach.** This document describes the VPN gateway as it runs today: **LibreSwan on Amazon Linux 2023** (kernel 6.1) using **route-based IPsec (VTI)** with **nftables** for SNAT. It supersedes the legacy **[STRONGSWAN.md](STRONGSWAN.md)** (StrongSwan on AL2, policy-based IPsec, iptables MASQUERADE on `eth0`), retained only for historical reference.
 >
-> Many CloudFormation logical IDs and parameters still carry the legacy `Strongswan*` name (e.g. `StrongswanAMI`, `StrongswanActive`, `StrongSwanInstanceAZ1`); these are names only — the running engine is LibreSwan.
+> This reference documents the **dedicated VPN stack, [`philpass-vpn.yaml`](philpass-vpn.yaml)**, which was split out of the combined `philpass.yaml` so the gateway can be deployed and iterated on independently (including in parallel with the existing stack during migration). All logical IDs and parameters here use the `LibreSwan*` name (e.g. `InstanceAmi`, `LibreSwanInstanceAZ1`, `LibreSwanPPPPSK`). The legacy combined `philpass.yaml` still carries the older `Strongswan*` names — those are names only; the engine is LibreSwan in both.
 
-This document describes how the IPsec VPN gateway is configured within the PhilPass stack. Two EC2 instances (one per Availability Zone) run LibreSwan to establish IPsec tunnels between PCHC's AWS VPC and the Bangko Sentral ng Pilipinas (BSP) network.
+Two EC2 instances (one per Availability Zone) run LibreSwan to establish IPsec tunnels between PCHC's AWS VPC and the Bangko Sentral ng Pilipinas (BSP) network.
 
 ## Overview
 
 ```
 PCHC VPC (private subnets)
         │
-        ├── Route table AZ1 ──► Gateway ENI (AZ1, fixed private IP) ──► EIP1
-        └── Route table AZ2 ──► Gateway ENI (AZ2, fixed private IP) ──► EIP2
+        ├── Route table AZ1 ──► Gateway ENI (AZ1, retained, registered IP) ──► EIP1
+        └── Route table AZ2 ──► Gateway ENI (AZ2, retained, registered IP) ──► EIP2
                                         │
                        nftables SNAT (masquerade) onto VTI
                                         │
@@ -37,22 +37,27 @@ The legacy design relied on **policy-based IPsec**: the kernel decides whether t
 
 **VTI (route-based IPsec) removes the dependency.** Encryption is bound to the output **interface** (+ a per-connection `mark`), not to a source-address policy match. Traffic is routed into a `vtiN` device; anything egressing that device is encrypted by that tunnel's SA. NAT is applied as the packet leaves the VTI, so the NAT-vs-XFRM ordering question disappears.
 
-## Fixed IPs and EIPs
+## IPs and EIPs
 
-The ENI private IPs and Elastic IPs are **registered with BSP** and must not change.
+The gateway's addresses are **registered with BSP** and must not change once registered. They live on standalone, retained resources so the instances can be replaced without losing them.
 
-| Resource | Production | UAT |
+| Resource | Source | Notes |
 |---|---|---|
-| Gateway ENI private IP — AZ1 | `10.0.0.53` | `10.2.0.53` |
-| Gateway ENI private IP — AZ2 | `10.0.0.176` | `10.2.0.176` |
-| Gateway public subnet — AZ1 | `10.0.0.32/27` | `10.2.0.32/27` |
-| Gateway public subnet — AZ2 | `10.0.0.160/27` | `10.2.0.160/27` |
-| Gateway private subnet — AZ1 | `10.0.0.0/27` | `10.2.0.0/27` |
-| Gateway private subnet — AZ2 | `10.0.0.128/27` | `10.2.0.128/27` |
+| Gateway ENI private IP — AZ1/AZ2 | **Auto-assigned** by EC2 from the public subnet | ENI has `DeletionPolicy: Retain`; read from the `LibreSwanAZ1PrivateIp` / `LibreSwanAZ2PrivateIp` outputs after deploy |
+| Gateway Elastic IP — AZ1/AZ2 | `BSPVPNGatewayEIP1` / `BSPVPNGatewayEIP2` | `DeletionPolicy: Retain`; read from the `BSPVPNGatewayEIP1` / `BSPVPNGatewayEIP2` outputs |
 
-The public subnet `/27` is the IPsec `leftsubnet`; the ENI IP falls inside it. The private subnet `/27` is the masquerade **source** set — private-instance traffic is SNATed to the ENI IP (which is inside `leftsubnet`) so it matches the SA.
+**Registration is post-deploy, not pre-registered.** Because private IPs are now auto-assigned, the procedure is: deploy → read the four output values (2 private + 2 public) → send them to BSP to whitelist. The private IP is stable across instance stop/start and instance replacement (it lives on the retained ENI); it only changes if the ENI resource itself is recreated. See **Operational Notes** for replacing instances without losing the IPs.
 
-The two Elastic IPs (`BSPVPNGatewayEIP1`, `BSPVPNGatewayEIP2`) are created with `DeletionPolicy: Retain`. They survive stack deletion and must be pre-registered with BSP before the stack is first deployed. Do not release or reassign them.
+### Local subnet ranges (per BSP mode)
+
+The IPsec `leftsubnet` (gateway public `/27`) and the nftables masquerade source (gateway private `/27`) come from the `BSPConfig` mapping, keyed by `BSPMode`:
+
+| Mapping key | Feeds | Notes |
+|---|---|---|
+| `LibreSwanPublicSubnetAZ1/2` | `leftsubnet` in `ipsec.conf` | the ENI IP falls inside this `/27` |
+| `LibreSwanPrivateSubnetAZ1/2` | nftables masquerade **source** set | private-instance traffic is SNATed to the ENI IP so it matches the SA |
+
+These differ per region/mode. `Production`/`UAT` are the primary-region ranges; **`ProductionDr`/`UATDr`** carry the DR-region ranges (see **BSP Modes**).
 
 ## IPsec Tunnel Configuration
 
@@ -87,10 +92,10 @@ vti-shared=no
 
 Marks and interface names are node-local and assigned in connection order per config:
 
-| Config | `bspPPPlus` | `bspPPPlusDR` | `bspPP3rd` |
+| Config family | `bspPPPlus` | `bspPPPlusDR` | `bspPP3rd` |
 |---|---|---|---|
-| Production (AZ1 & AZ2) | `vti0` / mark `42` | `vti1` / mark `43` | `vti2` / mark `44` |
-| UAT (AZ1 & AZ2) | `vti0` / mark `42` | *(not created)* | `vti1` / mark `43` |
+| Production / ProductionDr (AZ1 & AZ2) | `vti0` / mark `42` | `vti1` / mark `43` | `vti2` / mark `44` |
+| UAT / UATDr (AZ1 & AZ2) | `vti0` / mark `42` | *(not created)* | `vti1` / mark `43` |
 
 ### Tunnels
 
@@ -100,17 +105,17 @@ Marks and interface names are node-local and assigned in connection order per co
 |---|---|---|
 | Remote gateway (`right`) | `121.127.5.157` | `121.127.5.157` |
 | Remote subnet (`rightsubnet`) | `192.168.80.0/24` | `192.168.222.0/24` |
-| PSK parameter | `StrongswanPPPPSK` | `StrongswanPPPPSK` |
+| PSK parameter | `LibreSwanPPPPSK` | `LibreSwanPPPPSK` |
 
-#### `bspPPPlusDR` — PhilPassPlus Disaster Recovery (Production only)
+#### `bspPPPlusDR` — PhilPassPlus Disaster Recovery (Production family only)
 
 | Field | Value |
 |---|---|
 | Remote gateway (`right`) | `121.127.17.175` |
 | Remote subnet (`rightsubnet`) | `192.168.90.0/24` |
-| PSK parameter | `StrongswanPPPPSK` (same key as main PPP) |
+| PSK parameter | `LibreSwanPPPPSK` (same key as main PPP) |
 
-This tunnel is not created in UAT mode.
+This tunnel is not created in the UAT family (`UAT`/`UATDr`).
 
 #### `bspPP3rd` — 3rd Party
 
@@ -118,17 +123,21 @@ This tunnel is not created in UAT mode.
 |---|---|---|
 | Remote gateway (`right`) | `121.127.5.50` | `121.127.5.50` |
 | Remote subnet (`rightsubnet`) | `192.168.4.0/24` | `192.168.222.0/24` |
-| PSK parameter | `Strongswan3RDPSK` | `Strongswan3RDPSK` |
+| PSK parameter | `LibreSwan3RDPSK` | `LibreSwan3RDPSK` |
+
+> The **remote** side (gateways, remote subnets, resources) is identical across a family's primary and DR modes — only the **local** subnet ranges differ. This is why the DR-only mapping keys (`PPPDRGateway`, `PPPDRSubnetCIDR`) stay pinned to `Production` in the config sets (see **BSP Modes**).
 
 ### `ipsec.secrets` format
 
 ```
-@pchc <PPP_GATEWAY>    : PSK "<StrongswanPPPPSK>"
-@pchc <PPP_DR_GATEWAY> : PSK "<StrongswanPPPPSK>"
-@pchc <3RD_GATEWAY>    : PSK "<Strongswan3RDPSK>"
+@pchc <PPP_GATEWAY>    : PSK "<LibreSwanPPPPSK>"
+@pchc <PPP_DR_GATEWAY> : PSK "<LibreSwanPPPPSK>"
+@pchc <3RD_GATEWAY>    : PSK "<LibreSwan3RDPSK>"
 ```
 
-The left identity is always `@pchc`. This is written to `/etc/ipsec.d/ipsec.secrets` (mode `0600`) via cfn-init and is not stored in plaintext anywhere in the stack — the values come from the `StrongswanPPPPSK` and `Strongswan3RDPSK` CloudFormation parameters (`NoEcho: true`).
+The left identity is always `@pchc`. This is written to `/etc/ipsec.d/ipsec.secrets` (mode `0600`) via cfn-init. The values come from the `LibreSwanPPPPSK` and `LibreSwan3RDPSK` CloudFormation parameters (`NoEcho: true`).
+
+> **Secret storage.** A copy of the PSKs is also stored in a Secrets Manager secret (`LibreSwanSecrets`) as a reference to hand-edit later. Note: because the PSKs are rendered into the launch template's `AWS::CloudFormation::Init` metadata, they are retrievable in plaintext via `cloudformation:DescribeStackResource` (AWS `NoEcho` does **not** mask metadata). Also note that a manual edit to the secret is overwritten on the next stack update whenever the `LibreSwanPPPPSK`/`LibreSwan3RDPSK` parameter values change.
 
 ## NAT / nftables Rules
 
@@ -152,7 +161,7 @@ table ip nat {
 Notes on this design:
 
 - **`oifname "vti*"` (not `oif "vtiN"`).** `oif` resolves an interface name to an index **at ruleset-load time**; because nftables loads before LibreSwan creates the VTI devices (`01_load_nftables` runs before `02_start_ipsec`), `oif "vti0"` fails with `Interface does not exist`. `oifname` matches the name string **at runtime**, so the rule loads regardless of order.
-- **One wildcard rule covers every tunnel.** Adding more tunnels/destinations adds no rules. The legacy iptables design needed one MASQUERADE rule per destination subnet (a `destination_subnet` set) because all tunnels shared `eth0`; with one VTI per tunnel the output interface already scopes the traffic, so a per-destination match is unnecessary.
+- **One wildcard rule covers every tunnel.** Adding more tunnels/destinations adds no rules. The legacy iptables design needed one MASQUERADE rule per destination subnet because all tunnels shared `eth0`; with one VTI per tunnel the output interface already scopes the traffic.
 - **`source_subnet` scoping is preserved** so only private-instance traffic is masqueraded — the gateway's own traffic is untouched.
 
 Rules are applied at boot via:
@@ -160,28 +169,31 @@ Rules are applied at boot via:
 nft -f /etc/nftables.conf && systemctl enable --now nftables
 ```
 
-## Route Table Entries
+## BSP Modes
 
-Private route tables in both AZs get host routes for each BSP resource IP pointing at the gateway ENI in the same AZ. These routes are conditional:
+`BSPMode` selects which `BSPConfig` mapping block is used. There are two families — Production and UAT — each with a primary and a DR-region variant:
 
-| Route | Condition |
-|---|---|
-| `BSP3rdPartyRoute` (AZ1 + AZ2) | `IsStrongswanActive` |
-| `PPPResource1Route` (AZ1 + AZ2) | `IsStrongswanActive` |
-| `PPPResource2–6Routes` (AZ1 + AZ2) | `IsBSPProd` (Production BSP mode only) |
-| `PPPDRResource1–4Routes` (AZ1 + AZ2) | `IsBSPProd` |
-| `BSPPhilPassPlusDNS1/2Routes` (AZ1 + AZ2) | Always (no condition) |
+| `BSPMode` | Config set family | DR tunnel? | Local subnets |
+|---|---|---|---|
+| `Production` | Prod (3 tunnels) | yes | primary-region Production ranges |
+| `ProductionDr` | Prod (3 tunnels) | yes | **DR-region** ranges |
+| `UAT` | UAT (2 tunnels) | no | primary-region UAT ranges |
+| `UATDr` | UAT (2 tunnels) | no | **DR-region** ranges |
+
+The `IsBSPProd`/`IsBSPUAT` conditions are `!Or` of a family's two modes, so `ProductionDr` routes to the Prod config set and `UATDr` to the UAT config set. The config sets read mapping values by `!Ref BSPMode`, so each mode picks up its own local subnets.
+
+**Important — `FindInMap` + eager evaluation.** `AWS::CloudFormation::Init` metadata (and both branches of any `Fn::If`) is resolved for the current `BSPMode` at deploy/change-set time, regardless of which config set an instance will actually run. Any `!FindInMap [BSPConfig, !Ref BSPMode, <key>]` therefore requires `<key>` to exist in **every** mapping `BSPMode` can resolve to. Keys that exist only in the Production family (`PPPDRGateway`, `PPPDRSubnetCIDR`, `PPPResource2–6`) must be pinned to a literal `Production` in the config-set metadata — using `!Ref BSPMode` for them fails a UAT/UATDr deploy with `Unable to get mapping for BSPConfig::UAT::PPPDRGateway`. Only keys present in all four mappings (local subnets, `PPPGateway`, `PP3rdParty*`) use `!Ref BSPMode`.
+
+When adding a new region, fill the DR block's `LibreSwan*Subnet*` placeholders with that region's actual subnet CIDRs before deploying.
 
 ## Bootstrapping via cfn-init
 
-Instance `UserData` calls `cfn-init` with one of four configSets depending on AZ and BSP mode:
+Instance `UserData` calls `cfn-init` with one of four configSets. Selection is `!If [IsBSPUAT, AZ*ConfigUAT, AZ*ConfigProd]`, so DR modes map to their family's config set:
 
 | ConfigSet | Used when |
 |---|---|
-| `AZ1ConfigProd` | AZ1 instance, `BSPMode=Production` |
-| `AZ2ConfigProd` | AZ2 instance, `BSPMode=Production` |
-| `AZ1ConfigUAT` | AZ1 instance, `BSPMode=UAT` |
-| `AZ2ConfigUAT` | AZ2 instance, `BSPMode=UAT` |
+| `AZ1ConfigProd` / `AZ2ConfigProd` | `BSPMode` in {`Production`, `ProductionDr`} |
+| `AZ1ConfigUAT` / `AZ2ConfigUAT` | `BSPMode` in {`UAT`, `UATDr`} |
 
 Each configSet runs the following steps in order:
 
@@ -198,6 +210,8 @@ libreswan
 nftables
 ```
 
+> On t3.nano (512 MB) this step OOM-kills `dnf makecache` (`return code -9`). The instances run **t3.micro** for this reason; if you ever run this on a smaller size, add swap before the install. See **Operational Notes**.
+
 ### Step 2 — `NetworkFiles`
 
 Enables IP forwarding, disables redirects on `ens5` (AL2023 interface name), and applies a persisted sysctl hardening file:
@@ -208,7 +222,7 @@ echo 0 > /proc/sys/net/ipv4/conf/ens5/send_redirects
 sysctl --system
 ```
 
-Writes `/etc/sysctl.d/99-ipsec-vpn.conf`, which persists `ip_forward`, disables accept/send redirects and source routing, enables reverse-path filtering, and sets ICMP/ASLR hardening across reboots.
+Writes `/etc/sysctl.d/99-ipsec-vpn.conf`, which persists `ip_forward`, disables accept/send redirects and source routing, sets `rp_filter=0` globally, and applies ICMP/ASLR hardening across reboots. (`StartLibreSwan` additionally sets `rp_filter=0` and `disable_policy=1` on the `vti*` interfaces after ipsec starts, since those devices don't exist at sysctl time.)
 
 ### Step 3 — `PSK`
 
@@ -226,13 +240,33 @@ Writes two files (permissions `0644`, owned by `root`):
 ```bash
 nft -f /etc/nftables.conf && systemctl enable --now nftables   # 01_load_nftables
 systemctl enable --now ipsec                                    # 02_start_ipsec (ignoreErrors: true)
+# 03_disable_rp_filter_vti: rp_filter=0 / disable_policy=1 on vti0, vti1 after ipsec is up
 ```
 
-`cfn-hup` is also started to listen for stack metadata changes and re-run cfn-init when the stack is updated.
+`cfn-hup` is also started to listen for stack metadata changes and re-run cfn-init when the stack is updated — **provided the initial bootstrap got far enough to start it.** If cfn-init fails early (the `set -e` script exits before the `cfn-hup` line), cfn-hup is not running and metadata-change re-triggers won't work; re-run cfn-init manually.
+
+## Instance sizing & storage
+
+- **Instance type: `t3.micro`.** t3.nano's 512 MB is insufficient for the AL2023 `dnf` cache build during `InstallPackages`.
+- **Root volume: 10 GiB `gp3`, encrypted**, declared via `BlockDeviceMappings` (`/dev/xvda`, `DeleteOnTermination: true`). There is no separate data volume — the OS and everything else live on root.
+- **Resizing root without replacement:** CloudFormation can't grow an instance's root in place cleanly. Use an out-of-band elastic resize — `aws ec2 modify-volume` → `growpart /dev/nvme0n1 1` → `xfs_growfs -d /` — then update `VolumeSize` in the template to match.
+
+## Route Table Entries
+
+Private route tables in both AZs get host routes for each BSP resource IP pointing at the gateway ENI in the same AZ:
+
+| Route | Condition |
+|---|---|
+| `BSP3rdPartyRoute` / `PPPResource1Route` (AZ1 + AZ2) | always (gateway active) |
+| `PPPResource2–6Routes` (AZ1 + AZ2) | `IsBSPProd` (Production family only) |
+| `PPPDRResource1–4Routes` (AZ1 + AZ2) | `IsBSPProd` |
+| `BSPPhilPassPlusDNS1/2Routes` (AZ1 + AZ2) | always |
+
+> **These route resources are currently commented out in `philpass-vpn.yaml`.** During the migration/testing phase, routing is added and reverted manually so the parallel stack doesn't divert live traffic. Note a route table holds only one route per destination CIDR — you cannot add a parallel route for a BSP destination that the existing stack already routes; you'd be replacing it.
 
 ## Security Group
 
-The `StrongSwanSecurityGroup` has no inbound rules by default. The following ingress rules are added conditionally when `StrongswanActive=true`:
+The `LibreSwanSecurityGroup` has no inbound rules by default. These ingress rules are added (unconditionally — there is no on/off toggle in this stack):
 
 | Protocol | Port | Source | Purpose |
 |---|---|---|---|
@@ -244,7 +278,7 @@ All outbound traffic is allowed (default AWS behaviour).
 
 ## IAM Role
 
-Each gateway instance uses an IAM role with:
+Each gateway instance uses `LibreSwanEC2Role` with:
 
 | Permission | Reason |
 |---|---|
@@ -252,32 +286,44 @@ Each gateway instance uses an IAM role with:
 | `ec2:DescribeTags`, `ec2:DescribeInstances` | Instance self-identification |
 | `AmazonEC2RoleforSSM` (managed policy) | SSM Session Manager access (no SSH needed) |
 
+The role name is CloudFormation-generated (no explicit `RoleName`). When running cfn-init manually, **omit `--role`** — passing the logical id `LibreSwanEC2Role` 404s because IMDS keys credentials by the generated role name; without `--role`, cfn-init uses the instance-profile credentials.
+
 ## Connectivity Analyzers
 
-Two `AWS::EC2::NetworkInsightsPath` resources verify that each gateway instance can reach the Internet Gateway:
-
-- `StrongSwanAZ1CanReachInternet`
-- `StrongSwanAZ2CanReachInternet`
-
-Run these analyses from the AWS Console (VPC → Network Manager → Reachability Analyzer) after deployment to confirm routing is correct before testing live BSP connectivity.
+Two `AWS::EC2::NetworkInsightsPath` resources (`LibreSwanAZ1CanReachInternet`, `LibreSwanAZ2CanReachInternet`) verify each gateway can reach the Internet Gateway. **Currently commented out** alongside the routes/alarms during migration; uncomment and run from the AWS Console (VPC → Reachability Analyzer) when needed.
 
 ## Operational Notes
 
-**Toggling the gateway off:** Set `StrongswanActive=false` on a stack update. This removes the EC2 instances, IAM resources, and conditional security group rules, but the ENIs and EIPs are not touched (they exist unconditionally).
+**Registering IPs with BSP:** After deploy, read the outputs `LibreSwanAZ1PrivateIp`, `LibreSwanAZ2PrivateIp`, `BSPVPNGatewayEIP1`, `BSPVPNGatewayEIP2` and send all four to BSP for whitelisting. BSP whitelists/routes by **both** the public IP **and** the local subnet (traffic selector) — see *DR return-path* below.
 
-**Updating PSK:** Update the `StrongswanPPPPSK` or `Strongswan3RDPSK` parameter and trigger a stack update. `cfn-hup` on each instance will detect the metadata change and re-run cfn-init to rewrite `ipsec.secrets` and restart the tunnels.
+**Replacing instances without losing the registered IPs:** The IPs live on the retained ENIs (private) and retained EIPs (public), not the instances. To swap instances (e.g., after a failed bootstrap), either do the two-step CloudFormation swap — (1) comment out `LibreSwanInstanceAZ1/2` and update → old instances deleted, ENIs/EIPs keep their IPs; (2) uncomment and update → new instances re-attach the same ENIs — or terminate/relaunch out of band and re-attach the ENIs. **Do not delete the whole stack**: that orphans the retained ENIs/EIPs and a fresh deploy allocates new (unregistered) IPs. Never comment out the ENIs, EIPs, or EIP associations.
+
+**Recovering a failed bootstrap (manual cfn-init):** The instances have no `CreationPolicy`, so a failed in-guest cfn-init does not fail the stack. To finish the setup on a running instance, SSM in and run (note: **no `--role`**):
+```bash
+# on t3.nano only — add swap first so dnf doesn't OOM:
+sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+
+sudo /usr/local/bin/cfn-init -v \
+  --stack <stack-name> \
+  --resource LibreSwanLaunchTemplate \
+  -c AZ1ConfigUAT \
+  --region <region>
+```
+Use the config set matching the instance's AZ and BSP-mode family (`AZ2ConfigUAT`, `AZ1ConfigProd`, …). UserData runs only on first boot, so a stop/start does **not** re-run it.
+
+**Updating PSK:** Update `LibreSwanPPPPSK` or `LibreSwan3RDPSK` and trigger a stack update. If `cfn-hup` is running, it re-runs cfn-init to rewrite `ipsec.secrets` and restart the tunnels; otherwise re-run cfn-init manually.
+
+**AMI replacement:** Update `InstanceAmi`. Note `ImageId`/`UserData` changes force instance **replacement** — because the instances reference standalone ENIs (which can't attach to two instances at once), prefer the two-step swap above over an in-place replacement.
 
 **Verifying tunnel status via SSM:**
 ```bash
-sudo ipsec status            # connection/SA summary
-sudo ipsec trafficstatus     # per-SA byte counters
-ip -s link show vti0         # VTI interface counters
+sudo ipsec status            # full connection/SA dump
+sudo ipsec trafficstatus     # one line per established SA + byte counters (best quick check)
+sudo ipsec showstates        # just the SA state lines
+ip -s link show vti0         # per-VTI interface counters
 nft list ruleset             # confirm the masquerade rule loaded
+sudo journalctl -u ipsec -f  # live negotiation log
 ```
 
-**Re-applying nftables rules after reboot:** Rules are applied at bootstrap via cfn-init and persisted through the `nftables` service. If they are lost, re-run:
-```bash
-sudo nft -f /etc/nftables.conf
-```
-
-**AMI replacement:** To replace the gateway AMI, update `StrongswanAMI` in the stack. CloudFormation will terminate the old instances and launch new ones. The ENIs are pre-created separately from the instances, so the fixed IPs and EIP associations are preserved.
+**DR return-path (a tunnel can be "up" but one-way):** A DR-mode tunnel can reach Phase 2 (`ESPout` climbing) yet `ESPin=0` and pings time out. This is almost always because BSP has a **return route only for the primary subnet**, not the DR local subnet — the same remote endpoint accepts your SA, but their internal routing has no path back to the new DR `/27`, so replies are dropped on their side. Fix: have BSP add a **route/whitelist for the DR local subnet** (the `leftsubnet` the SA advertises) pointing into this tunnel. Confirm one-way flow with `sudo tcpdump -ni vti0 icmp` (requests leave, no replies) and `ipsec trafficstatus` (`outBytes` grows, `inBytes` stays 0).

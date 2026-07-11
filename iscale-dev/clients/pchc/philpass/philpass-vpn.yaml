@@ -82,6 +82,8 @@ Parameters:
     AllowedValues:
       - Production
       - UAT
+      - ProductionDr
+      - UATDr
   NetworkStackName:
     Description: The name of the network stack
     Type: String
@@ -136,10 +138,10 @@ Mappings:
       PP3rdPartyGateway: 121.127.5.50
       PP3rdPartySubnetCIDR: 192.168.4.0/24
       PP3rdPartyResource: 192.168.4.125/32
-      LibreSwanENIPrivIPAZ1: 10.0.0.53 #registered with BSP
+      # LibreSwanENIPrivIPAZ1: 10.0.0.53 #registered with BSP
       LibreSwanPublicSubnetAZ1: 10.0.0.32/27
       LibreSwanPrivateSubnetAZ1: 10.0.0.0/27
-      LibreSwanENIPrivIPAZ2: 10.0.0.176 #registered with BSP
+      # LibreSwanENIPrivIPAZ2: 10.0.0.176 #registered with BSP
       LibreSwanPublicSubnetAZ2: 10.0.0.160/27
       LibreSwanPrivateSubnetAZ2: 10.0.0.128/27
       PPPDRGateway: 121.127.17.175 #DR Gateway
@@ -159,12 +161,55 @@ Mappings:
       PP3rdPartyGateway: 121.127.5.50 #Same as Prod
       PP3rdPartySubnetCIDR: 192.168.222.0/24
       PP3rdPartyResource: 192.168.222.101/32
-      LibreSwanENIPrivIPAZ1: 10.2.0.53 #registered with BSP
+      # LibreSwanENIPrivIPAZ1: 10.2.0.53 #registered with BSP
       LibreSwanPublicSubnetAZ1: 10.2.0.32/27
       LibreSwanPrivateSubnetAZ1: 10.2.0.0/27
-      LibreSwanENIPrivIPAZ2: 10.2.0.176 #registered with BSP
+      # LibreSwanENIPrivIPAZ2: 10.2.0.176 #registered with BSP
       LibreSwanPublicSubnetAZ2: 10.2.0.160/27
       LibreSwanPrivateSubnetAZ2: 10.2.0.128/27
+    ProductionDr:
+      # Remote info is identical to Production (same in all regions/envs)
+      PPPGateway: 121.127.5.157
+      PPPSubnetCIDR: 192.168.80.0/24
+      PPPResource1: 192.168.80.131
+      PPPResource2: 192.168.80.132
+      PPPResource3: 192.168.80.141
+      PPPResource4: 192.168.80.152
+      PPPResource5: 192.168.80.153
+      PPPResource6: 192.168.80.154
+      PPPDNSServer1: 192.168.80.241
+      PPPDNSServer2: 192.168.80.242
+      PP3rdPartyGateway: 121.127.5.50
+      PP3rdPartySubnetCIDR: 192.168.4.0/24
+      PP3rdPartyResource: 192.168.4.125/32
+      PPPDRGateway: 121.127.17.175 #DR Gateway
+      PPPDRSubnetCIDR: 192.168.90.0/24
+      PPPDRResource1: 192.168.90.131
+      PPPDRResource2: 192.168.90.141
+      PPPDRResource3: 192.168.90.142
+      PPPDRResource4: 192.168.90.152
+      PPPDRResource5: 192.168.90.153
+      PPPDRResource6: 192.168.90.154
+      # Local LibreSwan subnets — DR region specific
+      LibreSwanPublicSubnetAZ1: 0.0.0.0/27 #TODO: DR region public subnet AZ1
+      LibreSwanPrivateSubnetAZ1: 0.0.0.0/27 #TODO: DR region private subnet AZ1
+      LibreSwanPublicSubnetAZ2: 0.0.0.0/27 #TODO: DR region public subnet AZ2
+      LibreSwanPrivateSubnetAZ2: 0.0.0.0/27 #TODO: DR region private subnet AZ2
+    UATDr:
+      # Remote info is identical to UAT (same in all regions/envs)
+      PPPGateway: 121.127.5.157 #Same as Prod
+      PPPSubnetCIDR: 192.168.222.0/24
+      PPPResource1: 192.168.222.100
+      PPPDNSServer1: 192.168.222.241 #Check on this
+      PPPDNSServer2: 192.168.222.242 #Check on this
+      PP3rdPartyGateway: 121.127.5.50 #Same as Prod
+      PP3rdPartySubnetCIDR: 192.168.222.0/24
+      PP3rdPartyResource: 192.168.222.101/32
+      # Local LibreSwan subnets — DR region specific
+      LibreSwanPublicSubnetAZ1: 10.100.20.0/27
+      LibreSwanPrivateSubnetAZ1: 10.100.20.64/27
+      LibreSwanPublicSubnetAZ2: 10.100.20.32/27
+      LibreSwanPrivateSubnetAZ2: 10.100.20.96/27
 
 Conditions:
   Fn::Transform:
@@ -172,8 +217,8 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
-  IsBSPProd: !Equals [!Ref BSPMode, Production]
-  IsBSPUAT: !Equals [!Ref BSPMode, UAT]
+  IsBSPProd: !Or [!Equals [!Ref BSPMode, Production], !Equals [!Ref BSPMode, ProductionDr]]
+  IsBSPUAT: !Or [!Equals [!Ref BSPMode, UAT], !Equals [!Ref BSPMode, UATDr]]
 
 Resources:
 
@@ -655,6 +700,14 @@ Resources:
 
 # LibreSwanLaunchTemplate is used only as a cfn-init metadata carrier for launching EC2
 
+# Note:
+# user-data cfn-init script might fail due to small instance size (t3.nano)
+# need to manually run cfn-init script inside after instance is up and running to complete the setup
+#
+# /usr/local/bin/cfn-init -v --stack <philpass-vpn-stack-name> --resource LibreSwanLaunchTemplate -c <ec2-config> --region <region> 
+# example for vpn-a in UAT SG region:
+# /usr/local/bin/cfn-init -v --stack pchc-test-ase1-philpass-vpn --resource LibreSwanLaunchTemplate -c AZ1ConfigUAT --region ap-southeast-1 
+
   LibreSwanLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Metadata:
@@ -803,7 +856,7 @@ Resources:
                           ip saddr @source_subnet oifname "vti*" masquerade
                       }
                   }
-                - PRIVATE_SUBNET: !FindInMap [BSPConfig, Production, LibreSwanPrivateSubnetAZ1]
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanPrivateSubnetAZ1]
             /etc/ipsec.d/ipsec.conf:
               content: !Sub
                 - |
@@ -878,13 +931,13 @@ Resources:
                       vti-interface=vti2
                       vti-routing=yes
                       vti-shared=no
-                - LEFT_SUBNET: !FindInMap [BSPConfig, Production, LibreSwanPublicSubnetAZ1]
-                  PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
-                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                - LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanPublicSubnetAZ1]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPSubnetCIDR]
                   PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
                   PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
-                  3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
-                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
               # [CHANGED] Was 0700. Config files should be 0644 (not executable).
               # Only secrets files need restrictive permissions.
               permissions: '0644'
@@ -923,7 +976,7 @@ Resources:
                           ip saddr @source_subnet oifname "vti*" masquerade
                       }
                   }
-                - PRIVATE_SUBNET: !FindInMap [BSPConfig, Production, LibreSwanPrivateSubnetAZ2]
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanPrivateSubnetAZ2]
             /etc/ipsec.d/ipsec.conf:
               content: !Sub
                 - |
@@ -998,13 +1051,13 @@ Resources:
                       vti-interface=vti2
                       vti-routing=yes
                       vti-shared=no
-                - LEFT_SUBNET: !FindInMap [BSPConfig, Production, LibreSwanPublicSubnetAZ2]
-                  PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
-                  PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
+                - LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanPublicSubnetAZ2]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPSubnetCIDR]
                   PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
                   PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
-                  3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
-                  3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
               # [CHANGED] Was 0700. Config files should be 0644 (not executable).
               # Only secrets files need restrictive permissions.
               permissions: '0644'
@@ -1043,7 +1096,7 @@ Resources:
                           ip saddr @source_subnet oifname "vti*" masquerade
                       }
                   }
-                - PRIVATE_SUBNET: !FindInMap [BSPConfig, UAT, LibreSwanPrivateSubnetAZ1]
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanPrivateSubnetAZ1]
 
             /etc/ipsec.d/ipsec.conf:
               content: !Sub
@@ -1096,11 +1149,11 @@ Resources:
                       vti-interface=vti1
                       vti-routing=yes
                       vti-shared=no
-                - LEFT_SUBNET: !FindInMap [BSPConfig, UAT, LibreSwanPublicSubnetAZ1]
-                  PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
-                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
-                  3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
-                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+                - LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanPublicSubnetAZ1]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
               # [CHANGED] Was 0700. Config files should be 0644 (not executable).
               # Only secrets files need restrictive permissions.
               permissions: '0644'
@@ -1140,7 +1193,7 @@ Resources:
                           ip saddr @source_subnet oifname "vti*" masquerade
                       }
                   }
-                - PRIVATE_SUBNET: !FindInMap [BSPConfig, UAT, LibreSwanPrivateSubnetAZ2]
+                - PRIVATE_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanPrivateSubnetAZ2]
             /etc/ipsec.d/ipsec.conf:
               content: !Sub
                 - |
@@ -1192,11 +1245,11 @@ Resources:
                       vti-interface=vti1
                       vti-routing=yes
                       vti-shared=no
-                - LEFT_SUBNET: !FindInMap [BSPConfig, UAT, LibreSwanPublicSubnetAZ2]
-                  PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
-                  PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
-                  3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
-                  3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
+                - LEFT_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, LibreSwanPublicSubnetAZ2]
+                  PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPGateway]
+                  PPP_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PPPSubnetCIDR]
+                  3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
+                  3RD_SUBNET: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartySubnetCIDR]
               # [CHANGED] Was 0700. Config files should be 0644 (not executable).
               # Only secrets files need restrictive permissions.
               permissions: '0644'
