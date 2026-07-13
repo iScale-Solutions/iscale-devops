@@ -172,9 +172,9 @@ Parameters:
     Default: 3.5.3
   MigrationType:
     Description: >-
-      cdc = skip the load and stream changes only; REQUIRES CdcStartPosition set to the
-      surviving instance's frozen binlog coordinate, or DMS silently starts from task-launch
-      time and drops every change in between.
+      cdc = skip the load and stream changes only; REQUIRES CdcStartPosition set to the SOURCE
+      (DR-region) binlog coordinate captured when DR went live, or DMS silently starts from
+      task-launch time and drops every change in between.
       full-load-and-cdc (truncate + reload the target, then stream the delta) is TEMPORARILY
       DISABLED: on a rebuilt/fresh target it needs a schema bootstrap that does not exist yet
       (DMS full-load cannot pre-create schema). Resync-only for the initial test window;
@@ -187,10 +187,21 @@ Parameters:
       - cdc
   CdcStartPosition:
     Description: >-
-      MySQL binlog coordinate to begin CDC from, e.g. 'mysql-bin-changelog.000024:373'.
-      Used ONLY when MigrationType is cdc - leave blank for full-load-and-cdc. Must match the
-      exact point the surviving target instance is frozen at: too early duplicates already-applied
-      transactions, too late leaves a permanent data gap.
+      Binlog coordinate in the SOURCE (DR-region) instance to begin CDC from, e.g.
+      'mysql-bin-changelog.000024:373'. DMS reads the SOURCE binlog - this is NEVER read off the
+      target. Do not run SHOW MASTER STATUS on the surviving live-region target: RDS names binlogs
+      identically on every instance, so a target coordinate is accepted without error, resolves to
+      an arbitrary point in the source binlog, and silently duplicates or skips transactions.
+      Correct value = the source coordinate captured at the moment DR went live and began taking
+      application writes. It exists only at that moment and cannot be reconstructed later, so it
+      must be recorded during FAILOVER (see runbook) - by failback it is too late to obtain.
+      Too early duplicates already-applied transactions, too late leaves a permanent data gap.
+      Used ONLY when MigrationType is cdc - leave blank for full-load-and-cdc.
+      PREREQUISITE: the source instance must have binlog retention set to cover the whole DR window
+      (CALL mysql.rds_set_configuration('binlog retention hours', N)). RDS defaults to NULL, purging
+      binlogs almost immediately. This is a stored procedure, NOT a parameter-group setting, so it
+      cannot be set from CloudFormation - it is a manual step on the DR instance. Without it, a
+      correct coordinate still points at a purged binlog and cdc is not viable.
     Type: String
     Default: ''
   TableMappings:
