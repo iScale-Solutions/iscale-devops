@@ -282,6 +282,33 @@ Parameters:
     Description: The DB parameter group family name
     Type: String
     Default: postgres12
+  BinlogFormat:
+    Description: >-
+      MySQL binary log format. Blank omits the parameter entirely so RDS keeps whatever the instance
+      already has - parents that do not pass it are unaffected. Set to ROW only where a binlog reader
+      needs it: DMS CDC (dr-failback-dms-sync.yaml) cannot reconstruct row changes from MIXED or
+      STATEMENT binlogs. A binlog is written once in the format active at write time and cannot be
+      re-rendered later, so ROW must be in place BEFORE the instance takes writes that will later be
+      replayed. Engine=mysql only - ignored for aurora-mysql, where binlog_format is cluster-level and
+      invalid in this instance-level group.
+    Type: String
+    Default: ''
+    AllowedValues:
+      - ''
+      - ROW
+      - MIXED
+      - STATEMENT
+  BinlogRowImage:
+    Description: >-
+      MySQL binlog row image. Only emitted when BinlogFormat is set. FULL logs complete row images,
+      which DMS CDC and its row-level validation both require; MINIMAL logs only the primary key and
+      changed columns and breaks both.
+    Type: String
+    Default: FULL
+    AllowedValues:
+      - FULL
+      - MINIMAL
+      - NOBLOB
   MonitoringInterval:
     Description: The interval, in seconds, between points when Enhanced Monitoring metrics are collected for the DB instance
     Type: Number
@@ -386,6 +413,12 @@ Conditions:
   HasClusterAndClusterSnapshot: !And [Condition: HasCluster, Condition: HasClusterSnapshot]
   HasExternalParameterGroup: !Not [!Equals [!Ref ParameterGroup, '']]
   HasNoExternalParameterGroup: !Not [Condition: HasExternalParameterGroup]
+  # Gate the binlog params on plain MySQL: aurora-mysql falls through to the same MySQL branch of the
+  # RDSParameterGroup !If chain below, but binlog_format is cluster-level in Aurora and would be
+  # rejected in this instance-level group. Blank BinlogFormat omits the keys entirely.
+  HasBinlogSettings: !And
+    - Condition: IsMySQL
+    - !Not [!Equals [!Ref BinlogFormat, '']]
   HasOptionGroupName: !Not [!Equals [!Ref OptionGroupName, '']]
   HasPerformanceInsights: !Equals [!Ref EnablePerformanceInsights, true]
   HasSnapshotAndNoCluster: !And [Condition: HasSnapshot, Condition: HasNoCluster]
@@ -547,12 +580,23 @@ Resources:
             - !If
               - IsPostgres
               - log_checkpoints: 1
-              - sql_mode: IGNORE_SPACE #MySQL
-                slow_query_log: 1
-                long_query_time: 2
-                log_bin_trust_function_creators: 1
-                log_output: FILE
-              
+              # MySQL. aurora-mysql also lands here, which is why the binlog keys are gated on
+              # HasBinlogSettings (plain mysql + BinlogFormat set) rather than added unconditionally.
+              - !If
+                - HasBinlogSettings
+                - sql_mode: IGNORE_SPACE
+                  slow_query_log: 1
+                  long_query_time: 2
+                  log_bin_trust_function_creators: 1
+                  log_output: FILE
+                  binlog_format: !Ref BinlogFormat
+                  binlog_row_image: !Ref BinlogRowImage
+                - sql_mode: IGNORE_SPACE
+                  slow_query_log: 1
+                  long_query_time: 2
+                  log_bin_trust_function_creators: 1
+                  log_output: FILE
+
       Tags:
         - Key: Name
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
