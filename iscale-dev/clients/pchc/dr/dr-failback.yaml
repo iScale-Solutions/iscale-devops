@@ -19,6 +19,19 @@ AWSTemplateFormatVersion: 2010-09-09
 #   }
 # Set use_pitr=false (or omit it) to skip the PITR cleanup steps entirely.
 #
+# asg_configs (all "failback" payloads — required to actually stop billing):
+#   "asg_configs": [{asg_name OR server_stack_name}, ...]   — pass [] to skip.
+#   min_size / desired_capacity / max_size all default to 0, so a bare
+#   server_stack_name (substring match against nested-stack names, e.g.
+#   "TreasuryServerStack", "APIServerStack", "SidekiqServerStack",
+#   "CustomerServiceServerStack" for pesonet20) is enough to scale that ASG
+#   to zero. Mirrors dr-failover-v2's asg_configs / set_asg_capacity exactly.
+#   Required because DeployPaidResources=false alone does not reset ASG
+#   capacity: pesonet20.yaml's ASGDesiredSize is a static !If [IsDR, 0, ...]
+#   that never changes value between failover and failback, so CloudFormation
+#   sees no property diff and leaves the ASG at whatever capacity
+#   dr-failover-v2's set_asg_capacity drifted it to out-of-band.
+#
 # Event payload (ECS Fargate multi-stack apps — e.g. SmartAPI):
 #   {
 #     "action": "ecs_failback",
@@ -543,6 +556,67 @@ Resources:
                   'any_rollback':       any_rollback,
               }
 
+          def _find_asg_from_stack_name(region, stack_name):
+              """Find AppServerAutoScalingGroup physical ID from a CFN stack whose name contains stack_name."""
+              cf     = boto3.client('cloudformation', region_name=region)
+              target = None
+              kwargs = {'StackStatusFilter': [
+                  'CREATE_COMPLETE', 'UPDATE_COMPLETE', 'UPDATE_ROLLBACK_COMPLETE',
+              ]}
+              while True:
+                  resp = cf.list_stacks(**kwargs)
+                  for s in resp.get('StackSummaries', []):
+                      if stack_name in s['StackName']:
+                          target = s['StackName']
+                          break
+                  if target or not resp.get('NextToken'):
+                      break
+                  kwargs['NextToken'] = resp['NextToken']
+              if not target:
+                  raise Exception(f'No active CFN stack found containing: {stack_name}')
+              rk = {}
+              while True:
+                  rr = cf.list_stack_resources(StackName=target, **rk)
+                  for res in rr.get('StackResourceSummaries', []):
+                      if res['LogicalResourceId'] == 'AppServerAutoScalingGroup':
+                          return res['PhysicalResourceId']
+                  if not rr.get('NextToken'):
+                      break
+                  rk['NextToken'] = rr['NextToken']
+              raise Exception(f'AppServerAutoScalingGroup resource not found in stack: {target}')
+
+          def _handle_set_asg_capacity(event):
+              # Same action/defaults as dr-failover-v2's set_asg_capacity — min/desired/max
+              # default to 0, so a failback asg_configs entry needs only asg_name or
+              # server_stack_name to scale that ASG down.
+              import os
+              inp              = event.get('input', event)
+              region           = os.environ.get('AWS_REGION', 'us-east-2')
+              asg_name         = inp.get('asg_name', '')
+              stack_name       = inp.get('server_stack_name', '')
+              min_size         = int(inp.get('min_size', 0))
+              desired_capacity = int(inp.get('desired_capacity', 0))
+              max_size         = int(inp.get('max_size', desired_capacity))
+              if not asg_name and not stack_name:
+                  raise ValueError('asg_name or server_stack_name is required for set_asg_capacity')
+              if not asg_name:
+                  asg_name = _find_asg_from_stack_name(region, stack_name)
+                  logger.info("[SET_ASG_CAPACITY] Discovered ASG=%s | stack_name_contains=%s", asg_name, stack_name)
+              asg = boto3.client('autoscaling', region_name=region)
+              asg.update_auto_scaling_group(
+                  AutoScalingGroupName=asg_name,
+                  MinSize=min_size,
+                  MaxSize=max_size,
+                  DesiredCapacity=desired_capacity,
+              )
+              logger.info("[SET_ASG_CAPACITY] ASG=%s | min=%d desired=%d max=%d", asg_name, min_size, desired_capacity, max_size)
+              return {
+                  'asg_name':         asg_name,
+                  'min_size':         min_size,
+                  'desired_capacity': desired_capacity,
+                  'max_size':         max_size,
+              }
+
           def _handle_snapshot_pitr_db(event):
               pitr_id = event.get('pitr_target_identifier')
               if not pitr_id:
@@ -698,6 +772,8 @@ Resources:
                   return _handle_check_stack_status(event)
               if action == 'check_both_stacks_status':
                   return _handle_check_both_stacks_status(event)
+              if action == 'set_asg_capacity':
+                  return _handle_set_asg_capacity(event)
               if action == 'snapshot_pitr_db':
                   return _handle_snapshot_pitr_db(event)
               if action == 'check_pitr_snapshot_status':
@@ -782,7 +858,7 @@ Resources:
               LogGroupArn: !GetAtt StateMachineLogGroup.Arn
       DefinitionString: !Sub |
         {
-          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failback sequential orchestration — Step1 comment, PITR cleanup (use_pitr=true: snapshot+delete PITR RDS then delete restored EFS), Step2 DeployPaidResources=false, Step3 uncomment, Step4 network DeployPaidResources=false, (4) ecs_failback. Routed by 'action' in the input payload.",
+          "Comment": "DR Failback — four workflows: (1) comment/uncomment + apply template update, (2) set DeployPaidResources=false + poll, (3) failback sequential orchestration — Step1 comment, PITR cleanup (use_pitr=true: snapshot+delete PITR RDS then delete restored EFS), scale every ASG in asg_configs to zero (mirrors dr-failover-v2's set_asg_capacity), Step2 DeployPaidResources=false, Step3 uncomment, Step4 network DeployPaidResources=false, (4) ecs_failback. Routed by 'action' in the input payload.",
           "StartAt": "ValidateAction",
           "States": {
 
@@ -1112,6 +1188,44 @@ Resources:
               "Default": "FailbackStep1Wait"
             },
 
+            "FailbackScaleASGsToZero": {
+              "Comment": "FAILOVER STEP 1e — Explicitly scale every ASG in asg_configs to zero before DeployPaidResources=false. Required: pesonet20.yaml's ASGDesiredSize is a static !If [IsDR, 0, ...] that never changes value between failover and failback, so CloudFormation sees no diff and leaves the ASG at whatever capacity dr-failover-v2's set_asg_capacity drifted it to out-of-band. Mirrors dr-failover-v2's ScaleASGs Map state / set_asg_capacity action. asg_configs: [{asg_name OR server_stack_name}, ...] — min/desired/max default to 0. Pass [] to skip.",
+              "Type": "Map",
+              "ItemsPath": "$.asg_configs",
+              "MaxConcurrency": 0,
+              "Iterator": {
+                "StartAt": "SetOneASGToZero",
+                "States": {
+                  "SetOneASGToZero": {
+                    "Comment": "Pass full item as 'input' — asg_name may be absent when server_stack_name is used for auto-discovery.",
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":  "set_asg_capacity",
+                      "input.$": "$"
+                    },
+                    "End": true,
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 2, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneASGToZeroFailed", "ResultPath": "$.error"}]
+                  },
+                  "OneASGToZeroFailed": {
+                    "Type": "Fail",
+                    "Error": "ASGScaleDownFailed",
+                    "Cause": "Failed to scale one ASG to zero during failback — check CloudWatch Logs."
+                  }
+                }
+              },
+              "ResultPath": "$.asg_scale_down_results",
+              "Next": "FailbackStep2SetDeployPaid",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "FailbackFailed",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+
             "FailbackStep2SetDeployPaid": {
               "Comment": "FAILOVER STEP 2a — Set DeployPaidResources=false on app stack (paid resources down). preserve_format=false uses UsePreviousTemplate — safe here because Step 1 already wrote the commented YAML to CFN.",
               "Type": "Task",
@@ -1202,7 +1316,7 @@ Resources:
                   "Next": "SnapshotPitrDb"
                 }
               ],
-              "Default": "FailbackStep2SetDeployPaid"
+              "Default": "FailbackScaleASGsToZero"
             },
 
             "SnapshotPitrDb": {
@@ -1399,7 +1513,7 @@ Resources:
             },
 
             "CheckEfsMountTargetsSubmitted": {
-              "Comment": "If no restored EFS was ever recorded in SSM (or it's already gone), nothing to clean up — proceed to DeployPaidResources=false.",
+              "Comment": "If no restored EFS was ever recorded in SSM (or it's already gone), nothing to clean up — proceed to scaling ASGs down.",
               "Type": "Choice",
               "Choices": [
                 {
@@ -1408,7 +1522,7 @@ Resources:
                   "Next": "WaitForEfsMountTargets"
                 }
               ],
-              "Default": "FailbackStep2SetDeployPaid"
+              "Default": "FailbackScaleASGsToZero"
             },
 
             "WaitForEfsMountTargets": {
@@ -1468,7 +1582,7 @@ Resources:
                 "efs_id_ssm_path.$": "$.efs_id_ssm_path"
               },
               "ResultPath": "$.efs_delete_result",
-              "Next": "FailbackStep2SetDeployPaid",
+              "Next": "FailbackScaleASGsToZero",
               "Retry": [
                 {
                   "ErrorEquals": ["States.TaskFailed"],

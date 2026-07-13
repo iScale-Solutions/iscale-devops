@@ -689,16 +689,28 @@ Resources:
           def _set_asg_capacity(event):
               inp              = event.get('input', event)
               region           = os.environ['AWS_REGION']
-              asg_name         = inp.get('asg_name', '')
+              asg_name         = inp.get('asg_name') or ''
               stack_name       = inp.get('server_stack_name', '')
+              app_name         = inp.get('application_name', '')
               min_size         = int(inp.get('min_size', 0))
               desired_capacity = int(inp.get('desired_capacity', 0))
               max_size         = int(inp.get('max_size', desired_capacity))
               if not asg_name and not stack_name:
                   raise ValueError('asg_name or server_stack_name is required for set_asg_capacity')
               if not asg_name:
-                  asg_name = _find_asg_from_stack_name(region, stack_name)
+                  # Same staleness issue as update_codedeploy_group: after a blue/green
+                  # swap the CFN-managed AppServerAutoScalingGroup is gone, so prefer
+                  # whatever ASG CodeDeploy is currently wired to (requires application_name).
+                  if app_name:
+                      cd       = boto3.client('codedeploy', region_name=region)
+                      dg_names = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
+                      if dg_names:
+                          asg_name = _resolve_current_asg(region, cd, app_name, dg_names[0], stack_name)
+                  if not asg_name:
+                      asg_name = _find_asg_from_stack_name(region, stack_name)
                   logger.info(f'Discovered ASG: {asg_name} (stack_name contains={stack_name})')
+              if not asg_name:
+                  raise Exception(f'Could not resolve an ASG name for stack_name={stack_name} application_name={app_name}')
               asg = boto3.client('autoscaling', region_name=region)
               asg.update_auto_scaling_group(
                   AutoScalingGroupName=asg_name,
@@ -852,9 +864,9 @@ Resources:
                   raise Exception(f'No deployment groups found for CodeDeploy application: {app_name}')
               dg_name = dg_names[0]
               logger.info(f'Discovered deployment group: {dg_name} (app={app_name})')
-              # ASG name has a random CFN suffix — discover via stack resources
-              asg_name = _find_asg_from_stack_name(region, stack_name)
-              logger.info(f'Discovered ASG: {asg_name} (stack_name contains={stack_name})')
+              # ASG resolution: prefer whatever CodeDeploy is already wired to over the
+              # CFN-stack resource lookup — see _resolve_current_asg for why.
+              asg_name = _resolve_current_asg(region, cd, app_name, dg_name, stack_name)
               # Switch from Ec2TagFilters to AutoScalingGroups so lifecycle hooks fire on scale-out
               cd.update_deployment_group(
                   applicationName=app_name,
@@ -868,6 +880,38 @@ Resources:
                   'deployment_group_name': dg_name,
                   'asg_name':              asg_name,
               }
+
+          def _resolve_current_asg(region, cd, app_name, dg_name, stack_name):
+              """Resolve the ASG to wire a deployment group to.
+
+              CodeDeploy blue/green deployments replace the original CFN-managed
+              AppServerAutoScalingGroup with a transient one it creates and owns
+              (named 'CodeDeploy_<deployment-group-id>_d-<deployment-id>'), then
+              re-points the deployment group at it. After the first blue/green
+              swap, the CFN stack resource lookup is stale and will return an ASG
+              that no longer exists (InvalidAutoScalingGroupException).
+
+              CodeDeploy's own deployment-group config is the source of truth for
+              "what ASG is live right now" — check that first. Only fall back to
+              the CFN stack walk when the deployment group has no ASG wired yet
+              (first-ever failover, still on Ec2TagFilters).
+              """
+              asg_client = boto3.client('autoscaling', region_name=region)
+              dg_info    = cd.get_deployment_group(
+                  applicationName=app_name, deploymentGroupName=dg_name,
+              )['deploymentGroupInfo']
+              for entry in dg_info.get('autoScalingGroups', []):
+                  candidate = entry.get('name', '')
+                  if not candidate:
+                      continue
+                  resp = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[candidate])
+                  if resp.get('AutoScalingGroups'):
+                      logger.info(f'Deployment group already wired to a live ASG: {candidate}')
+                      return candidate
+                  logger.warning(f'Deployment group references a dead ASG: {candidate} — ignoring')
+              asg_name = _find_asg_from_stack_name(region, stack_name)
+              logger.info(f'No live ASG on deployment group — discovered from stack: {asg_name} (stack_name contains={stack_name})')
+              return asg_name
 
           def _find_asg_from_stack_name(region, stack_name):
               """Find AppServerAutoScalingGroup physical ID from a CFN stack whose name contains stack_name."""
