@@ -564,17 +564,27 @@ Resources:
           def _check_stack_status(event):
               region     = os.environ['AWS_REGION']
               stack_name = event.get('stack_name', '')
-              cf   = boto3.client('cloudformation', region_name=region)
-              resp = cf.describe_stacks(StackName=stack_name)
-              status = resp['Stacks'][0]['StackStatus']
+              cf    = boto3.client('cloudformation', region_name=region)
+              resp  = cf.describe_stacks(StackName=stack_name)
+              stack = resp['Stacks'][0]
+              status   = stack['StackStatus']
               complete = status in TERMINAL_STATES
               rollback = status in ROLLBACK_STATES
-              logger.info(f'Stack {stack_name}: {status}')
+              params   = {p['ParameterKey']: p.get('ParameterValue', '')
+                          for p in stack.get('Parameters', [])}
+              # Testing/re-run optimization: if the stack is already UPDATE_COMPLETE with
+              # DeployPaidResources=true, the paid resources are already live — the state
+              # machine can skip re-submitting the (slow) CFN update entirely.
+              deploy_paid_active = complete and params.get('DeployPaidResources', '').lower() == 'true'
+              logger.info(
+                  f'Stack {stack_name}: {status} DeployPaidResources={params.get("DeployPaidResources")}'
+              )
               return {
-                  'stack_name':     stack_name,
-                  'stack_status':   status,
-                  'stack_complete': complete,
-                  'stack_rollback': rollback,
+                  'stack_name':                   stack_name,
+                  'stack_status':                 status,
+                  'stack_complete':               complete,
+                  'stack_rollback':               rollback,
+                  'deploy_paid_resources_active': deploy_paid_active,
               }
 
 
@@ -1206,7 +1216,7 @@ Resources:
                     {"Variable": "$.mode", "IsPresent": true},
                     {"Variable": "$.mode", "StringEquals": "ecs_app_group"}
                   ],
-                  "Next": "UpdateNetworkStack"
+                  "Next": "PrecheckNetworkStack"
                 }
               ],
               "Default": "Discover"
@@ -1229,9 +1239,31 @@ Resources:
                 "redshift_snapshot_identifier.$": "$.redshift_snapshot_identifier"
               },
               "ResultPath": "$.discovered",
-              "Next": "UpdateNetworkStack",
+              "Next": "PrecheckNetworkStack",
               "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "PrecheckNetworkStack": {
+              "Comment": "Testing optimization — if the network stack is already UPDATE_COMPLETE with DeployPaidResources=true, skip the (slow) CFN update/wait/poll cycle entirely.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":      "check_stack_status",
+                "stack_name.$": "$.network_stack_name"
+              },
+              "ResultPath": "$.network_precheck",
+              "Next": "NetworkPrecheckRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "NetworkPrecheckRoute": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.network_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "RouteByMode"}
+              ],
+              "Default": "UpdateNetworkStack"
             },
 
             "UpdateNetworkStack": {
@@ -1293,6 +1325,28 @@ Resources:
                   ],
                   "Next": "UpdatePrereqStack"
                 }
+              ],
+              "Default": "PrecheckAppStackSnapshot"
+            },
+
+            "PrecheckAppStackSnapshot": {
+              "Comment": "Testing optimization — if the app stack is already UPDATE_COMPLETE with DeployPaidResources=true, skip the (slow) CFN update/wait/poll cycle entirely.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":      "check_stack_status",
+                "stack_name.$": "$.app_stack_name"
+              },
+              "ResultPath": "$.app_precheck",
+              "Next": "AppStackSnapshotPrecheckRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "AppStackSnapshotPrecheckRoute": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.app_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "WireCodeDeployRoute"}
               ],
               "Default": "UpdateAppStackSnapshot"
             },
@@ -1528,7 +1582,7 @@ Resources:
               "Type": "Pass",
               "Result": {"efs_id": ""},
               "ResultPath": "$.efs_result",
-              "Next": "UpdateAppStackPITR"
+              "Next": "PrecheckAppStackPITR"
             },
 
             "RestoreEFS": {
@@ -1573,9 +1627,31 @@ Resources:
             "EFSRestoreDone": {
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.efs_result.restore_complete", "BooleanEquals": true, "Next": "UpdateAppStackPITR"}
+                {"Variable": "$.efs_result.restore_complete", "BooleanEquals": true, "Next": "PrecheckAppStackPITR"}
               ],
               "Default": "WaitEFSRestore"
+            },
+
+            "PrecheckAppStackPITR": {
+              "Comment": "Testing optimization — if the app stack is already UPDATE_COMPLETE with DeployPaidResources=true, skip the (slow) CFN update/wait/poll cycle entirely.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":      "check_stack_status",
+                "stack_name.$": "$.app_stack_name"
+              },
+              "ResultPath": "$.app_precheck",
+              "Next": "AppStackPITRPrecheckRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "AppStackPITRPrecheckRoute": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.app_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "WireCodeDeployRoute"}
+              ],
+              "Default": "UpdateAppStackPITR"
             },
 
             "UpdateAppStackPITR": {
