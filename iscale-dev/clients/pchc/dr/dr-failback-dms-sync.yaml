@@ -352,8 +352,13 @@ Resources:
 
   # End-to-end target staleness - the metric that gates cutover readiness. Dimensions use the plain
   # identifiers, not !Ref (Ref returns the ARN; AWS/DMS metrics key on identifiers) - hence the repeated
-  # !Join and explicit DependsOn. notBreaching so a full-load phase with no CDCLatencyTarget doesn't
-  # false-fire. Catches "target falling behind", not "task dead" - that's DMSTaskEventSubscription below.
+  # !Join and explicit DependsOn.
+  #
+  # breaching because no CDCLatencyTarget means the task is not replicating, and this alarm is the
+  # cutover gate: notBreaching would report that silence as OK and let cutover proceed on a target
+  # receiving nothing. CloudFormation creates the task in 'ready' and never starts it, so expect ALARM
+  # from create until it is started manually.
+  # Revisit if full-load-and-cdc returns - its load phase emits no CDCLatencyTarget either.
   CDCLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
     DependsOn: DMSReplicationTask
@@ -372,15 +377,17 @@ Resources:
       EvaluationPeriods: 2
       Threshold: !Ref CDCLatencyThreshold
       ComparisonOperator: GreaterThanThreshold
-      TreatMissingData: notBreaching
+      TreatMissingData: breaching
       AlarmActions:
         - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
       OKActions:
         - Fn::ImportValue: !Sub '${SNSStackName}-TopicArn'
 
-  # Dead-task detection: a stopped/failed task stops emitting metrics, so the alarm above goes silent.
-  # Publishes task failure/state-change events to SNS. The topic policy must allow dms.amazonaws.com
-  # sns:Publish - not granted implicitly (unlike CloudWatch->SNS); verify against the SNS stack.
+  # Dead-task detection: publishes task failure/state-change events to SNS, immediately and with a cause.
+  # The alarm above also catches a dead task via breaching, but only after two 5-minute periods and
+  # without saying why. Does NOT cover a never-started task - that emits no event, hence breaching above.
+  # Topic policy must allow dms.amazonaws.com sns:Publish - not implicit (unlike CloudWatch->SNS); verify
+  # against the SNS stack.
   DMSTaskEventSubscription:
     Type: AWS::DMS::EventSubscription
     DependsOn: DMSReplicationTask
