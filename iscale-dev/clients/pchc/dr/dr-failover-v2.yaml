@@ -235,6 +235,7 @@ Resources:
               if action == 'scale_ecs_service':         return _scale_ecs_service(event)
               if action == 'set_asg_capacity':          return _set_asg_capacity(event)
               if action == 'check_all_asgs_healthy':    return _check_all_asgs_healthy(event)
+              if action == 'check_scale_results':       return _check_scale_results(event)
               if action == 'update_codedeploy_group':   return _update_codedeploy_group(event)
               if action == 'trigger_codedeploy':        return _trigger_codedeploy(event)
               if action == 'check_codedeploy':          return _check_codedeploy(event)
@@ -696,21 +697,39 @@ Resources:
 
           # ── set_asg_capacity ─────────────────────────────────────────────────
 
+          def _lookup_wired_app_name(wiring_configs, stack_name):
+              """Resolve application_name for a server_stack_name from codedeploy_wiring_configs.
+
+              Once CodeDeploy has done a blue/green swap for a stack, its ASG is created and
+              owned by CodeDeploy directly — CloudFormation's AppServerAutoScalingGroup pointer
+              for that stack is permanently stale (drifted) and must not be treated as the
+              source of truth. This lets set_asg_capacity/check_all_asgs_healthy resolve the
+              live ASG via CodeDeploy automatically, without every asg_configs entry having to
+              duplicate application_name (callers already provide it once, in
+              codedeploy_wiring_configs).
+              """
+              for w in wiring_configs or []:
+                  if w.get('server_stack_name') == stack_name:
+                      return w.get('application_name', '')
+              return ''
+
           def _set_asg_capacity(event):
               inp              = event.get('input', event)
               region           = os.environ['AWS_REGION']
               asg_name         = inp.get('asg_name') or ''
               stack_name       = inp.get('server_stack_name', '')
-              app_name         = inp.get('application_name', '')
+              wiring_configs   = event.get('codedeploy_wiring_configs') or []
+              app_name         = inp.get('application_name') or _lookup_wired_app_name(wiring_configs, stack_name)
               min_size         = int(inp.get('min_size', 0))
               desired_capacity = int(inp.get('desired_capacity', 0))
               max_size         = int(inp.get('max_size', desired_capacity))
               if not asg_name and not stack_name:
                   raise ValueError('asg_name or server_stack_name is required for set_asg_capacity')
               if not asg_name:
-                  # Same staleness issue as update_codedeploy_group: after a blue/green
-                  # swap the CFN-managed AppServerAutoScalingGroup is gone, so prefer
-                  # whatever ASG CodeDeploy is currently wired to (requires application_name).
+                  # CodeDeploy is the source of truth once a stack has drifted from
+                  # CloudFormation via blue/green. Only fall back to the CFN stack resource
+                  # lookup when no CodeDeploy application is wired for this stack yet
+                  # (first-ever failover, still on Ec2TagFilters).
                   if app_name:
                       cd       = boto3.client('codedeploy', region_name=region)
                       dg_names = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
@@ -718,7 +737,7 @@ Resources:
                           asg_name = _resolve_current_asg(region, cd, app_name, dg_names[0], stack_name)
                   if not asg_name:
                       asg_name = _find_asg_from_stack_name(region, stack_name)
-                  logger.info(f'Discovered ASG: {asg_name} (stack_name contains={stack_name})')
+                  logger.info(f'Discovered ASG: {asg_name} (stack_name contains={stack_name} application_name={app_name})')
               if not asg_name:
                   raise Exception(f'Could not resolve an ASG name for stack_name={stack_name} application_name={app_name}')
               asg = boto3.client('autoscaling', region_name=region)
@@ -741,20 +760,30 @@ Resources:
 
           def _check_all_asgs_healthy(event):
               """Poll all ASGs in asg_configs until desired instances reach InService."""
-              region      = os.environ['AWS_REGION']
-              asg_configs = event.get('asg_configs', [])
-              asg_client  = boto3.client('autoscaling', region_name=region)
+              region         = os.environ['AWS_REGION']
+              asg_configs    = event.get('asg_configs', [])
+              wiring_configs = event.get('codedeploy_wiring_configs') or []
+              asg_client     = boto3.client('autoscaling', region_name=region)
               all_healthy = True
               results     = []
               for cfg in asg_configs:
-                  asg_name   = cfg.get('asg_name', '')
+                  asg_name   = cfg.get('asg_name') or ''
                   stack_name = cfg.get('server_stack_name', '')
+                  app_name   = cfg.get('application_name') or _lookup_wired_app_name(wiring_configs, stack_name)
                   desired    = int(cfg.get('desired_capacity', 0))
                   if desired == 0:
                       results.append({'asg_name': asg_name or stack_name, 'desired': 0, 'in_service': 0, 'healthy': True})
                       continue
                   if not asg_name:
-                      asg_name = _find_asg_from_stack_name(region, stack_name)
+                      # CodeDeploy is the source of truth once a stack has drifted from
+                      # CloudFormation via blue/green — CFN lookup is only a bootstrap fallback.
+                      if app_name:
+                          cd       = boto3.client('codedeploy', region_name=region)
+                          dg_names = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
+                          if dg_names:
+                              asg_name = _resolve_current_asg(region, cd, app_name, dg_names[0], stack_name)
+                      if not asg_name:
+                          asg_name = _find_asg_from_stack_name(region, stack_name)
                   resp       = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
                   group      = resp['AutoScalingGroups'][0]
                   in_service = len([i for i in group['Instances'] if i['LifecycleState'] == 'InService'])
@@ -765,6 +794,21 @@ Resources:
                   results.append({'asg_name': asg_name, 'desired': desired, 'in_service': in_service, 'healthy': healthy})
               logger.info(f'All ASGs healthy: {all_healthy}')
               return {'all_healthy': all_healthy, 'asg_health': results}
+
+
+          # ── check_scale_results ───────────────────────────────────────────────
+
+          def _check_scale_results(event):
+              """ScaleASGs runs every ASG in parallel and isolates per-item failures (each
+              iteration ends normally with {'failed': true, ...} instead of a Fail state) so
+              one ASG erroring doesn't cancel its still-running siblings. This runs once after
+              every iteration has actually been attempted, to decide whether the failover
+              should proceed or stop."""
+              results  = event.get('asg_results', [])
+              failures = [r for r in results if r.get('failed')]
+              if failures:
+                  logger.warning(f'ASG scaling failures: {failures}')
+              return {'all_succeeded': not failures, 'failures': failures}
 
 
           # ── trigger_codedeploy / check_codedeploy ────────────────────────────
@@ -1216,10 +1260,26 @@ Resources:
                     {"Variable": "$.mode", "IsPresent": true},
                     {"Variable": "$.mode", "StringEquals": "ecs_app_group"}
                   ],
-                  "Next": "PrecheckNetworkStack"
+                  "Next": "NormalizeWiringConfigs"
                 }
               ],
               "Default": "Discover"
+            },
+
+            "NormalizeWiringConfigs": {
+              "Comment": "codedeploy_wiring_configs is optional in the event payload — default to [] so ScaleASGs/CheckASGsHealthy can safely reference it later to resolve live, CodeDeploy-managed ASGs (the source of truth once a stack has drifted from CloudFormation via blue/green) without a missing-path runtime error.",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.codedeploy_wiring_configs", "IsPresent": true, "Next": "PrecheckNetworkStack"}
+              ],
+              "Default": "DefaultWiringConfigs"
+            },
+
+            "DefaultWiringConfigs": {
+              "Type": "Pass",
+              "Result": [],
+              "ResultPath": "$.codedeploy_wiring_configs",
+              "Next": "PrecheckNetworkStack"
             },
 
             "Discover": {
@@ -1239,7 +1299,7 @@ Resources:
                 "redshift_snapshot_identifier.$": "$.redshift_snapshot_identifier"
               },
               "ResultPath": "$.discovered",
-              "Next": "PrecheckNetworkStack",
+              "Next": "NormalizeWiringConfigs",
               "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
             },
@@ -1768,35 +1828,67 @@ Resources:
             },
 
             "ScaleASGs": {
-              "Comment": "App stack is UPDATE_COMPLETE — Launch Template now has the DR AMI. Scale each ASG to its target capacity. asg_configs: [{asg_name, min_size, desired_capacity, max_size}, ...]. Pass [] to skip.",
+              "Comment": "App stack is UPDATE_COMPLETE — Launch Template now has the DR AMI. Scale each ASG to its target capacity, in parallel (MaxConcurrency 0 = unlimited). asg_configs: [{asg_name, min_size, desired_capacity, max_size}, ...]. Pass [] to skip. Each iteration is fault-isolated — one ASG failing does not cancel the others (see SetOneASG's Catch), unlike a Map whose Catch routes to a Fail state, which would abort every still-running sibling iteration.",
               "Type": "Map",
               "ItemsPath": "$.asg_configs",
+              "Parameters": {
+                "asg_item.$":                  "$$.Map.Item.Value",
+                "codedeploy_wiring_configs.$": "$.codedeploy_wiring_configs"
+              },
               "MaxConcurrency": 0,
               "Iterator": {
                 "StartAt": "SetOneASG",
                 "States": {
                   "SetOneASG": {
-                    "Comment": "Pass full item as 'input' — asg_name may be absent when server_stack_name is used for auto-discovery.",
+                    "Comment": "asg_item may omit asg_name when server_stack_name is used for auto-discovery. codedeploy_wiring_configs (enriched onto every map item via the Map state's own Parameters, since the Iterator's $ scope is otherwise limited to the array item) lets the lambda resolve the live ASG through CodeDeploy — the source of truth once a stack has drifted from CloudFormation via blue/green.",
                     "Type": "Task",
                     "Resource": "${LambdaFunction.Arn}",
                     "Parameters": {
-                      "action":  "set_asg_capacity",
-                      "input.$": "$"
+                      "action":                      "set_asg_capacity",
+                      "input.$":                     "$.asg_item",
+                      "codedeploy_wiring_configs.$": "$.codedeploy_wiring_configs"
                     },
                     "End": true,
                     "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 2, "BackoffRate": 2}],
-                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneASGFailed", "ResultPath": "$.error"}]
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneASGCaughtError", "ResultPath": "$.error"}]
                   },
-                  "OneASGFailed": {
-                    "Type": "Fail",
-                    "Error": "ASGScalingFailed",
-                    "Cause": "Failed to update one ASG capacity — check CloudWatch Logs."
+                  "OneASGCaughtError": {
+                    "Comment": "Record the failure and end this branch normally (no Fail state) so sibling ASGs in the Map keep running instead of being cancelled. Reference the whole asg_item rather than a specific key — asg_name/server_stack_name are each optional (one or the other is used for discovery), so pulling one out directly with '.$' would throw if that key happens to be absent.",
+                    "Type": "Pass",
+                    "Parameters": {
+                      "failed":       true,
+                      "asg_item.$":   "$.asg_item",
+                      "error.$":      "$.error"
+                    },
+                    "End": true
                   }
                 }
               },
               "ResultPath": "$.asg_results",
-              "Next": "WaitForInstances",
+              "Next": "CheckScaleResults",
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "CheckScaleResults": {
+              "Comment": "All ASGs have been attempted (in parallel) regardless of per-item failures — now check whether any of them actually failed and stop the failover if so.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":          "check_scale_results",
+                "asg_results.$":   "$.asg_results"
+              },
+              "ResultPath": "$.scale_check",
+              "Next": "ScaleResultsRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "ScaleResultsRoute": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.scale_check.all_succeeded", "BooleanEquals": true, "Next": "WaitForInstances"}
+              ],
+              "Default": "FailoverFailed"
             },
 
             "WaitForInstances": {
@@ -1811,8 +1903,9 @@ Resources:
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
-                "action":        "check_all_asgs_healthy",
-                "asg_configs.$": "$.asg_configs"
+                "action":                      "check_all_asgs_healthy",
+                "asg_configs.$":               "$.asg_configs",
+                "codedeploy_wiring_configs.$": "$.codedeploy_wiring_configs"
               },
               "ResultPath": "$.asg_health_result",
               "Next": "ASGsHealthyRoute",
