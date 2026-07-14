@@ -938,6 +938,28 @@ Resources:
                   'asg_name':              asg_name,
               }
 
+          def _find_nested_stack_id(region, app_stack_name, stack_name):
+              """Return the physical stack ID of the nested stack logically named `stack_name`
+              (e.g. 'APIServerStack') inside the specific `app_stack_name` parent stack (e.g.
+              'pchc-tdr-ue2-pesonet20'). Used both to find AppServerAutoScalingGroup directly,
+              and to validate that an ASG CodeDeploy already has wired genuinely belongs to
+              THIS app before trusting it — see _resolve_current_asg."""
+              if not app_stack_name:
+                  raise ValueError('app_stack_name is required to resolve a nested stack by name')
+              cf = boto3.client('cloudformation', region_name=region)
+              rk = {}
+              while True:
+                  rr = cf.list_stack_resources(StackName=app_stack_name, **rk)
+                  for res in rr.get('StackResourceSummaries', []):
+                      if res['LogicalResourceId'] == stack_name:
+                          return res['PhysicalResourceId']
+                  if not rr.get('NextToken'):
+                      break
+                  rk['NextToken'] = rr['NextToken']
+              raise Exception(
+                  f'Nested stack {stack_name!r} not found as a resource of parent stack: {app_stack_name}'
+              )
+
           def _resolve_current_asg(region, cd, app_name, dg_name, app_stack_name, stack_name):
               """Resolve the ASG to wire a deployment group to.
 
@@ -949,70 +971,88 @@ Resources:
               that no longer exists (InvalidAutoScalingGroupException).
 
               CodeDeploy's own deployment-group config is the source of truth for
-              "what ASG is live right now" — check that first. Only fall back to
-              the CFN stack walk when the deployment group has no ASG wired yet
-              (first-ever failover, still on Ec2TagFilters).
+              "what ASG is live right now" — check that first. But existence alone
+              isn't enough: a deployment group can be wired to a completely different
+              app's ASG (seen in practice — pesonet20's api-application wired to ddp's
+              APIServerStack ASG, almost certainly left over from before app_stack_name
+              scoping existed), and that ASG genuinely exists, so a bare "does it exist"
+              check would keep trusting — and re-confirming — the wrong ASG forever.
+              CodeDeploy blue/green replacement ASGs inherit the original ASG's tags,
+              including CloudFormation's own aws:cloudformation:stack-name/stack-id tags,
+              so cross-check those against this app's actual nested stack before trusting
+              an already-wired candidate. Only fall back to the CFN stack walk when the
+              deployment group has no valid, correctly-owned ASG wired yet (first-ever
+              failover, still on Ec2TagFilters, or a wrongly-wired candidate got rejected).
               """
-              asg_client = boto3.client('autoscaling', region_name=region)
-              dg_info    = cd.get_deployment_group(
+              asg_client        = boto3.client('autoscaling', region_name=region)
+              nested_stack_id   = _find_nested_stack_id(region, app_stack_name, stack_name)
+              nested_short_name = nested_stack_id.split('/')[1] if nested_stack_id.startswith('arn:') else nested_stack_id
+              dg_info           = cd.get_deployment_group(
                   applicationName=app_name, deploymentGroupName=dg_name,
               )['deploymentGroupInfo']
               for entry in dg_info.get('autoScalingGroups', []):
                   candidate = entry.get('name', '')
                   if not candidate:
                       continue
-                  resp = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[candidate])
-                  if resp.get('AutoScalingGroups'):
-                      logger.info(f'Deployment group already wired to a live ASG: {candidate}')
-                      return candidate
-                  logger.warning(f'Deployment group references a dead ASG: {candidate} — ignoring')
+                  resp   = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[candidate])
+                  groups = resp.get('AutoScalingGroups', [])
+                  if not groups:
+                      logger.warning(f'Deployment group references a dead ASG: {candidate} — ignoring')
+                      continue
+                  # Exact match only (stack-id ARN or short stack-name) — no substring
+                  # matching, which is exactly the class of bug that caused this in the
+                  # first place (a substring can match a different app's identically
+                  # logically-named nested stack).
+                  tags          = {t['Key']: t['Value'] for t in groups[0].get('Tags', [])}
+                  owning_id     = tags.get('aws:cloudformation:stack-id', '')
+                  owning_name   = tags.get('aws:cloudformation:stack-name', '')
+                  owned_by_this_app = (
+                      (owning_id and owning_id == nested_stack_id) or
+                      (owning_name and owning_name == nested_short_name)
+                  )
+                  if not owned_by_this_app:
+                      logger.warning(
+                          f'Deployment group is wired to {candidate}, but its CloudFormation '
+                          f'stack tags (stack-id={owning_id!r} stack-name={owning_name!r}) do '
+                          f'not match this app\'s nested stack ({nested_short_name!r}) — '
+                          f'ignoring, this ASG belongs to a different app.'
+                      )
+                      continue
+                  logger.info(f'Deployment group already wired to a live, verified ASG: {candidate}')
+                  return candidate
               asg_name = _find_asg_from_stack_name(region, app_stack_name, stack_name)
-              logger.info(f'No live ASG on deployment group — discovered from stack: {asg_name} (app_stack_name={app_stack_name} stack_name={stack_name})')
+              logger.info(f'No valid live ASG on deployment group — discovered from stack: {asg_name} (app_stack_name={app_stack_name} stack_name={stack_name})')
               return asg_name
 
           def _find_asg_from_stack_name(region, app_stack_name, stack_name):
-              """Find AppServerAutoScalingGroup physical ID from the nested stack logically
-              named `stack_name` (e.g. 'APIServerStack') within the specific `app_stack_name`
-              parent stack (e.g. 'pchc-tdr-ue2-pesonet20').
+              """Find the currently-live ASG for the nested stack logically named `stack_name`
+              (e.g. 'APIServerStack') within the specific `app_stack_name` parent stack (e.g.
+              'pchc-tdr-ue2-pesonet20') — searching by CloudFormation stack tag, not by
+              CloudFormation's own cached resource pointer for the logical
+              AppServerAutoScalingGroup resource.
 
-              Deliberately walks the actual parent/child CFN resource relationship instead of
-              doing an account-wide list_stacks() substring search — every app in this account
-              nests a same-named 'APIServerStack'/'TreasuryServerStack'/etc., so a bare
-              substring match can silently return a completely different app's ASG (seen in
-              practice: pesonet20 resolving to ddp's APIServerStack because both stack names
-              contain the substring 'APIServerStack' and ddp's happened to sort first).
+              That cached pointer goes stale the instant a CodeDeploy blue/green swap replaces
+              the ASG — CloudFormation never finds out its tracked ASG got superseded, so it
+              keeps returning the original (often already-deleted) ASG's name. CodeDeploy
+              blue/green replacement ASGs inherit the original ASG's tags, including
+              aws:cloudformation:stack-id/stack-name, so tag search reliably finds whichever
+              ASG is actually alive right now — original or replaced — and, critically, can
+              never cross into a different app's identically logically-named nested stack.
               """
-              if not app_stack_name:
-                  raise ValueError('app_stack_name is required to resolve a nested stack by name')
-              cf = boto3.client('cloudformation', region_name=region)
-              nested_stack_id = None
-              rk = {}
-              while True:
-                  rr = cf.list_stack_resources(StackName=app_stack_name, **rk)
-                  for res in rr.get('StackResourceSummaries', []):
-                      if res['LogicalResourceId'] == stack_name:
-                          nested_stack_id = res['PhysicalResourceId']
-                          break
-                  if nested_stack_id or not rr.get('NextToken'):
-                      break
-                  rk['NextToken'] = rr['NextToken']
-              if not nested_stack_id:
-                  raise Exception(
-                      f'Nested stack {stack_name!r} not found as a resource of parent stack: {app_stack_name}'
-                  )
-              # Walk the nested stack's own resources to find AppServerAutoScalingGroup
-              rk = {}
-              while True:
-                  rr = cf.list_stack_resources(StackName=nested_stack_id, **rk)
-                  for res in rr.get('StackResourceSummaries', []):
-                      if res['LogicalResourceId'] == 'AppServerAutoScalingGroup':
-                          return res['PhysicalResourceId']
-                  if not rr.get('NextToken'):
-                      break
-                  rk['NextToken'] = rr['NextToken']
+              nested_stack_id   = _find_nested_stack_id(region, app_stack_name, stack_name)
+              nested_short_name = nested_stack_id.split('/')[1] if nested_stack_id.startswith('arn:') else nested_stack_id
+              asg_client = boto3.client('autoscaling', region_name=region)
+              paginator  = asg_client.get_paginator('describe_auto_scaling_groups')
+              for page in paginator.paginate():
+                  for group in page.get('AutoScalingGroups', []):
+                      tags        = {t['Key']: t['Value'] for t in group.get('Tags', [])}
+                      owning_id   = tags.get('aws:cloudformation:stack-id', '')
+                      owning_name = tags.get('aws:cloudformation:stack-name', '')
+                      if (owning_id and owning_id == nested_stack_id) or (owning_name and owning_name == nested_short_name):
+                          return group['AutoScalingGroupName']
               raise Exception(
-                  f'AppServerAutoScalingGroup resource not found in nested stack: {stack_name} '
-                  f'(parent={app_stack_name})'
+                  f'No ASG found tagged with nested stack {nested_short_name!r} '
+                  f'(parent={app_stack_name}, logical id={stack_name!r}). Checked every ASG in region {region}.'
               )
 
 
