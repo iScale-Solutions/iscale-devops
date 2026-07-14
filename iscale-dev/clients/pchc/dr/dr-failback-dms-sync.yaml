@@ -167,9 +167,12 @@ Parameters:
       unused until an actual failover - AWS deprecates DMS engine versions over time, so a
       hardcoded value could block instance creation months/years later. Confirm the default is
       still creatable in-region at failover time and override if AWS has retired it. Must be 3.5.x
-      or newer for MySQL 8.x source/target (3.4.3 in common/dms.yaml is too old).
+      or newer for MySQL 8.x source/target (3.4.3 in common/dms.yaml is too old). 3.5.3 was already
+      retired in ap-southeast-1 by 2026-07 - check with:
+      aws dms describe-orderable-replication-instances --region <region>
+        --query "OrderableReplicationInstances[?ReplicationInstanceClass=='dms.t3.medium'].EngineVersion"
     Type: String
-    Default: 3.5.3
+    Default: 3.6.1
   MigrationType:
     Description: >-
       cdc = skip the load and stream changes only; REQUIRES CdcStartPosition set to the SOURCE
@@ -304,7 +307,11 @@ Resources:
       EndpointIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-source']]
       EndpointType: source
       EngineName: mysql
-      SslMode: require  # encrypt the cross-region binlog stream; RDS accepts TLS by default
+      # The mysql engine rejects 'require' (InvalidParameterCombinationException) - it offers only
+      # none / verify-ca / verify-full. verify-ca needs the RDS CA bundle imported into DMS and a
+      # CertificateArn on this endpoint; until that is plumbed in, the cross-region binlog stream is
+      # unencrypted at the protocol layer. Must be resolved before production failback.
+      SslMode: none
       ServerName: !Ref SourceEndpoint
       Port: !Ref SourcePort
       Username: !Sub '{{resolve:secretsmanager:${SourceSecretArn}:SecretString:DB_ROOT_USER}}'
@@ -317,7 +324,7 @@ Resources:
       EndpointIdentifier: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-target']]
       EndpointType: target
       EngineName: mysql
-      SslMode: require  # encrypt the target session; RDS accepts TLS by default
+      SslMode: none  # see DMSSourceEndpoint - 'require' is not a valid mysql SSL mode
       ExtraConnectionAttributes: 'initstmt=SET FOREIGN_KEY_CHECKS=0'  # avoid FK-order violations when applying changes
       ServerName: !Ref TargetEndpoint
       Port: !Ref TargetPort
