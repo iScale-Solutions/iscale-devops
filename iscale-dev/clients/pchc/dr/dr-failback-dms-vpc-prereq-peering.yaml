@@ -1,21 +1,18 @@
 AWSTemplateFormatVersion: 2010-09-09
+
+# Deploy twice, same template:
+#   1. Requester in the LIVE region - creates the peering; record the pcx- id.
+#   2. Accept the peering in the DR region console (it must be active before step 3).
+#   3. Accepter in the DR region - adds the DR-side route + DB ingress; pass the pcx- as VPCPeeringId.
+#
+# Only InternalRouteTable1 is passed: 1/2/3 are three exports of one DefaultRouteTable, so passing
+# 2 or 3 as well would duplicate the route and fail (RouteAlreadyExists).
+
 Description: >-
-  Network prerequisite for dr-failback-dms-sync.yaml: VPC peering between the live (primary) VPC and
-  the DR VPC, the route-table entries on both sides, and the DR-side database ingress rule that lets
-  the live-region DMS replication instance reach the DR source DB. dr-failback-dms-sync.yaml cannot
-  own any of this - it is a single-region stack and every DR-side resource here is cross-region.
-
-  DEPLOY TWICE, same template:
-    1. RequesterOrAccepter=Requester in the LIVE region  - creates the peering + live-side routes.
-    2. RequesterOrAccepter=Accepter  in the DR region    - accepts nothing (do that in the console),
-       but writes the DR-side routes and the DB ingress rule. Needs VPCPeeringId from step 1.
-  Accept the peering connection in the DR region between the two deployments, or the accepter-side
-  routes reference a connection that is still pending and the stack fails.
-
-  ROUTE TABLES: the DMS replication instance runs in the network stack's INTERNAL subnets, which
-  associate with DefaultRouteTable (network.yaml). That table is exported as InternalRouteTable1/2/3
-  - three names for ONE table - so only InternalRouteTable1 is passed. Passing 2 or 3 as well would
-  add duplicate routes to the same table and fail with RouteAlreadyExists.
+  Cross-region prerequisite for dr-failback-dms-sync.yaml: VPC peering (live <-> DR), the internal
+  route on both sides, and the DR-side DB ingress that lets the live-region DMS instance reach the DR
+  source DB. Deploy twice - Requester in the live region, then Accepter in the DR region after
+  accepting the peering.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -174,9 +171,7 @@ Conditions:
 Resources:
 
 ####
-# Live (requester) side - create the peering and route the DMS subnets to the DR VPC.
-# Only InternalRouteTable1 is passed: DMS runs in the internal subnets, and InternalRouteTable1/2/3
-# are three exports of the same DefaultRouteTable (see Description).
+# Requester (live) side: create the peering and route the DMS internal subnets to the DR VPC.
 ####
 
   RequesterVPCPeering:
@@ -201,12 +196,10 @@ Resources:
         TargetCidr: !Ref AccepterCidr
 
 ####
-# DR (accepter) side - route the DR VPC back to the live VPC. Creates no peering
-# (CreateVPCPeering: false); it attaches routes to the connection the requester made.
-# Only the internal route table is wired: the goal is DMS -> DR source RDS, and the DR source DB
-# lands in the internal subnets (database.yaml DBSubnetGroup uses InternalSubnetId1/2). Those subnets
-# share the single DefaultRouteTable, exported as InternalRouteTable1 - the one return path this
-# traffic needs. Private-tier route tables carry no DMS traffic, so they are not routed here.
+# Accepter (DR) side: attach the return route to the existing peering (creates no peering).
+# Only the internal route table is wired - the DR source DB lands in the internal subnets
+# (DBSubnetGroup uses InternalSubnetId1/2), which share DefaultRouteTable. Private route tables
+# carry no DMS traffic.
 ####
 
   AccepterVPCPeering:
@@ -231,8 +224,8 @@ Resources:
           'Fn::Sub': '${TargetNetworkStackName}-InternalRouteTable1'
 
 ####
-# DR source DB ingress - the rule dr-failback-dms-sync.yaml declares as a prerequisite it cannot own.
-# CIDR-based, not SG-to-SG: the DMS SG is in another region and VPC, so an SG reference never resolves.
+# DR source DB ingress - the cross-region prerequisite dr-failback-dms-sync.yaml cannot own.
+# CIDR-based, not SG-to-SG: an SG reference never resolves across regions/VPCs.
 ####
 
   AllowDMSIntoDRSourceDb:
