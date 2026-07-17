@@ -47,6 +47,23 @@ Metadata:
           - Strongswan3RDPSK
           - StrongswanAMI
           - BSPInterfaceHostname
+      - Label:
+          default: Disaster Recovery
+        Parameters:
+          - DeployPaidResources
+          - SnapshotIdentifier
+          - DBMasterUserPassword
+          - EnableCrossRegionBackupReplication
+          - AppCRRBucketArn
+          - SourceDbInstanceArn
+          - BackupReplicationRetentionPeriod
+          - LiveSecretArn
+          - DRRegion
+          - IsPITRMode
+          - PITRDBEndpoint
+          - ExternalEFSId
+          - BackupVaultEncryptionKeyArn
+          - HourlyEFSDRRetentionDays
 
     ParameterLabels:
       Name:
@@ -91,6 +108,34 @@ Metadata:
         default: StrongSwan PhilPassPlus Shared Key
       Strongswan3RDPSK:
         default: StrongSwan 3rd Party Shared Key
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      SnapshotIdentifier:
+        default: DB Snapshot Identifier (DR failover restore — leave blank for normal)
+      DBMasterUserPassword:
+        default: DB Master Password (DR failover only — leave blank for normal)
+      EnableCrossRegionBackupReplication:
+        default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
+      AppCRRBucketArn:
+        default: App CodeDeploy CRR Destination Bucket ARN (leave blank for DR stack — set on the live stack)
+      SourceDbInstanceArn:
+        default: Source DB Instance ARN (live region — required when replication is enabled)
+      BackupReplicationRetentionPeriod:
+        default: Backup Retention Period in DR region (days)
+      LiveSecretArn:
+        default: Live Region Secret ARN (DR standby only — required for secrets sync)
+      DRRegion:
+        default: DR AWS Region (backup copy destination)
+      IsPITRMode:
+        default: PITR Mode (set by dr-failover-v2 only — do not change manually)
+      PITRDBEndpoint:
+        default: PITR DB Endpoint (set by dr-failover-v2 only — do not change manually)
+      ExternalEFSId:
+        default: Restored EFS ID (written by dr-failover before stack update — DR only)
+      BackupVaultEncryptionKeyArn:
+        default: KMS CMK ARN for EFS backup vault encryption (multi-region key replica required in DR region)
+      HourlyEFSDRRetentionDays:
+        default: Days to retain hourly EFS backup copies in DR vault (must span full incremental chain)
 
 Parameters:
   Name:
@@ -115,6 +160,10 @@ Parameters:
       - Staging
       - Development
       - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
   BSPMode:
     Description: BSP Resources to connect to
     Type: String
@@ -210,6 +259,128 @@ Parameters:
     Description: Password for 3rd Party PSK
     Type: String
     NoEcho: true
+  DeployPaidResources:
+    Description: |
+      true (default): Deploy all paid resources — DB, LBs, and App Servers. Normal operation for all environments.
+      false: DR standby mode — suppress all paid resources to minimize idle cost. Only CodeDeploy infra stays alive.
+      DR failover: set back to true and provide SnapshotIdentifier to restore DB from the cross-region backup.
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  SnapshotIdentifier:
+    Description: |
+      (DR Failover only) ARN of the RDS snapshot to restore the database from.
+      Obtain by copying the latest automated backup from the live region into the DR region before failover.
+      Leave blank for normal fresh DB creation — existing deployments are unaffected.
+    Type: String
+    Default: ''
+  DBMasterUserPassword:
+    Description: |
+      (DR Failover only) Master user password of the source database.
+      Provide this during snapshot restore so the Secrets Manager secret stays in sync with the restored DB credentials.
+      Leave blank for auto-generated password — existing deployments are unaffected.
+    Type: String
+    Default: ''
+    NoEcho: true
+  EnableCrossRegionBackupReplication:
+    Description: |
+      Set to true to enable cross-region automated backup replication for the DB.
+      Deploy with this enabled in the DR region stack, pointing SourceDbInstanceArn to the live DB.
+      Replicates daily snapshots + transaction logs — enables PITR with ~5 minute RPO in the DR region.
+      Default false — existing deployments are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  AppCRRBucketArn:
+    Description: |
+      (Live region only) ARN of the DR CodeDeploy artifacts bucket for the app server.
+      Obtain from the DeployStack output in the DR region (CodeDeployBucketArn).
+      Leave blank for DR stack deployments — the IsDR condition suppresses CRR automatically.
+    Type: String
+    Default: ''
+  SourceDbInstanceArn:
+    Description: |
+      ARN of the live region RDS DB instance to replicate from.
+      Required when EnableCrossRegionBackupReplication=true.
+      Format: arn:aws:rds:<live-region>:<account-id>:db:<db-identifier>
+      Obtain from the live stack DBStack output: DBInstanceARN.
+    Type: String
+    Default: ''
+  BackupReplicationRetentionPeriod:
+    Description: Number of days to retain replicated backups in the DR region (1-35)
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+  LiveSecretArn:
+    Description: |
+      ARN of the live region Secrets Manager secret to replicate from.
+      Obtain from the live stack Secrets Manager console.
+      Only required when deploying in DR (ProductionDR) — leave blank for normal deployments.
+    Type: String
+    Default: ''
+  IsPITRMode:
+    Description: |
+      Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
+      When true, DBStack is suppressed (DB was restored externally via PITR) and all DB references
+      resolve from PITRDBEndpoint and the pre-deployed DBStandbySecurityGroup instead of DBStack outputs.
+      Default false — live stacks and snapshot-based failover are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  PITRDBEndpoint:
+    Description: |
+      Endpoint of the PITR-restored RDS instance. Written to SSM and Secrets Manager by the
+      dr-failover Step Functions machine before the app stack update. Only used when IsPITRMode=true.
+      Leave blank for all other deployments — existing stacks are unaffected.
+    Type: String
+    Default: ''
+  DRRegion:
+    Description: |
+      AWS region of the DR stack — used to construct the DR backup vault ARN for cross-region copy.
+      Production DR is Oregon (us-west-2); UAT DR testing is Ohio (us-east-2).
+    Type: String
+    Default: 'us-west-2'
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-1
+      - us-west-2
+      - ap-southeast-1
+      - ap-southeast-2
+  ExternalEFSId:
+    Description: |
+      (DR Failover only) ID of the EFS file system restored from cross-region backup.
+      Written by dr-failover before the stack update. When set, ServerStack skips EFS creation
+      and mounts this file system instead. Leave blank for normal operation — live stacks always
+      create their own EFS and are completely unaffected.
+    Type: String
+    Default: ''
+  HourlyEFSDRRetentionDays:
+    Description: |
+      Number of days to retain hourly EFS backup copies in the DR vault.
+      Hourly copies are the high-frequency incremental recovery points for Option B (< 1 hour RPO).
+      Daily copies serve as the long-term baseline; hourly copies layer on top.
+      Must be >= 2 (minimum for incremental chain integrity) and <= 35 (AWS Backup maximum).
+    Type: Number
+    Default: 14
+    MinValue: 2
+    MaxValue: 35
+  BackupVaultEncryptionKeyArn:
+    Description: |
+      ARN of the KMS CMK used to encrypt the backup vault and every recovery point stored in it.
+      Must be a multi-region key: the primary key in the live region encrypts the source vault, and
+      the replica key in the DR region encrypts the DRBackupVault, so cross-region copies are
+      immediately decryptable at DR restore time — no key import or manual re-encryption required.
+      Leave blank to use the default AWS-managed aws/backup key (NOT decryptable cross-region).
+    Type: String
+    Default: ''
 
 Mappings:
   Fn::Transform:
@@ -272,6 +443,36 @@ Conditions:
   IsStrongswanAlarmActive: !And [Condition: IsStrongswanActive, Condition: IsProd]
   IsBSPProd: !And [Condition: IsStrongswanActive, !Equals [!Ref BSPMode, Production]]
   IsBSPUAT: !And [Condition: IsStrongswanActive, !Equals [!Ref BSPMode, UAT]]
+  # IsDR is provided by the conditions.yaml include above — do not redefine it here.
+  IsProdOrProductionDR: !Or
+    - Condition: IsProd
+    - !Equals [!Ref EnvName, ProductionDR]
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
+  IsDRAndEnableCrossRegionBackupReplication: !And
+    - Condition: IsDR
+    - Condition: IsEnableCrossRegionBackupReplication
+  # DR environments evaluate as non-prod, so the scheduler must also be gated on NotDR —
+  # otherwise it would stop resources during a failover.
+  IsNotProdAndDeployPaidResourcesAndNotDR: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
+    - !Not [Condition: IsDR]
+  IsProdOrProductionDRAndDeployPaidResources: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResources
+  IsPITRMode: !Equals [!Ref IsPITRMode, 'true']
+  # DBStack and its dependents are suppressed when PITR mode is active — DB was restored externally.
+  IsDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsDeployPaidResources
+    - !Not [Condition: IsPITRMode]
+  IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrProductionDR
+    - Condition: IsDeployPaidResourcesAndNotPITR
+  IsBackupEncryptionKeyProvided: !Not [!Equals [!Ref BackupVaultEncryptionKeyArn, '']]
+  IsProdOrTest: !Or
+    - Condition: IsProd
+    - Condition: IsTest
 
 Resources:
 
@@ -281,7 +482,7 @@ Resources:
 
   BSPDNSResolverSecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties:
       GroupDescription: BSP DNS Resolver Security Group
       VpcId: 
@@ -299,7 +500,7 @@ Resources:
 
   BSPDNSResolver:
     Type: AWS::Route53Resolver::ResolverEndpoint
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties:
       Direction: OUTBOUND
       IpAddresses:
@@ -315,7 +516,7 @@ Resources:
 
   BSPDomainResolverRule:
     Type: AWS::Route53Resolver::ResolverRule
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties: 
       DomainName: bsp.gov.ph
       Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Domain, Rule]]
@@ -329,7 +530,7 @@ Resources:
 
   BSPDomainVPCAssociation:
     Type: AWS::Route53Resolver::ResolverRuleAssociation
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties: 
       ResolverRuleId: !Ref BSPDomainResolverRule
       VPCId:
@@ -338,19 +539,19 @@ Resources:
 
   BSPDNSResolverLogGroup:
     Type: AWS::Logs::LogGroup
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties:
       LogGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Resolver]]
 
   BSPDNSResolverLog:
     Type: AWS::Route53Resolver::ResolverQueryLoggingConfig
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties:
       DestinationArn: !GetAtt BSPDNSResolverLogGroup.Arn
   
   BSPDNSResolverLogAssociation:
     Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties: 
       ResolverQueryLogConfigId: !Ref BSPDNSResolverLog
       ResourceId:
@@ -1377,6 +1578,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
         SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+        DeployPaidResources: !Ref DeployPaidResources
 
   DeployStack:
     Type: AWS::CloudFormation::Stack
@@ -1388,8 +1590,15 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+        # Live region replicates CodeDeploy artifacts into the DR bucket so the DR app servers
+        # have code to deploy at failover. Suppressed on the DR stack itself (it is the destination).
+        ReplicationDestinationBucketArn: !If [IsDR, '', !Ref AppCRRBucketArn]
 
   DBStack:
+    # Set DeployPaidResources=false (DR standby) to suppress. At failover, set back to true and
+    # provide SnapshotIdentifier to restore the DB from the cross-region backup.
+    # Also suppressed when IsPITRMode=true — the DB was restored externally by dr-failover-v2.
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -1412,11 +1621,14 @@ Resources:
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
+        SnapshotIdentifier: !Ref SnapshotIdentifier
+        MasterUserPassword: !Ref DBMasterUserPassword
+        ExistingSecretArn: !If [IsDR, !Ref DRDBSecret, '']
 
   DBSchedulerStack:
     DependsOn:
       - DBStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -1432,13 +1644,142 @@ Resources:
             - DBStack
             - Outputs.DBInstanceName
 
+####
+# Disaster Recovery
+# All resources below are deployed ONLY when EnvName is a DR variant (ProductionDR, StagingDR, etc.).
+# These resources are always-on in the DR region at zero/minimal cost.
+# They pre-provision the infrastructure needed to activate the environment at failover time.
+####
+
+  # Placeholder Secrets Manager secret for DB credentials in the DR region.
+  # Created at DR stack deploy time with placeholder values.
+  # The secrets-sync Lambda overwrites the values whenever the live region secret rotates,
+  # ensuring correct credentials are available before failover is triggered.
+  # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
+  # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
+  DRDBSecret:
+    Condition: IsDR
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: !Sub 'DR placeholder secret for ${OrgName} ${Name} — values synced from the live region secret by the secrets-sync Lambda before failover.'
+      SecretString: !Sub |
+        {
+          "DB_ROOT_USER": "root",
+          "DB_ROOT_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "DB_NAME": "${Name}db",
+          "DB_USER": "${Name}",
+          "DB_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "MAGENTO_ADMIN_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE"
+        }
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: DRSync
+          Value: 'true'
+        - Key: SourceSecretArn
+          Value: !Ref LiveSecretArn
+
+  # Pre-deployed DB subnet group for PITR restore in DR standby.
+  # Uses -standby suffix to avoid naming conflict with DBStack's own subnet group at failover.
+  DBStandbySubnetGroup:
+    Condition: IsDR
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      DBSubnetGroupName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+
+  # Pre-deployed DB security group for PITR restore in DR standby.
+  # App server stacks can add ingress rules to this SG at restore time.
+  DBStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+
+  # Always-on vault in the DR region — exists independently of DeployPaidResources so the live region's
+  # CopyActions have a destination even during cold standby. Excluded from BackupStack to avoid naming
+  # conflicts at failover. EncryptionKeyArn must be the REPLICA of the multi-region CMK in this region
+  # so cross-region copies are immediately decryptable at DR restore time.
+  DRBackupVault:
+    Condition: IsDR
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+      EncryptionKeyArn: !If [IsBackupEncryptionKeyProvided, !Ref BackupVaultEncryptionKeyArn, !Ref 'AWS::NoValue']
+      BackupVaultTags:
+        Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+  # Pre-deployed EFS security group for the DR region.
+  # Allows NFS (2049) inbound from app server SGs — appserver-basic2.yaml adds the ingress rules
+  # automatically when UseExternalEFS=true (ExternalEFSId is non-empty).
+  # Also used as the mount target SG when dr-failover creates mount targets for the restored EFS.
+  EFSStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs, standby]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
+  # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
+  # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
+  DBReplicationStack:
+    Condition: IsDRAndEnableCrossRegionBackupReplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-replication.yaml
+      Parameters:
+        Name: !Ref Name
+        OrgName: !Ref OrgName
+        EnvName: !Ref EnvName
+        SourceDbInstanceArn: !Ref SourceDbInstanceArn
+        BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
+
   AllowDBConnectionFromJumpHost:
+    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: TCP
-      GroupId: !GetAtt [DBStack, Outputs.SecurityGroupId]
-      FromPort: !GetAtt [DBStack, Outputs.DBInstancePort]
-      ToPort: !GetAtt [DBStack, Outputs.DBInstancePort]
+      GroupId: !If
+        - IsPITRMode
+        - !GetAtt DBStandbySecurityGroup.GroupId
+        - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+      FromPort: !If
+        - IsPITRMode
+        - 3306
+        - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+      ToPort: !If
+        - IsPITRMode
+        - 3306
+        - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
       SourceSecurityGroupId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
@@ -1460,8 +1801,9 @@ Resources:
   #       UseFriendlyNames: TRUE
 
   ServerStack:
+    # DBStack removed from DependsOn — it is conditional now, and DependsOn on a
+    # suppressed resource fails the stack in DR standby.
     DependsOn:
-      - DBStack
       - DeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -1482,19 +1824,22 @@ Resources:
         #   Fn::GetAtt:
         #     - CacheStack
         #     - Outputs.SecurityGroupId
+        ASGDesiredSize: !If [IsDR, 0, 1]
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
+          - ''
+        ExternalEFSID: !If [IsDR, !Ref ExternalEFSId, '']
+        ExternalEFSSecurityGroup: !If [IsDR, !GetAtt EFSStandbySecurityGroup.GroupId, '']
         InstanceAMI: !Ref InstanceAmi
         # InstanceAMI: ami-01e07f712a046fa8a 
         #InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
@@ -1503,14 +1848,17 @@ Resources:
         InstanceType: !Ref InstanceType
         # LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref BSPInterfaceHostname, !Ref 'AWS::NoValue']
         # LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
-        LoadBalancerHostName: philpass2 # uat for the mean time
+        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', philpass2] # uat for the mean time
         LoadBalancerPriority: 50
-        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        LoadBalancerStackName: !If
+          - IsDeployPaidResources
+          - !Select [ 1, !Split [ '/', !Ref ELBStack]]
+          - ''
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
+          - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         LaunchTemplate: True
@@ -1715,10 +2063,10 @@ Resources:
   #         Value: !Ref BSPInterfaceInstance
 
   BackupStack:
-    Condition: IsProd
+    Condition: IsProdOrProductionDRAndDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBStack
-      # - ServerStack
+      - ServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -1731,6 +2079,9 @@ Resources:
           - - Fn::GetAtt:
               - DBStack
               - Outputs.DBInstanceARN
+            - Fn::GetAtt:
+              - ServerStack
+              - Outputs.AppServerEFSArn
             # - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref StrongSwanInstanceAZ1]]]]  
             # - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref StrongSwanInstanceAZ2]]]]  
             # - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref BSPInterfaceInstance]]]]  
@@ -1738,6 +2089,25 @@ Resources:
         DailyExpiration: 60 #60 days requirement
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
         MonthlyExpiration: 3650 # 10 years
+        # Hourly incremental plan targets EFS only — RDS does not support AWS Backup incremental.
+        # Each hourly recovery point contains the complete EFS state (AWS Backup resolves the
+        # incremental chain internally); restoring from the latest hourly always gives full data.
+        EnableHourlyBackup: !If [IsProdOrTest, 'true', 'false']
+        HourlyBackupARNList:
+          Fn::GetAtt: [ServerStack, Outputs.AppServerEFSArn]
+        # Copy recovery points into the DR region vault so they are restorable at failover.
+        # The destination vault is DRBackupVault, created by the DR stack in DRRegion.
+        EnableCrossRegionBackup: 'true'
+        CrossRegionBackupVaultArn: !Sub
+          - 'arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-vault'
+          - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+            DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+        # KMS CMK for the source vault — must match the key used for DRBackupVault so cross-region
+        # copies are immediately decryptable in the DR region without key re-import.
+        EncryptionKeyArn: !Ref BackupVaultEncryptionKeyArn
+        # Retain hourly EFS copies in DR — within this window restore to any hour (Option B).
+        # Beyond it, fall back to the daily baseline copies.
+        HourlyDRRetentionDays: !Ref HourlyEFSDRRetentionDays
 
 ###
 # Connectivity Analyser
@@ -2003,3 +2373,38 @@ Resources:
   #           GATEWAYAZ2_ID: !Ref StrongSwanInstanceAZ2
   #           ENV_SHORT: !FindInMap [EnvShort, !Ref EnvName, Name]
   #           REGION_SHORT: !FindInMap [RegionShort, !Ref 'AWS::Region', Name]
+
+Outputs:
+
+  DRDBSecretArn:
+    Condition: IsDR
+    Description: ARN of the DR Secrets Manager secret — set this in the secrets-sync Lambda so it keeps values current from the live region
+    Value: !Ref DRDBSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-DRDBSecretArn'
+
+  DBStandbySubnetGroup:
+    Condition: IsDR
+    Description: Pre-deployed DB subnet group for PITR restore — use in restore-db-instance-from-db-snapshot command
+    Value: !Ref DBStandbySubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySubnetGroup'
+
+  DBStandbySecurityGroupId:
+    Condition: IsDR
+    Description: Pre-deployed DB security group for PITR restore — use in restore-db-instance-from-db-snapshot command
+    Value: !GetAtt DBStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySecurityGroupId'
+
+  EFSStandbySecurityGroupId:
+    Condition: IsDR
+    Description: Pre-deployed EFS security group — pass as efs_security_group_id in the dr-failover state machine input
+    Value: !GetAtt EFSStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-EFSStandbySecurityGroupId'
+
+  CodeDeployBucketArn:
+    Condition: IsDR
+    Description: ARN of the CodeDeploy artifacts bucket — use as AppCRRBucketArn in the live stack when setting up CRR
+    Value: !GetAtt DeployStack.Outputs.DeploymentBucketArn
