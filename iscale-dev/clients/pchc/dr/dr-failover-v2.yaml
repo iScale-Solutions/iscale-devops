@@ -235,6 +235,7 @@ Resources:
               if action == 'scale_ecs_service':         return _scale_ecs_service(event)
               if action == 'set_asg_capacity':          return _set_asg_capacity(event)
               if action == 'check_all_asgs_healthy':    return _check_all_asgs_healthy(event)
+              if action == 'check_scale_results':       return _check_scale_results(event)
               if action == 'update_codedeploy_group':   return _update_codedeploy_group(event)
               if action == 'trigger_codedeploy':        return _trigger_codedeploy(event)
               if action == 'check_codedeploy':          return _check_codedeploy(event)
@@ -564,17 +565,27 @@ Resources:
           def _check_stack_status(event):
               region     = os.environ['AWS_REGION']
               stack_name = event.get('stack_name', '')
-              cf   = boto3.client('cloudformation', region_name=region)
-              resp = cf.describe_stacks(StackName=stack_name)
-              status = resp['Stacks'][0]['StackStatus']
+              cf    = boto3.client('cloudformation', region_name=region)
+              resp  = cf.describe_stacks(StackName=stack_name)
+              stack = resp['Stacks'][0]
+              status   = stack['StackStatus']
               complete = status in TERMINAL_STATES
               rollback = status in ROLLBACK_STATES
-              logger.info(f'Stack {stack_name}: {status}')
+              params   = {p['ParameterKey']: p.get('ParameterValue', '')
+                          for p in stack.get('Parameters', [])}
+              # Testing/re-run optimization: if the stack is already UPDATE_COMPLETE with
+              # DeployPaidResources=true, the paid resources are already live — the state
+              # machine can skip re-submitting the (slow) CFN update entirely.
+              deploy_paid_active = complete and params.get('DeployPaidResources', '').lower() == 'true'
+              logger.info(
+                  f'Stack {stack_name}: {status} DeployPaidResources={params.get("DeployPaidResources")}'
+              )
               return {
-                  'stack_name':     stack_name,
-                  'stack_status':   status,
-                  'stack_complete': complete,
-                  'stack_rollback': rollback,
+                  'stack_name':                   stack_name,
+                  'stack_status':                 status,
+                  'stack_complete':               complete,
+                  'stack_rollback':               rollback,
+                  'deploy_paid_resources_active': deploy_paid_active,
               }
 
 
@@ -686,19 +697,50 @@ Resources:
 
           # ── set_asg_capacity ─────────────────────────────────────────────────
 
+          def _lookup_wired_app_name(wiring_configs, stack_name):
+              """Resolve application_name for a server_stack_name from codedeploy_wiring_configs.
+
+              Once CodeDeploy has done a blue/green swap for a stack, its ASG is created and
+              owned by CodeDeploy directly — CloudFormation's AppServerAutoScalingGroup pointer
+              for that stack is permanently stale (drifted) and must not be treated as the
+              source of truth. This lets set_asg_capacity/check_all_asgs_healthy resolve the
+              live ASG via CodeDeploy automatically, without every asg_configs entry having to
+              duplicate application_name (callers already provide it once, in
+              codedeploy_wiring_configs).
+              """
+              for w in wiring_configs or []:
+                  if w.get('server_stack_name') == stack_name:
+                      return w.get('application_name', '')
+              return ''
+
           def _set_asg_capacity(event):
               inp              = event.get('input', event)
               region           = os.environ['AWS_REGION']
-              asg_name         = inp.get('asg_name', '')
+              asg_name         = inp.get('asg_name') or ''
               stack_name       = inp.get('server_stack_name', '')
+              app_stack_name   = event.get('app_stack_name', '')
+              wiring_configs   = event.get('codedeploy_wiring_configs') or []
+              app_name         = inp.get('application_name') or _lookup_wired_app_name(wiring_configs, stack_name)
               min_size         = int(inp.get('min_size', 0))
               desired_capacity = int(inp.get('desired_capacity', 0))
               max_size         = int(inp.get('max_size', desired_capacity))
               if not asg_name and not stack_name:
                   raise ValueError('asg_name or server_stack_name is required for set_asg_capacity')
               if not asg_name:
-                  asg_name = _find_asg_from_stack_name(region, stack_name)
-                  logger.info(f'Discovered ASG: {asg_name} (stack_name contains={stack_name})')
+                  # CodeDeploy is the source of truth once a stack has drifted from
+                  # CloudFormation via blue/green. Only fall back to the CFN stack resource
+                  # lookup when no CodeDeploy application is wired for this stack yet
+                  # (first-ever failover, still on Ec2TagFilters).
+                  if app_name:
+                      cd       = boto3.client('codedeploy', region_name=region)
+                      dg_names = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
+                      if dg_names:
+                          asg_name = _resolve_current_asg(region, cd, app_name, dg_names[0], app_stack_name, stack_name)
+                  if not asg_name:
+                      asg_name = _find_asg_from_stack_name(region, app_stack_name, stack_name)
+                  logger.info(f'Discovered ASG: {asg_name} (app_stack_name={app_stack_name} stack_name={stack_name} application_name={app_name})')
+              if not asg_name:
+                  raise Exception(f'Could not resolve an ASG name for stack_name={stack_name} application_name={app_name}')
               asg = boto3.client('autoscaling', region_name=region)
               asg.update_auto_scaling_group(
                   AutoScalingGroupName=asg_name,
@@ -719,20 +761,31 @@ Resources:
 
           def _check_all_asgs_healthy(event):
               """Poll all ASGs in asg_configs until desired instances reach InService."""
-              region      = os.environ['AWS_REGION']
-              asg_configs = event.get('asg_configs', [])
-              asg_client  = boto3.client('autoscaling', region_name=region)
+              region         = os.environ['AWS_REGION']
+              asg_configs    = event.get('asg_configs', [])
+              wiring_configs = event.get('codedeploy_wiring_configs') or []
+              app_stack_name = event.get('app_stack_name', '')
+              asg_client     = boto3.client('autoscaling', region_name=region)
               all_healthy = True
               results     = []
               for cfg in asg_configs:
-                  asg_name   = cfg.get('asg_name', '')
+                  asg_name   = cfg.get('asg_name') or ''
                   stack_name = cfg.get('server_stack_name', '')
+                  app_name   = cfg.get('application_name') or _lookup_wired_app_name(wiring_configs, stack_name)
                   desired    = int(cfg.get('desired_capacity', 0))
                   if desired == 0:
                       results.append({'asg_name': asg_name or stack_name, 'desired': 0, 'in_service': 0, 'healthy': True})
                       continue
                   if not asg_name:
-                      asg_name = _find_asg_from_stack_name(region, stack_name)
+                      # CodeDeploy is the source of truth once a stack has drifted from
+                      # CloudFormation via blue/green — CFN lookup is only a bootstrap fallback.
+                      if app_name:
+                          cd       = boto3.client('codedeploy', region_name=region)
+                          dg_names = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
+                          if dg_names:
+                              asg_name = _resolve_current_asg(region, cd, app_name, dg_names[0], app_stack_name, stack_name)
+                      if not asg_name:
+                          asg_name = _find_asg_from_stack_name(region, app_stack_name, stack_name)
                   resp       = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
                   group      = resp['AutoScalingGroups'][0]
                   in_service = len([i for i in group['Instances'] if i['LifecycleState'] == 'InService'])
@@ -743,6 +796,21 @@ Resources:
                   results.append({'asg_name': asg_name, 'desired': desired, 'in_service': in_service, 'healthy': healthy})
               logger.info(f'All ASGs healthy: {all_healthy}')
               return {'all_healthy': all_healthy, 'asg_health': results}
+
+
+          # ── check_scale_results ───────────────────────────────────────────────
+
+          def _check_scale_results(event):
+              """ScaleASGs runs every ASG in parallel and isolates per-item failures (each
+              iteration ends normally with {'failed': true, ...} instead of a Fail state) so
+              one ASG erroring doesn't cancel its still-running siblings. This runs once after
+              every iteration has actually been attempted, to decide whether the failover
+              should proceed or stop."""
+              results  = event.get('asg_results', [])
+              failures = [r for r in results if r.get('failed')]
+              if failures:
+                  logger.warning(f'ASG scaling failures: {failures}')
+              return {'all_succeeded': not failures, 'failures': failures}
 
 
           # ── trigger_codedeploy / check_codedeploy ────────────────────────────
@@ -836,10 +904,11 @@ Resources:
 
           def _update_codedeploy_group(event):
               # Accepts event directly or wrapped under 'input' (state machine passes "input.$": "$")
-              inp          = event.get('input', event)
-              region       = os.environ['AWS_REGION']
-              app_name   = inp.get('application_name', '')
-              stack_name = inp.get('server_stack_name', '')
+              inp            = event.get('input', event)
+              region         = os.environ['AWS_REGION']
+              app_name       = inp.get('application_name', '')
+              stack_name     = inp.get('server_stack_name', '')
+              app_stack_name = event.get('app_stack_name', '')
               if not app_name or not stack_name:
                   raise ValueError(
                       'application_name and server_stack_name are required '
@@ -852,9 +921,9 @@ Resources:
                   raise Exception(f'No deployment groups found for CodeDeploy application: {app_name}')
               dg_name = dg_names[0]
               logger.info(f'Discovered deployment group: {dg_name} (app={app_name})')
-              # ASG name has a random CFN suffix — discover via stack resources
-              asg_name = _find_asg_from_stack_name(region, stack_name)
-              logger.info(f'Discovered ASG: {asg_name} (stack_name contains={stack_name})')
+              # ASG resolution: prefer whatever CodeDeploy is already wired to over the
+              # CFN-stack resource lookup — see _resolve_current_asg for why.
+              asg_name = _resolve_current_asg(region, cd, app_name, dg_name, app_stack_name, stack_name)
               # Switch from Ec2TagFilters to AutoScalingGroups so lifecycle hooks fire on scale-out
               cd.update_deployment_group(
                   applicationName=app_name,
@@ -869,35 +938,122 @@ Resources:
                   'asg_name':              asg_name,
               }
 
-          def _find_asg_from_stack_name(region, stack_name):
-              """Find AppServerAutoScalingGroup physical ID from a CFN stack whose name contains stack_name."""
-              cf     = boto3.client('cloudformation', region_name=region)
-              target = None
-              kwargs = {'StackStatusFilter': [
-                  'CREATE_COMPLETE', 'UPDATE_COMPLETE', 'UPDATE_ROLLBACK_COMPLETE',
-              ]}
-              while True:
-                  resp = cf.list_stacks(**kwargs)
-                  for s in resp.get('StackSummaries', []):
-                      if stack_name in s['StackName']:
-                          target = s['StackName']
-                          break
-                  if target or not resp.get('NextToken'):
-                      break
-                  kwargs['NextToken'] = resp['NextToken']
-              if not target:
-                  raise Exception(f'No active CFN stack found containing: {stack_name}')
-              # Walk stack resources to find AppServerAutoScalingGroup logical resource
+          def _find_nested_stack_id(region, app_stack_name, stack_name):
+              """Return the physical stack ID of the nested stack logically named `stack_name`
+              (e.g. 'APIServerStack') inside the specific `app_stack_name` parent stack (e.g.
+              'pchc-tdr-ue2-pesonet20'). Used both to find AppServerAutoScalingGroup directly,
+              and to validate that an ASG CodeDeploy already has wired genuinely belongs to
+              THIS app before trusting it — see _resolve_current_asg."""
+              if not app_stack_name:
+                  raise ValueError('app_stack_name is required to resolve a nested stack by name')
+              cf = boto3.client('cloudformation', region_name=region)
               rk = {}
               while True:
-                  rr = cf.list_stack_resources(StackName=target, **rk)
+                  rr = cf.list_stack_resources(StackName=app_stack_name, **rk)
                   for res in rr.get('StackResourceSummaries', []):
-                      if res['LogicalResourceId'] == 'AppServerAutoScalingGroup':
+                      if res['LogicalResourceId'] == stack_name:
                           return res['PhysicalResourceId']
                   if not rr.get('NextToken'):
                       break
                   rk['NextToken'] = rr['NextToken']
-              raise Exception(f'AppServerAutoScalingGroup resource not found in stack: {target}')
+              raise Exception(
+                  f'Nested stack {stack_name!r} not found as a resource of parent stack: {app_stack_name}'
+              )
+
+          def _resolve_current_asg(region, cd, app_name, dg_name, app_stack_name, stack_name):
+              """Resolve the ASG to wire a deployment group to.
+
+              CodeDeploy blue/green deployments replace the original CFN-managed
+              AppServerAutoScalingGroup with a transient one it creates and owns
+              (named 'CodeDeploy_<deployment-group-id>_d-<deployment-id>'), then
+              re-points the deployment group at it. After the first blue/green
+              swap, the CFN stack resource lookup is stale and will return an ASG
+              that no longer exists (InvalidAutoScalingGroupException).
+
+              CodeDeploy's own deployment-group config is the source of truth for
+              "what ASG is live right now" — check that first. But existence alone
+              isn't enough: a deployment group can be wired to a completely different
+              app's ASG (seen in practice — pesonet20's api-application wired to ddp's
+              APIServerStack ASG, almost certainly left over from before app_stack_name
+              scoping existed), and that ASG genuinely exists, so a bare "does it exist"
+              check would keep trusting — and re-confirming — the wrong ASG forever.
+              CodeDeploy blue/green replacement ASGs inherit the original ASG's tags,
+              including CloudFormation's own aws:cloudformation:stack-name/stack-id tags,
+              so cross-check those against this app's actual nested stack before trusting
+              an already-wired candidate. Only fall back to the CFN stack walk when the
+              deployment group has no valid, correctly-owned ASG wired yet (first-ever
+              failover, still on Ec2TagFilters, or a wrongly-wired candidate got rejected).
+              """
+              asg_client        = boto3.client('autoscaling', region_name=region)
+              nested_stack_id   = _find_nested_stack_id(region, app_stack_name, stack_name)
+              nested_short_name = nested_stack_id.split('/')[1] if nested_stack_id.startswith('arn:') else nested_stack_id
+              dg_info           = cd.get_deployment_group(
+                  applicationName=app_name, deploymentGroupName=dg_name,
+              )['deploymentGroupInfo']
+              for entry in dg_info.get('autoScalingGroups', []):
+                  candidate = entry.get('name', '')
+                  if not candidate:
+                      continue
+                  resp   = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[candidate])
+                  groups = resp.get('AutoScalingGroups', [])
+                  if not groups:
+                      logger.warning(f'Deployment group references a dead ASG: {candidate} — ignoring')
+                      continue
+                  # Exact match only (stack-id ARN or short stack-name) — no substring
+                  # matching, which is exactly the class of bug that caused this in the
+                  # first place (a substring can match a different app's identically
+                  # logically-named nested stack).
+                  tags          = {t['Key']: t['Value'] for t in groups[0].get('Tags', [])}
+                  owning_id     = tags.get('aws:cloudformation:stack-id', '')
+                  owning_name   = tags.get('aws:cloudformation:stack-name', '')
+                  owned_by_this_app = (
+                      (owning_id and owning_id == nested_stack_id) or
+                      (owning_name and owning_name == nested_short_name)
+                  )
+                  if not owned_by_this_app:
+                      logger.warning(
+                          f'Deployment group is wired to {candidate}, but its CloudFormation '
+                          f'stack tags (stack-id={owning_id!r} stack-name={owning_name!r}) do '
+                          f'not match this app\'s nested stack ({nested_short_name!r}) — '
+                          f'ignoring, this ASG belongs to a different app.'
+                      )
+                      continue
+                  logger.info(f'Deployment group already wired to a live, verified ASG: {candidate}')
+                  return candidate
+              asg_name = _find_asg_from_stack_name(region, app_stack_name, stack_name)
+              logger.info(f'No valid live ASG on deployment group — discovered from stack: {asg_name} (app_stack_name={app_stack_name} stack_name={stack_name})')
+              return asg_name
+
+          def _find_asg_from_stack_name(region, app_stack_name, stack_name):
+              """Find the currently-live ASG for the nested stack logically named `stack_name`
+              (e.g. 'APIServerStack') within the specific `app_stack_name` parent stack (e.g.
+              'pchc-tdr-ue2-pesonet20') — searching by CloudFormation stack tag, not by
+              CloudFormation's own cached resource pointer for the logical
+              AppServerAutoScalingGroup resource.
+
+              That cached pointer goes stale the instant a CodeDeploy blue/green swap replaces
+              the ASG — CloudFormation never finds out its tracked ASG got superseded, so it
+              keeps returning the original (often already-deleted) ASG's name. CodeDeploy
+              blue/green replacement ASGs inherit the original ASG's tags, including
+              aws:cloudformation:stack-id/stack-name, so tag search reliably finds whichever
+              ASG is actually alive right now — original or replaced — and, critically, can
+              never cross into a different app's identically logically-named nested stack.
+              """
+              nested_stack_id   = _find_nested_stack_id(region, app_stack_name, stack_name)
+              nested_short_name = nested_stack_id.split('/')[1] if nested_stack_id.startswith('arn:') else nested_stack_id
+              asg_client = boto3.client('autoscaling', region_name=region)
+              paginator  = asg_client.get_paginator('describe_auto_scaling_groups')
+              for page in paginator.paginate():
+                  for group in page.get('AutoScalingGroups', []):
+                      tags        = {t['Key']: t['Value'] for t in group.get('Tags', [])}
+                      owning_id   = tags.get('aws:cloudformation:stack-id', '')
+                      owning_name = tags.get('aws:cloudformation:stack-name', '')
+                      if (owning_id and owning_id == nested_stack_id) or (owning_name and owning_name == nested_short_name):
+                          return group['AutoScalingGroupName']
+              raise Exception(
+                  f'No ASG found tagged with nested stack {nested_short_name!r} '
+                  f'(parent={app_stack_name}, logical id={stack_name!r}). Checked every ASG in region {region}.'
+              )
 
 
           # ── helpers ───────────────────────────────────────────────────────────
@@ -1162,10 +1318,26 @@ Resources:
                     {"Variable": "$.mode", "IsPresent": true},
                     {"Variable": "$.mode", "StringEquals": "ecs_app_group"}
                   ],
-                  "Next": "UpdateNetworkStack"
+                  "Next": "NormalizeWiringConfigs"
                 }
               ],
               "Default": "Discover"
+            },
+
+            "NormalizeWiringConfigs": {
+              "Comment": "codedeploy_wiring_configs is optional in the event payload — default to [] so ScaleASGs/CheckASGsHealthy can safely reference it later to resolve live, CodeDeploy-managed ASGs (the source of truth once a stack has drifted from CloudFormation via blue/green) without a missing-path runtime error.",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.codedeploy_wiring_configs", "IsPresent": true, "Next": "PrecheckNetworkStack"}
+              ],
+              "Default": "DefaultWiringConfigs"
+            },
+
+            "DefaultWiringConfigs": {
+              "Type": "Pass",
+              "Result": [],
+              "ResultPath": "$.codedeploy_wiring_configs",
+              "Next": "PrecheckNetworkStack"
             },
 
             "Discover": {
@@ -1185,9 +1357,31 @@ Resources:
                 "redshift_snapshot_identifier.$": "$.redshift_snapshot_identifier"
               },
               "ResultPath": "$.discovered",
-              "Next": "UpdateNetworkStack",
+              "Next": "NormalizeWiringConfigs",
               "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "PrecheckNetworkStack": {
+              "Comment": "Testing optimization — if the network stack is already UPDATE_COMPLETE with DeployPaidResources=true, skip the (slow) CFN update/wait/poll cycle entirely.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":      "check_stack_status",
+                "stack_name.$": "$.network_stack_name"
+              },
+              "ResultPath": "$.network_precheck",
+              "Next": "NetworkPrecheckRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "NetworkPrecheckRoute": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.network_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "RouteByMode"}
+              ],
+              "Default": "UpdateNetworkStack"
             },
 
             "UpdateNetworkStack": {
@@ -1249,6 +1443,28 @@ Resources:
                   ],
                   "Next": "UpdatePrereqStack"
                 }
+              ],
+              "Default": "PrecheckAppStackSnapshot"
+            },
+
+            "PrecheckAppStackSnapshot": {
+              "Comment": "Testing optimization — if the app stack is already UPDATE_COMPLETE with DeployPaidResources=true, skip the (slow) CFN update/wait/poll cycle entirely.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":      "check_stack_status",
+                "stack_name.$": "$.app_stack_name"
+              },
+              "ResultPath": "$.app_precheck",
+              "Next": "AppStackSnapshotPrecheckRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "AppStackSnapshotPrecheckRoute": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.app_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "WireCodeDeployRoute"}
               ],
               "Default": "UpdateAppStackSnapshot"
             },
@@ -1484,7 +1700,7 @@ Resources:
               "Type": "Pass",
               "Result": {"efs_id": ""},
               "ResultPath": "$.efs_result",
-              "Next": "UpdateAppStackPITR"
+              "Next": "PrecheckAppStackPITR"
             },
 
             "RestoreEFS": {
@@ -1529,9 +1745,31 @@ Resources:
             "EFSRestoreDone": {
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.efs_result.restore_complete", "BooleanEquals": true, "Next": "UpdateAppStackPITR"}
+                {"Variable": "$.efs_result.restore_complete", "BooleanEquals": true, "Next": "PrecheckAppStackPITR"}
               ],
               "Default": "WaitEFSRestore"
+            },
+
+            "PrecheckAppStackPITR": {
+              "Comment": "Testing optimization — if the app stack is already UPDATE_COMPLETE with DeployPaidResources=true, skip the (slow) CFN update/wait/poll cycle entirely.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":      "check_stack_status",
+                "stack_name.$": "$.app_stack_name"
+              },
+              "ResultPath": "$.app_precheck",
+              "Next": "AppStackPITRPrecheckRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "AppStackPITRPrecheckRoute": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.app_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "WireCodeDeployRoute"}
+              ],
+              "Default": "UpdateAppStackPITR"
             },
 
             "UpdateAppStackPITR": {
@@ -1620,16 +1858,22 @@ Resources:
               "Comment": "Switch each CodeDeploy deployment group from Ec2TagFilters to AutoScalingGroups. Clears tag filters so deployments are ASG-scoped only. Runs before ScaleASGs so lifecycle hooks fire as instances launch.",
               "Type": "Map",
               "ItemsPath": "$.codedeploy_wiring_configs",
+              "Parameters": {
+                "wiring_item.$":    "$$.Map.Item.Value",
+                "app_stack_name.$": "$.app_stack_name"
+              },
               "MaxConcurrency": 0,
               "Iterator": {
                 "StartAt": "WireOneGroup",
                 "States": {
                   "WireOneGroup": {
+                    "Comment": "app_stack_name scopes the fallback CFN nested-stack lookup to this specific app's root stack — without it, a bare server_stack_name (e.g. 'APIServerStack') can match another app's identically-named nested stack.",
                     "Type": "Task",
                     "Resource": "${LambdaFunction.Arn}",
                     "Parameters": {
-                      "action":  "update_codedeploy_group",
-                      "input.$": "$"
+                      "action":            "update_codedeploy_group",
+                      "input.$":           "$.wiring_item",
+                      "app_stack_name.$":  "$.app_stack_name"
                     },
                     "End": true,
                     "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 2, "BackoffRate": 2}],
@@ -1648,35 +1892,69 @@ Resources:
             },
 
             "ScaleASGs": {
-              "Comment": "App stack is UPDATE_COMPLETE — Launch Template now has the DR AMI. Scale each ASG to its target capacity. asg_configs: [{asg_name, min_size, desired_capacity, max_size}, ...]. Pass [] to skip.",
+              "Comment": "App stack is UPDATE_COMPLETE — Launch Template now has the DR AMI. Scale each ASG to its target capacity, in parallel (MaxConcurrency 0 = unlimited). asg_configs: [{asg_name, min_size, desired_capacity, max_size}, ...]. Pass [] to skip. Each iteration is fault-isolated — one ASG failing does not cancel the others (see SetOneASG's Catch), unlike a Map whose Catch routes to a Fail state, which would abort every still-running sibling iteration.",
               "Type": "Map",
               "ItemsPath": "$.asg_configs",
+              "Parameters": {
+                "asg_item.$":                  "$$.Map.Item.Value",
+                "codedeploy_wiring_configs.$": "$.codedeploy_wiring_configs",
+                "app_stack_name.$":            "$.app_stack_name"
+              },
               "MaxConcurrency": 0,
               "Iterator": {
                 "StartAt": "SetOneASG",
                 "States": {
                   "SetOneASG": {
-                    "Comment": "Pass full item as 'input' — asg_name may be absent when server_stack_name is used for auto-discovery.",
+                    "Comment": "asg_item may omit asg_name when server_stack_name is used for auto-discovery. codedeploy_wiring_configs and app_stack_name (enriched onto every map item via the Map state's own Parameters, since the Iterator's $ scope is otherwise limited to the array item) let the lambda resolve the live ASG through CodeDeploy — and scope the CFN fallback lookup to this app's own root stack, since every app nests an identically-named 'APIServerStack'/'TreasuryServerStack'/etc.",
                     "Type": "Task",
                     "Resource": "${LambdaFunction.Arn}",
                     "Parameters": {
-                      "action":  "set_asg_capacity",
-                      "input.$": "$"
+                      "action":                      "set_asg_capacity",
+                      "input.$":                     "$.asg_item",
+                      "codedeploy_wiring_configs.$": "$.codedeploy_wiring_configs",
+                      "app_stack_name.$":            "$.app_stack_name"
                     },
                     "End": true,
                     "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 2, "BackoffRate": 2}],
-                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneASGFailed", "ResultPath": "$.error"}]
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "OneASGCaughtError", "ResultPath": "$.error"}]
                   },
-                  "OneASGFailed": {
-                    "Type": "Fail",
-                    "Error": "ASGScalingFailed",
-                    "Cause": "Failed to update one ASG capacity — check CloudWatch Logs."
+                  "OneASGCaughtError": {
+                    "Comment": "Record the failure and end this branch normally (no Fail state) so sibling ASGs in the Map keep running instead of being cancelled. Reference the whole asg_item rather than a specific key — asg_name/server_stack_name are each optional (one or the other is used for discovery), so pulling one out directly with '.$' would throw if that key happens to be absent.",
+                    "Type": "Pass",
+                    "Parameters": {
+                      "failed":       true,
+                      "asg_item.$":   "$.asg_item",
+                      "error.$":      "$.error"
+                    },
+                    "End": true
                   }
                 }
               },
               "ResultPath": "$.asg_results",
-              "Next": "WaitForInstances",
+              "Next": "CheckScaleResults",
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "CheckScaleResults": {
+              "Comment": "All ASGs have been attempted (in parallel) regardless of per-item failures — now check whether any of them actually failed and stop the failover if so.",
+              "Type": "Task",
+              "Resource": "${LambdaFunction.Arn}",
+              "Parameters": {
+                "action":          "check_scale_results",
+                "asg_results.$":   "$.asg_results"
+              },
+              "ResultPath": "$.scale_check",
+              "Next": "ScaleResultsRoute",
+              "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2}],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
+            },
+
+            "ScaleResultsRoute": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.scale_check.all_succeeded", "BooleanEquals": true, "Next": "WaitForInstances"}
+              ],
+              "Default": "FailoverFailed"
             },
 
             "WaitForInstances": {
@@ -1691,8 +1969,10 @@ Resources:
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
-                "action":        "check_all_asgs_healthy",
-                "asg_configs.$": "$.asg_configs"
+                "action":                      "check_all_asgs_healthy",
+                "asg_configs.$":               "$.asg_configs",
+                "codedeploy_wiring_configs.$": "$.codedeploy_wiring_configs",
+                "app_stack_name.$":            "$.app_stack_name"
               },
               "ResultPath": "$.asg_health_result",
               "Next": "ASGsHealthyRoute",

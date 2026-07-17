@@ -580,6 +580,78 @@ def _handle_check_both_stacks_status(event: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Action: set_asg_capacity (failback teardown — mirrors dr-failover-v2's
+# set_asg_capacity action so ASGs are explicitly scaled to zero, not left at
+# their out-of-band failover capacity. CloudFormation alone will not do this:
+# pesonet20.yaml's ASGDesiredSize is a static !If [IsDR, 0, ...] that never
+# changes value across a failback UpdateStack, so CFN sees no diff on that
+# property and leaves the ASG's actual (drifted) capacity untouched.)
+# ---------------------------------------------------------------------------
+
+def _find_asg_from_stack_name(region: str, stack_name: str) -> str:
+    """Find AppServerAutoScalingGroup physical ID from a CFN stack whose name contains stack_name."""
+    cf = boto3.client('cloudformation', region_name=region)
+    target = None
+    kwargs = {'StackStatusFilter': [
+        'CREATE_COMPLETE', 'UPDATE_COMPLETE', 'UPDATE_ROLLBACK_COMPLETE',
+    ]}
+    while True:
+        resp = cf.list_stacks(**kwargs)
+        for s in resp.get('StackSummaries', []):
+            if stack_name in s['StackName']:
+                target = s['StackName']
+                break
+        if target or not resp.get('NextToken'):
+            break
+        kwargs['NextToken'] = resp['NextToken']
+    if not target:
+        raise Exception(f'No active CFN stack found containing: {stack_name}')
+    rk = {}
+    while True:
+        rr = cf.list_stack_resources(StackName=target, **rk)
+        for res in rr.get('StackResourceSummaries', []):
+            if res['LogicalResourceId'] == 'AppServerAutoScalingGroup':
+                return res['PhysicalResourceId']
+        if not rr.get('NextToken'):
+            break
+        rk['NextToken'] = rr['NextToken']
+    raise Exception(f'AppServerAutoScalingGroup resource not found in stack: {target}')
+
+
+def _handle_set_asg_capacity(event: dict) -> dict:
+    """Same action/defaults as dr-failover-v2's set_asg_capacity — min/desired/max
+    default to 0, so a failback asg_configs entry needs only asg_name or
+    server_stack_name to scale that ASG down."""
+    import os
+    inp              = event.get('input', event)
+    region           = os.environ.get('AWS_REGION', 'us-east-2')
+    asg_name         = inp.get('asg_name', '')
+    stack_name       = inp.get('server_stack_name', '')
+    min_size         = int(inp.get('min_size', 0))
+    desired_capacity = int(inp.get('desired_capacity', 0))
+    max_size         = int(inp.get('max_size', desired_capacity))
+    if not asg_name and not stack_name:
+        raise ValueError('asg_name or server_stack_name is required for set_asg_capacity')
+    if not asg_name:
+        asg_name = _find_asg_from_stack_name(region, stack_name)
+        logger.info("[SET_ASG_CAPACITY] Discovered ASG=%s | stack_name_contains=%s", asg_name, stack_name)
+    asg = boto3.client('autoscaling', region_name=region)
+    asg.update_auto_scaling_group(
+        AutoScalingGroupName=asg_name,
+        MinSize=min_size,
+        MaxSize=max_size,
+        DesiredCapacity=desired_capacity,
+    )
+    logger.info("[SET_ASG_CAPACITY] ASG=%s | min=%d desired=%d max=%d", asg_name, min_size, desired_capacity, max_size)
+    return {
+        'asg_name':         asg_name,
+        'min_size':         min_size,
+        'desired_capacity': desired_capacity,
+        'max_size':         max_size,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Action: PITR DB / EFS cleanup (failback for PITR-mode failovers)
 # ---------------------------------------------------------------------------
 # The PITR RDS instance and the AWS-Backup-restored EFS file system are both
@@ -766,6 +838,8 @@ def handler(event, context):
         return _handle_check_stack_status(event)
     if action == 'check_both_stacks_status':
         return _handle_check_both_stacks_status(event)
+    if action == 'set_asg_capacity':
+        return _handle_set_asg_capacity(event)
     if action == 'snapshot_pitr_db':
         return _handle_snapshot_pitr_db(event)
     if action == 'check_pitr_snapshot_status':
@@ -784,7 +858,7 @@ def handler(event, context):
     raise ValueError(
         f"action must be 'comment', 'uncomment', 'update_stack', "
         f"'set_deploy_paid_false', 'set_deploy_paid_false_both', "
-        f"'check_stack_status', 'check_both_stacks_status', "
+        f"'check_stack_status', 'check_both_stacks_status', 'set_asg_capacity', "
         f"'snapshot_pitr_db', 'check_pitr_snapshot_status', 'delete_pitr_db', "
         f"'check_pitr_db_deleted', 'delete_pitr_efs_mount_targets', "
         f"'check_pitr_efs_mount_targets_deleted', or "
