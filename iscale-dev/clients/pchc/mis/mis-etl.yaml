@@ -33,14 +33,6 @@ Metadata:
           - RedshiftUser
           - RedshiftDatabaseName
           - GlueEmailLambdaName
-      - Label:
-          default: Disaster Recovery
-        Parameters:
-          - DeployPaidResources
-          - EnableRedshiftSnapshotCopy
-          - SourceClusterArn
-          - SnapshotCopyRetentionPeriod
-          - RedshiftSnapshotIdentifier 
 
     ParameterLabels:
       Name:
@@ -75,16 +67,6 @@ Metadata:
         default: Stop Schedule CRON Expression
       EC2Image:
         default: Reports Queries Instance AMI
-      DeployPaidResources:
-        default: Deploy Paid Resources (false = DR standby, true = active/failover)
-      EnableRedshiftSnapshotCopy:
-        default: Enable Redshift Snapshot Copy for DR
-      SourceClusterArn:
-        default: Source Redshift Cluster ARN (live region)
-      SnapshotCopyRetentionPeriod:
-        default: Retention Period (days) for copied snapshots in DR region
-      RedshiftSnapshotIdentifier:
-        default: Redshift Snapshot Identifier (DR Failover)
 
 Parameters:
   Name:
@@ -109,10 +91,6 @@ Parameters:
       - Staging
       - Development
       - Test
-      - ProductionDR
-      - StagingDR
-      - DevelopmentDR
-      - TestDR
   DeletionProtection:
     Description: Set to true to enable (valid only in Production mode)
     Type: String
@@ -123,7 +101,7 @@ Parameters:
   NodeType:
     Description: The node size to be provisioned (Only ra3 instances support multi-node cluter type.)
     Type: String
-    Default: ra3.large
+    Default: dc2.large
     AllowedValues:
       - dc2.large
       - dc2.8xlarge
@@ -137,7 +115,7 @@ Parameters:
     Default: pchc-dev-uw2-mis-network
     MinLength: 1
   GlueEmailLambdaName:
-    Description: Name of Glue Email Lambda. Only used in live region (Pesonet20PostGlueUpsertLambda is not deployed in DR).
+    Description: Name of Glue Email Lambda
     Type: String
     Default: pchc-test-uw2-etl-email-notification
     MinLength: 1
@@ -178,45 +156,6 @@ Parameters:
     Description: Reports Queries Instance AMI
     Type: String
     Default: ami-079c0d2990b4033f4 # change depends on region, base AL2 image
-  DeployPaidResources:
-    Description: |
-      true (default): Deploy all paid resources — Redshift cluster and dependent resources. Normal operation for all environments.
-      false: DR standby mode — suppress all paid resources to minimize idle cost. Only CodeDeploy infra stays alive.
-      DR failover: set back to true and provide SnapshotIdentifier to restore DB from the cross-region backup.
-    Type: String
-    Default: 'true'
-    AllowedValues:
-      - 'true'
-      - 'false'
-  EnableRedshiftSnapshotCopy:
-    Description: Set to true in DR standby to enable cross-region snapshot copy from the live Redshift cluster
-    Type: String
-    Default: 'false'
-    AllowedValues:
-      - 'true'
-      - 'false'
-  SourceClusterArn:
-    Description: |
-      ARN of the live region Redshift cluster to copy snapshots from.
-      Format: arn:aws:redshift:<region>:<account-id>:cluster:<cluster-identifier>
-      Obtain from the live region Redshift console or RedshiftStack output.
-      Required when EnableRedshiftSnapshotCopy=true.
-    Type: String
-    Default: ''
-  SnapshotCopyRetentionPeriod:
-    Description: Number of days to retain copied snapshots in the DR region (1-35)
-    Type: Number
-    Default: 7
-    MinValue: 1
-    MaxValue: 35
-  RedshiftSnapshotIdentifier:
-    Description: |
-      (DR Failover only) Identifier of the Redshift snapshot to restore from.
-      Passed automatically by the dr-failover Lambda — leave blank for normal fresh cluster creation.
-      Do not change or clear this after a DR Failback restore — doing so triggers a
-      destructive replacement of the Redshift cluster (data loss).
-    Type: String
-    Default: ''
 
 Mappings:
   Fn::Transform:
@@ -229,29 +168,6 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
-  IsDR: !Or
-    - !Equals [!Ref EnvName, ProductionDR]
-    - !Equals [!Ref EnvName, StagingDR]
-    - !Equals [!Ref EnvName, DevelopmentDR]
-    - !Equals [!Ref EnvName, TestDR]
-  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
-  IsNotProdAndDeployPaidResources: !And
-    - Condition: IsNotProd
-    - Condition: IsDeployPaidResources
-  IsNotDevAndDeployPaidResources: !And
-    - Condition: IsNotDev
-    - Condition: IsDeployPaidResources
-  IsEnableRedshiftSnapshotCopy: !Equals [!Ref EnableRedshiftSnapshotCopy, 'true']
-  IsDRAndEnableRedshiftSnapshotCopy: !And
-    - Condition: IsDR
-    - Condition: IsEnableRedshiftSnapshotCopy
-  IsNotDRAndDeployPaidResources: !And
-    - Condition: IsDeployPaidResources
-    - !Not [Condition: IsDR]
-  IsNotProdAndDeployPaidResourcesAndNotDR: !And
-    - Condition: IsNotProd
-    - Condition: IsDeployPaidResources
-    - !Not [Condition: IsDR]
 
 Resources:
 
@@ -260,7 +176,6 @@ Resources:
 ##
 
   RedshiftStack:
-    Condition: IsDeployPaidResources
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/redshift.yaml
@@ -275,16 +190,14 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
         ClusterType: single-node
-        NodeType: !Ref NodeType
+        NodeType: !If [ IsProd, ra3.xlplus, dc2.large] # Only ra3 instances support multi-node cluter type (check ClusterType)
         NumberOfNodes: 1
         ClusterSubnet: !If [ IsProd, private, public]
-        SnapshotIdentifier: !Ref RedshiftSnapshotIdentifier
 
 ##
 # Security Group Section
 ##
   AllowLambdaToRedshift:
-    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from lambda
@@ -300,7 +213,6 @@ Resources:
           !Sub '${MisStackName}-MisLambdaSecurityGroupId'
   
   AllowJumphostToRedshift:
-    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from jumphost
@@ -316,7 +228,6 @@ Resources:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
 
   RedshiftSelfReferenceSecgroup:
-    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: self-referencing inbound rule for Redshift
@@ -333,7 +244,6 @@ Resources:
           - Outputs.RedshiftSecurityGroupIdExport
 
   AllowMisAppServerToRedshift:
-    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from MIS Appservers
@@ -383,7 +293,7 @@ Resources:
 # Role for Glue Query Scheduler. applicable only to uat and prod
 
   GlueQuerySchedulerRole:
-    Condition: IsNotDevAndDeployPaidResources
+    Condition: IsNotDev
     Type: AWS::IAM::Role
     Properties:
       Description: IAM Role for Glue Query Scheduler. This is also attached to Glue Cluster
@@ -418,7 +328,7 @@ Resources:
 # add inline policy to IAM user and/or role. 
 # IAM user and/or role need permission to view scheduled query history. Create multiple ManagedPolicy if needed.
   AllowViewQueryHistory:
-    Condition: IsNotDevAndDeployPaidResources
+    Condition: IsNotDev
     Type: AWS::IAM::ManagedPolicy
     Properties:
       Description: add inline policy to MasterAccountAccessRole
@@ -436,7 +346,7 @@ Resources:
 # Create a Custom Lambda to add GlueQuerySchedulerRole to Glue Cluster.
 
   LambdaExecutionRole:
-    Condition: IsNotDevAndDeployPaidResources
+    Condition: IsNotDev
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -464,7 +374,7 @@ Resources:
                 Resource: "*"
 
   AttachRoleLambda:
-    Condition: IsNotDevAndDeployPaidResources
+    Condition: IsNotDev
     Type: AWS::Lambda::Function
     Properties:
       Runtime: python3.12
@@ -504,7 +414,7 @@ Resources:
 
   # Custom Resource
   AttachIamRoleCustomResource:
-    Condition: IsNotDevAndDeployPaidResources
+    Condition: IsNotDev
     Type: Custom::AttachIamRole
     Properties:
       ServiceTimeout: 300
@@ -520,7 +430,7 @@ Resources:
   SchedulerStack:
     DependsOn:
       - RedshiftStack
-    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
+    Condition: IsNotProd
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -538,11 +448,8 @@ Resources:
 
 ###
 # Pesonet20 Post Glue upsert lambda
-# Deployed in live region only (IsNotDRAndDeployPaidResources).
-# No Glue jobs run in the DR region — source databases are in the live region only.
 ###
   Pesonet20PostGlueUpsertLambda:
-    Condition: IsNotDRAndDeployPaidResources
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-post-glue-upsert]]
@@ -637,7 +544,7 @@ Resources:
           def ensure_instance_healthy(force_restart=False):
               """
               Ensures the EC2 instance is running and the SSM agent is responding.
-              If force_restart=True, stops and restarts the instance first — used on
+              If force_restart=True, stops and restarts the instance first ? used on
               timeout retries to guarantee a clean state before the next SSM attempt.
               Restarts up to MAX_INSTANCE_RESTARTS additional times if SSM stays unresponsive.
               """
@@ -755,7 +662,6 @@ Resources:
           EMAIL_LAMBDA_NAME: !Ref GlueEmailLambdaName
 
   Pesonet20PostGlueUpsertLambdaRole:
-    Condition: IsNotDRAndDeployPaidResources
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -810,7 +716,6 @@ Resources:
                 Resource: "*"
   
   Pesonet20PostGlueUpsertSecurityGroup:
-    Condition: IsNotDRAndDeployPaidResources
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, pesonet20-post-glue-upsert-security-group]]
@@ -819,7 +724,6 @@ Resources:
           !Sub "${NetworkStackName}-VpcId"
   
   Pesonet20PostGlueUpsertSsmDocument:
-    Condition: IsNotDRAndDeployPaidResources
     Type: AWS::SSM::Document
     Properties:
       Content:
@@ -836,7 +740,7 @@ Resources:
             default: !Ref 'AWS::Region'
           RetryCount:
             type: "String"
-            description: "Retry attempt number — embedded so EventBridge can extract it on timeout"
+            description: "Retry attempt number ? embedded so EventBridge can extract it on timeout"
             default: "0"
         mainSteps:
           - action: aws:runShellScript
@@ -987,6 +891,29 @@ Resources:
                       ot.debtor_bic
                   FROM pesonet20.outward_transactions ot;
 
+                  -- >>> TG907: transaction_status_replies (pesonet20-only source; portal-channel
+                  -- status-applied time). CREATE IF NOT EXISTS makes this doc self-sufficient if
+                  -- seed.sql (run-reports-queries) has not created the table yet. outward_transaction_id
+                  -- MUST carry the same +101593671 offset as pesonet.outward_transactions.id so the FK
+                  -- join in the cutoff MVs still resolves.
+                  CREATE TABLE IF NOT EXISTS pesonet.transaction_status_replies (
+                      id INT PRIMARY KEY,
+                      outward_transaction_id INT,
+                      authorized_at TIMESTAMP
+                  );
+
+                  TRUNCATE pesonet.transaction_status_replies;
+                  INSERT INTO pesonet.transaction_status_replies (
+                      id,
+                      outward_transaction_id,
+                      authorized_at
+                  )
+                  SELECT
+                      id,
+                      outward_transaction_id + 101593671,
+                      authorized_at
+                  FROM pesonet20.transaction_status_replies;
+
                   -- Insert from pesonet20.rates with ID offset of +9
                   INSERT INTO pesonet.rates (
                       id,
@@ -1052,7 +979,6 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
 
   ReportsQueriesUserGroup:
-    Condition: IsDeployPaidResources
     Type: AWS::IAM::Group
     Properties:
       Policies:
@@ -1085,8 +1011,7 @@ Resources:
                   - ec2:DescribeInstanceStatus
                 Resource: "*"
 
-  ReportsQueriesRunCommand:
-    Condition: IsDeployPaidResources
+  ReportsQueriesRunCommand: 
     Type: AWS::SSM::Document
     Properties:
       Content:
@@ -1170,7 +1095,6 @@ Resources:
 ###
 
   ReportQueriesInstance:
-    Condition: IsDeployPaidResources
     Type: AWS::EC2::Instance
     Properties: 
       ImageId: !Ref EC2Image
@@ -1198,14 +1122,12 @@ Resources:
           Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, reports-queries]]
 
   ReportsQueriesIamProfile:
-    Condition: IsDeployPaidResources
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
         - Ref: ReportsQueriesIamRole
         
   ReportsQueriesIamRole:
-    Condition: IsDeployPaidResources
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -1237,7 +1159,6 @@ Resources:
           !Sub "${NetworkStackName}-VpcId"
 
   AllowReportsQueriesToRedshift:
-    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       Description: Allow connection from reports-queries-instance
@@ -1250,36 +1171,9 @@ Resources:
       ToPort: 5439
       SourceSecurityGroupId: !GetAtt ReportQueriesSecurityGroup.GroupId
 
-####
-# Disaster Recovery — Redshift Snapshot Replication
-# Resources below are deployed ONLY when EnableRedshiftSnapshotCopy=true and EnvName is a DR variant.
-# These run at zero cost in the DR region (Lambda custom resource only — no cluster).
-# They pre-configure snapshot copy so that a recent Redshift snapshot is available at failover time.
-####
-
-# Enables cross-region snapshot copy from the live Redshift cluster to this DR region.
-# The Lambda calls redshift:EnableSnapshotCopy on the live cluster cross-region (region parsed from SourceClusterArn),
-# so automated snapshots are continuously copied here on the cluster's snapshot schedule.
-# At failover, restore the Redshift cluster manually from the most recent copied snapshot
-# before updating the stack with DeployPaidResources=true.
-# On stack delete, the Lambda disables snapshot copy automatically.
-
-  RedshiftReplicationStack:
-    Condition: IsDRAndEnableRedshiftSnapshotCopy
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/redshift-replication.yaml
-      Parameters:
-        Name: !Ref Name
-        OrgName: !Ref OrgName
-        EnvName: !Ref EnvName
-        SourceClusterArn: !Ref SourceClusterArn
-        RetentionPeriod: !Ref SnapshotCopyRetentionPeriod
-
 Outputs:
 
   RedshiftSecurityGroupIdExport:
-    Condition: IsDeployPaidResources
     Description: The security group id of the Redshift
     Value:
       Fn::GetAtt:
@@ -1289,28 +1183,24 @@ Outputs:
       Name: !Sub ${AWS::StackName}-RedshiftSecurityGroupId
 
   Pesonet20PostGlueUpsertLambdaArn:
-    Condition: IsNotDRAndDeployPaidResources
     Description: ARN of Pesonet20 Post Glue Upsert Lambda
     Value: !GetAtt Pesonet20PostGlueUpsertLambda.Arn
     Export:
       Name: !Sub ${AWS::StackName}-Pesonet20PostGlueUpsertLambdaArn
 
   ReportsQueriesRunCommandDocumentName:
-    Condition: IsNotDRAndDeployPaidResources
     Description: SSM Document name for running reports queries
     Value: !Ref ReportsQueriesRunCommand
     Export:
       Name: !Sub ${AWS::StackName}-ReportsQueriesRunCommandDocumentName
   
   ReportsQueriesInstanceId:
-    Condition: IsNotDRAndDeployPaidResources
     Description: Instance ID of EC2 instance for running reports queries
     Value: !Ref ReportQueriesInstance
     Export:
       Name: !Sub ${AWS::StackName}-ReportsQueriesInstanceId
 
   Pesonet20PostGlueUpsertSsmDocumentName:
-    Condition: IsNotDRAndDeployPaidResources
     Description: SSM Document name for refreshing materialized views after pesonet20 upsert
     Value: !Ref Pesonet20PostGlueUpsertSsmDocument
     Export:
