@@ -6,7 +6,9 @@ AWSTemplateFormatVersion: 2010-09-09
 #   redshift_snapshot_identifier, snapshot_identifier, db_master_password,
 #   sns_topic_arn,
 #   asg_configs=[{asg_name OR server_stack_name, min_size, desired_capacity, max_size}, ...]
-#     asg_name: explicit ASG name; server_stack_name: substring match to auto-discover (pass [] to skip),
+#     asg_name: explicit ASG name; server_stack_name: logical stack id, auto-discovered by
+#       CFN tag content (aws:cloudformation:stack-id/stack-name) — not by ASG physical name,
+#       which changes on every CodeDeploy blue/green swap. See _discover_live_asg. (pass [] to skip)
 #   codedeploy_wiring_configs=[{application_name, server_stack_prefix}, ...]
 #     application_name: full CodeDeploy app name, pattern {org}-{env}-{region}-{name}-application
 #       e.g. pchc-tdr-ue2-pesonet20-tre-application
@@ -697,48 +699,20 @@ Resources:
 
           # ── set_asg_capacity ─────────────────────────────────────────────────
 
-          def _lookup_wired_app_name(wiring_configs, stack_name):
-              """Resolve application_name for a server_stack_name from codedeploy_wiring_configs.
-
-              Once CodeDeploy has done a blue/green swap for a stack, its ASG is created and
-              owned by CodeDeploy directly — CloudFormation's AppServerAutoScalingGroup pointer
-              for that stack is permanently stale (drifted) and must not be treated as the
-              source of truth. This lets set_asg_capacity/check_all_asgs_healthy resolve the
-              live ASG via CodeDeploy automatically, without every asg_configs entry having to
-              duplicate application_name (callers already provide it once, in
-              codedeploy_wiring_configs).
-              """
-              for w in wiring_configs or []:
-                  if w.get('server_stack_name') == stack_name:
-                      return w.get('application_name', '')
-              return ''
-
           def _set_asg_capacity(event):
               inp              = event.get('input', event)
               region           = os.environ['AWS_REGION']
               asg_name         = inp.get('asg_name') or ''
               stack_name       = inp.get('server_stack_name', '')
               app_stack_name   = event.get('app_stack_name', '')
-              wiring_configs   = event.get('codedeploy_wiring_configs') or []
-              app_name         = inp.get('application_name') or _lookup_wired_app_name(wiring_configs, stack_name)
               min_size         = int(inp.get('min_size', 0))
               desired_capacity = int(inp.get('desired_capacity', 0))
               max_size         = int(inp.get('max_size', desired_capacity))
               if not asg_name and not stack_name:
                   raise ValueError('asg_name or server_stack_name is required for set_asg_capacity')
               if not asg_name:
-                  # CodeDeploy is the source of truth once a stack has drifted from
-                  # CloudFormation via blue/green. Only fall back to the CFN stack resource
-                  # lookup when no CodeDeploy application is wired for this stack yet
-                  # (first-ever failover, still on Ec2TagFilters).
-                  if app_name:
-                      cd       = boto3.client('codedeploy', region_name=region)
-                      dg_names = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
-                      if dg_names:
-                          asg_name = _resolve_current_asg(region, cd, app_name, dg_names[0], app_stack_name, stack_name)
-                  if not asg_name:
-                      asg_name = _find_asg_from_stack_name(region, app_stack_name, stack_name)
-                  logger.info(f'Discovered ASG: {asg_name} (app_stack_name={app_stack_name} stack_name={stack_name} application_name={app_name})')
+                  asg_name = _discover_live_asg(region, app_stack_name, stack_name)
+                  logger.info(f'Discovered ASG: {asg_name} (app_stack_name={app_stack_name} stack_name={stack_name})')
               if not asg_name:
                   raise Exception(f'Could not resolve an ASG name for stack_name={stack_name} application_name={app_name}')
               asg = boto3.client('autoscaling', region_name=region)
@@ -763,7 +737,6 @@ Resources:
               """Poll all ASGs in asg_configs until desired instances reach InService."""
               region         = os.environ['AWS_REGION']
               asg_configs    = event.get('asg_configs', [])
-              wiring_configs = event.get('codedeploy_wiring_configs') or []
               app_stack_name = event.get('app_stack_name', '')
               asg_client     = boto3.client('autoscaling', region_name=region)
               all_healthy = True
@@ -771,21 +744,12 @@ Resources:
               for cfg in asg_configs:
                   asg_name   = cfg.get('asg_name') or ''
                   stack_name = cfg.get('server_stack_name', '')
-                  app_name   = cfg.get('application_name') or _lookup_wired_app_name(wiring_configs, stack_name)
                   desired    = int(cfg.get('desired_capacity', 0))
                   if desired == 0:
                       results.append({'asg_name': asg_name or stack_name, 'desired': 0, 'in_service': 0, 'healthy': True})
                       continue
                   if not asg_name:
-                      # CodeDeploy is the source of truth once a stack has drifted from
-                      # CloudFormation via blue/green — CFN lookup is only a bootstrap fallback.
-                      if app_name:
-                          cd       = boto3.client('codedeploy', region_name=region)
-                          dg_names = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
-                          if dg_names:
-                              asg_name = _resolve_current_asg(region, cd, app_name, dg_names[0], app_stack_name, stack_name)
-                      if not asg_name:
-                          asg_name = _find_asg_from_stack_name(region, app_stack_name, stack_name)
+                      asg_name = _discover_live_asg(region, app_stack_name, stack_name)
                   resp       = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
                   group      = resp['AutoScalingGroups'][0]
                   in_service = len([i for i in group['Instances'] if i['LifecycleState'] == 'InService'])
@@ -921,9 +885,8 @@ Resources:
                   raise Exception(f'No deployment groups found for CodeDeploy application: {app_name}')
               dg_name = dg_names[0]
               logger.info(f'Discovered deployment group: {dg_name} (app={app_name})')
-              # ASG resolution: prefer whatever CodeDeploy is already wired to over the
-              # CFN-stack resource lookup — see _resolve_current_asg for why.
-              asg_name = _resolve_current_asg(region, cd, app_name, dg_name, app_stack_name, stack_name)
+              # ASG resolution is pure tag discovery — see _discover_live_asg for why.
+              asg_name = _discover_live_asg(region, app_stack_name, stack_name)
               # Switch from Ec2TagFilters to AutoScalingGroups so lifecycle hooks fire on scale-out
               cd.update_deployment_group(
                   applicationName=app_name,
@@ -938,122 +901,58 @@ Resources:
                   'asg_name':              asg_name,
               }
 
-          def _find_nested_stack_id(region, app_stack_name, stack_name):
-              """Return the physical stack ID of the nested stack logically named `stack_name`
-              (e.g. 'APIServerStack') inside the specific `app_stack_name` parent stack (e.g.
-              'pchc-tdr-ue2-pesonet20'). Used both to find AppServerAutoScalingGroup directly,
-              and to validate that an ASG CodeDeploy already has wired genuinely belongs to
-              THIS app before trusting it — see _resolve_current_asg."""
-              if not app_stack_name:
-                  raise ValueError('app_stack_name is required to resolve a nested stack by name')
-              cf = boto3.client('cloudformation', region_name=region)
-              rk = {}
-              while True:
-                  rr = cf.list_stack_resources(StackName=app_stack_name, **rk)
-                  for res in rr.get('StackResourceSummaries', []):
-                      if res['LogicalResourceId'] == stack_name:
-                          return res['PhysicalResourceId']
-                  if not rr.get('NextToken'):
-                      break
-                  rk['NextToken'] = rr['NextToken']
-              raise Exception(
-                  f'Nested stack {stack_name!r} not found as a resource of parent stack: {app_stack_name}'
-              )
+          def _discover_live_asg(region, app_stack_name, stack_name):
+              """Find the currently-live ASG for a logical server stack (e.g. 'APIServerStack')
+              by TAG VALUE content only — never by the ASG's own physical name, and never by
+              asking CodeDeploy or walking CFN stack resources.
 
-          def _resolve_current_asg(region, cd, app_name, dg_name, app_stack_name, stack_name):
-              """Resolve the ASG to wire a deployment group to.
+              ASG names are not stable: CodeDeploy blue/green replaces the original CFN-managed
+              ASG with one it names itself ('CodeDeploy_<deployment-group-id>_d-<deployment-id>'),
+              and every subsequent deployment renames it again to a new deployment ID — that name
+              has no relationship to the app or logical stack it belongs to. What IS stable is
+              that CodeDeploy's replacement ASG inherits the original ASG's tags verbatim,
+              including aws:cloudformation:stack-id/stack-name (e.g.
+              'pchc-tdr-ue2-pesonet20-APIServerStack-<suffix>') — so tag content reliably
+              identifies ownership across any number of swaps, whether the ASG is still
+              CFN-native or long since replaced.
 
-              CodeDeploy blue/green deployments replace the original CFN-managed
-              AppServerAutoScalingGroup with a transient one it creates and owns
-              (named 'CodeDeploy_<deployment-group-id>_d-<deployment-id>'), then
-              re-points the deployment group at it. After the first blue/green
-              swap, the CFN stack resource lookup is stale and will return an ASG
-              that no longer exists (InvalidAutoScalingGroupException).
+              Matching requires BOTH app_stack_name and stack_name to appear in some tag value:
+              app_stack_name alone would false-match a different app's identically-named nested
+              stack (seen in practice — pesonet20 wired to ddp's APIServerStack); stack_name
+              alone would match every app that happens to have an 'APIServerStack'.
 
-              CodeDeploy's own deployment-group config is the source of truth for
-              "what ASG is live right now" — check that first. But existence alone
-              isn't enough: a deployment group can be wired to a completely different
-              app's ASG (seen in practice — pesonet20's api-application wired to ddp's
-              APIServerStack ASG, almost certainly left over from before app_stack_name
-              scoping existed), and that ASG genuinely exists, so a bare "does it exist"
-              check would keep trusting — and re-confirming — the wrong ASG forever.
-              CodeDeploy blue/green replacement ASGs inherit the original ASG's tags,
-              including CloudFormation's own aws:cloudformation:stack-name/stack-id tags,
-              so cross-check those against this app's actual nested stack before trusting
-              an already-wired candidate. Only fall back to the CFN stack walk when the
-              deployment group has no valid, correctly-owned ASG wired yet (first-ever
-              failover, still on Ec2TagFilters, or a wrongly-wired candidate got rejected).
+              If more than one ASG matches (e.g. a stale pre-swap ASG lingering alongside its
+              CodeDeploy replacement during a blue/green transition), the most recently created
+              one is chosen and the rest are logged as stale candidates.
               """
-              asg_client        = boto3.client('autoscaling', region_name=region)
-              nested_stack_id   = _find_nested_stack_id(region, app_stack_name, stack_name)
-              nested_short_name = nested_stack_id.split('/')[1] if nested_stack_id.startswith('arn:') else nested_stack_id
-              dg_info           = cd.get_deployment_group(
-                  applicationName=app_name, deploymentGroupName=dg_name,
-              )['deploymentGroupInfo']
-              for entry in dg_info.get('autoScalingGroups', []):
-                  candidate = entry.get('name', '')
-                  if not candidate:
-                      continue
-                  resp   = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[candidate])
-                  groups = resp.get('AutoScalingGroups', [])
-                  if not groups:
-                      logger.warning(f'Deployment group references a dead ASG: {candidate} — ignoring')
-                      continue
-                  # Exact match only (stack-id ARN or short stack-name) — no substring
-                  # matching, which is exactly the class of bug that caused this in the
-                  # first place (a substring can match a different app's identically
-                  # logically-named nested stack).
-                  tags          = {t['Key']: t['Value'] for t in groups[0].get('Tags', [])}
-                  owning_id     = tags.get('aws:cloudformation:stack-id', '')
-                  owning_name   = tags.get('aws:cloudformation:stack-name', '')
-                  owned_by_this_app = (
-                      (owning_id and owning_id == nested_stack_id) or
-                      (owning_name and owning_name == nested_short_name)
-                  )
-                  if not owned_by_this_app:
-                      logger.warning(
-                          f'Deployment group is wired to {candidate}, but its CloudFormation '
-                          f'stack tags (stack-id={owning_id!r} stack-name={owning_name!r}) do '
-                          f'not match this app\'s nested stack ({nested_short_name!r}) — '
-                          f'ignoring, this ASG belongs to a different app.'
-                      )
-                      continue
-                  logger.info(f'Deployment group already wired to a live, verified ASG: {candidate}')
-                  return candidate
-              asg_name = _find_asg_from_stack_name(region, app_stack_name, stack_name)
-              logger.info(f'No valid live ASG on deployment group — discovered from stack: {asg_name} (app_stack_name={app_stack_name} stack_name={stack_name})')
-              return asg_name
-
-          def _find_asg_from_stack_name(region, app_stack_name, stack_name):
-              """Find the currently-live ASG for the nested stack logically named `stack_name`
-              (e.g. 'APIServerStack') within the specific `app_stack_name` parent stack (e.g.
-              'pchc-tdr-ue2-pesonet20') — searching by CloudFormation stack tag, not by
-              CloudFormation's own cached resource pointer for the logical
-              AppServerAutoScalingGroup resource.
-
-              That cached pointer goes stale the instant a CodeDeploy blue/green swap replaces
-              the ASG — CloudFormation never finds out its tracked ASG got superseded, so it
-              keeps returning the original (often already-deleted) ASG's name. CodeDeploy
-              blue/green replacement ASGs inherit the original ASG's tags, including
-              aws:cloudformation:stack-id/stack-name, so tag search reliably finds whichever
-              ASG is actually alive right now — original or replaced — and, critically, can
-              never cross into a different app's identically logically-named nested stack.
-              """
-              nested_stack_id   = _find_nested_stack_id(region, app_stack_name, stack_name)
-              nested_short_name = nested_stack_id.split('/')[1] if nested_stack_id.startswith('arn:') else nested_stack_id
+              if not app_stack_name or not stack_name:
+                  raise ValueError('app_stack_name and stack_name are required to discover an ASG')
               asg_client = boto3.client('autoscaling', region_name=region)
               paginator  = asg_client.get_paginator('describe_auto_scaling_groups')
+              candidates = []
               for page in paginator.paginate():
                   for group in page.get('AutoScalingGroups', []):
-                      tags        = {t['Key']: t['Value'] for t in group.get('Tags', [])}
-                      owning_id   = tags.get('aws:cloudformation:stack-id', '')
-                      owning_name = tags.get('aws:cloudformation:stack-name', '')
-                      if (owning_id and owning_id == nested_stack_id) or (owning_name and owning_name == nested_short_name):
-                          return group['AutoScalingGroupName']
-              raise Exception(
-                  f'No ASG found tagged with nested stack {nested_short_name!r} '
-                  f'(parent={app_stack_name}, logical id={stack_name!r}). Checked every ASG in region {region}.'
-              )
+                      values         = [t.get('Value', '') for t in group.get('Tags', [])]
+                      owned_by_app   = any(app_stack_name in v for v in values)
+                      owned_by_stack = any(f'-{stack_name}-' in v or v.endswith(f'-{stack_name}') for v in values)
+                      if owned_by_app and owned_by_stack:
+                          candidates.append(group)
+              if not candidates:
+                  raise Exception(
+                      f'No ASG found tagged for app_stack_name={app_stack_name!r} stack_name={stack_name!r}. '
+                      f'Checked every ASG in region {region} by tag value, not by name.'
+                  )
+              if len(candidates) > 1:
+                  names = [c['AutoScalingGroupName'] for c in candidates]
+                  logger.warning(
+                      f'{len(candidates)} ASGs matched app_stack_name={app_stack_name!r} '
+                      f'stack_name={stack_name!r}: {names} — a stale pre-swap ASG may still '
+                      f'exist. Picking the most recently created.'
+                  )
+              candidates.sort(key=lambda g: g.get('CreatedTime'), reverse=True)
+              chosen = candidates[0]['AutoScalingGroupName']
+              logger.info(f'Discovered live ASG by tag: {chosen} (app_stack_name={app_stack_name} stack_name={stack_name})')
+              return chosen
 
 
           # ── helpers ───────────────────────────────────────────────────────────
@@ -1896,23 +1795,21 @@ Resources:
               "Type": "Map",
               "ItemsPath": "$.asg_configs",
               "Parameters": {
-                "asg_item.$":                  "$$.Map.Item.Value",
-                "codedeploy_wiring_configs.$": "$.codedeploy_wiring_configs",
-                "app_stack_name.$":            "$.app_stack_name"
+                "asg_item.$":       "$$.Map.Item.Value",
+                "app_stack_name.$": "$.app_stack_name"
               },
               "MaxConcurrency": 0,
               "Iterator": {
                 "StartAt": "SetOneASG",
                 "States": {
                   "SetOneASG": {
-                    "Comment": "asg_item may omit asg_name when server_stack_name is used for auto-discovery. codedeploy_wiring_configs and app_stack_name (enriched onto every map item via the Map state's own Parameters, since the Iterator's $ scope is otherwise limited to the array item) let the lambda resolve the live ASG through CodeDeploy — and scope the CFN fallback lookup to this app's own root stack, since every app nests an identically-named 'APIServerStack'/'TreasuryServerStack'/etc.",
+                    "Comment": "asg_item may omit asg_name when server_stack_name is used for auto-discovery. app_stack_name (enriched onto every map item via the Map state's own Parameters, since the Iterator's $ scope is otherwise limited to the array item) lets the lambda discover the live ASG by CFN stack tag content alone (see _discover_live_asg) — no CodeDeploy lookup, no per-branch CFN resource walk, so every iteration is a single cheap API call and genuinely runs in parallel.",
                     "Type": "Task",
                     "Resource": "${LambdaFunction.Arn}",
                     "Parameters": {
-                      "action":                      "set_asg_capacity",
-                      "input.$":                     "$.asg_item",
-                      "codedeploy_wiring_configs.$": "$.codedeploy_wiring_configs",
-                      "app_stack_name.$":            "$.app_stack_name"
+                      "action":           "set_asg_capacity",
+                      "input.$":          "$.asg_item",
+                      "app_stack_name.$": "$.app_stack_name"
                     },
                     "End": true,
                     "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 2, "BackoffRate": 2}],
@@ -1969,10 +1866,9 @@ Resources:
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
-                "action":                      "check_all_asgs_healthy",
-                "asg_configs.$":               "$.asg_configs",
-                "codedeploy_wiring_configs.$": "$.codedeploy_wiring_configs",
-                "app_stack_name.$":            "$.app_stack_name"
+                "action":           "check_all_asgs_healthy",
+                "asg_configs.$":    "$.asg_configs",
+                "app_stack_name.$": "$.app_stack_name"
               },
               "ResultPath": "$.asg_health_result",
               "Next": "ASGsHealthyRoute",
