@@ -906,30 +906,44 @@ Resources:
 
           def _discover_live_asg(region, app_stack_name, tag_suffix):
               """Find the currently-live ASG for one app-server role (e.g. 'api', 'tre', 'skiq',
-              'cs') by TAG VALUE content only — never by the ASG's own physical name, and never
-              by asking CodeDeploy or walking CFN stack resources.
+              'cs') by its LAUNCH TEMPLATE NAME — never by the ASG's own physical name, and
+              never by asking CodeDeploy or walking CFN stack resources.
 
               ASG names are not stable: CodeDeploy blue/green replaces the original CFN-managed
               ASG with one it names itself ('CodeDeploy_<deployment-group-id>_d-<deployment-id>'),
               and every subsequent deployment renames it again to a new deployment ID — that name
               has no relationship to the app or role it belongs to.
 
-              The CFN nested-stack logical id (e.g. 'APIServerStack') is NOT a usable match key:
-              appserver-basic2.yaml's own Name tag is built as
-              '<OrgName>-<EnvShort>-<RegionShort>-<Name>-<suffix>' (e.g.
-              'pchc-tdr-ue2-pesonet20-api') using the short role suffix passed as a template
-              parameter — the logical id never appears in any tag on the ASG. AWS CloudFormation
-              also does not auto-tag Auto Scaling Groups with aws:cloudformation:stack-id/
-              stack-name (a long-standing exception to its automatic resource tagging), so
-              there's no CFN-derived fallback tag either. The role suffix in that Name tag is
-              the only thing that's both present and stable across any number of CodeDeploy
-              swaps (CodeDeploy inherits the original ASG's tags verbatim on replacement).
+              Tags are NOT a reliable match key either — confirmed against live pesonet20
+              resources in us-east-2:
+              - CFN auto-tags (aws:cloudformation:stack-id/stack-name, which would otherwise
+                embed the nested stack's logical id e.g. 'TreasuryServerStack') are present on
+                some CFN-native ASGs but were found completely absent from others (e.g. the live
+                TreasuryServerStack ASG has no aws:cloudformation:* tags at all despite being
+                CFN-native by name) — apparently dropped on some AutoScalingReplacingUpdate
+                replacements, not just on CodeDeploy swaps.
+              - The custom 'Name' tag (built by appserver-basic2.yaml as
+                '<OrgName>-<EnvShort>-<RegionShort>-<Name>-<suffix>') can carry stale/wrong data:
+                the live TreasuryServerStack ASG's Name tag reads '...-pesonet20-cs', not
+                '...-pesonet20-tre' — real drift between a past deploy and the current template.
+              - CodeDeploy blue/green replacement ASGs only inherit the plain custom Tags
+                (Name/Environment/Organization/System), not the 'aws:'-namespaced CFN tags
+                (CloudFormation is the only caller allowed to set those).
+
+              LaunchTemplate.LaunchTemplateName IS reliable: appserver-basic2.yaml names it
+              '<OrgName>-<EnvShort>-<RegionShort>-<Name>-<suffix>-LaunchTemplate', it's a real
+              resource reference (not a freeform tag someone can mistype or that can silently
+              drop), and it survives CodeDeploy blue/green — the replacement ASG launches
+              instances from the same Launch Template as the original. Confirmed directly
+              against all four pesonet20 app-server ASGs (cs/skiq/tre, still CFN-native, and
+              api, already CodeDeploy-swapped) — every one's LaunchTemplateName correctly
+              encodes '<app_stack_name>-<suffix>-LaunchTemplate' even where its tags did not.
 
               Matching requires BOTH app_stack_name and '<app_stack_name>-<tag_suffix>' (with a
-              word boundary after the suffix) to appear in some tag value: app_stack_name alone
-              would false-match a different app's identically-suffixed ASG (seen in practice —
-              pesonet20 wired to ddp's api ASG); the bare suffix alone would match every app
-              that happens to have an 'api' role.
+              word boundary after the suffix) to appear in the LaunchTemplateName: app_stack_name
+              alone would false-match a different app's identically-suffixed ASG (seen in
+              practice — pesonet20 wired to ddp's api ASG); the bare suffix alone would match
+              every app that happens to have an 'api' role.
 
               If more than one ASG matches (e.g. a stale pre-swap ASG lingering alongside its
               CodeDeploy replacement during a blue/green transition), the most recently created
@@ -944,14 +958,19 @@ Resources:
               candidates = []
               for page in paginator.paginate():
                   for group in page.get('AutoScalingGroups', []):
-                      values = [t.get('Value', '') for t in group.get('Tags', [])]
-                      if any(pattern.search(v) for v in values):
+                      lt_spec = group.get('LaunchTemplate')
+                      if not lt_spec:
+                          mip = group.get('MixedInstancesPolicy') or {}
+                          lt_spec = ((mip.get('LaunchTemplate') or {})
+                                     .get('LaunchTemplateSpecification'))
+                      lt_name = (lt_spec or {}).get('LaunchTemplateName', '')
+                      if lt_name and pattern.search(lt_name):
                           candidates.append(group)
               if not candidates:
                   raise Exception(
-                      f'No ASG found tagged for app_stack_name={app_stack_name!r} tag_suffix={tag_suffix!r} '
-                      f'(looked for a tag value matching "{app_stack_name}-{tag_suffix}"). '
-                      f'Checked every ASG in region {region} by tag value, not by name.'
+                      f'No ASG found with a LaunchTemplateName matching app_stack_name={app_stack_name!r} '
+                      f'tag_suffix={tag_suffix!r} (looked for "{app_stack_name}-{tag_suffix}-LaunchTemplate"). '
+                      f'Checked every ASG in region {region} by Launch Template name, not by ASG name or tags.'
                   )
               if len(candidates) > 1:
                   names = [c['AutoScalingGroupName'] for c in candidates]
@@ -962,7 +981,7 @@ Resources:
                   )
               candidates.sort(key=lambda g: g.get('CreatedTime'), reverse=True)
               chosen = candidates[0]['AutoScalingGroupName']
-              logger.info(f'Discovered live ASG by tag: {chosen} (app_stack_name={app_stack_name} tag_suffix={tag_suffix})')
+              logger.info(f'Discovered live ASG by LaunchTemplateName: {chosen} (app_stack_name={app_stack_name} tag_suffix={tag_suffix})')
               return chosen
 
 
