@@ -719,6 +719,22 @@ Resources:
               if not asg_name:
                   raise Exception(f'Could not resolve an ASG name for tag_suffix={tag_suffix}')
               asg = boto3.client('autoscaling', region_name=region)
+              # Freeze dynamic scaling BEFORE setting DR capacity. Idle DR app servers sit
+              # near 0% CPU, so a CPU target-tracking policy's AlarmLow (and any Scheduler
+              # stack "stop" schedule) would otherwise claw the group back down to MinSize
+              # within minutes — CheckASGsHealthy would then never see the desired count
+              # InService and the failover would poll until the state machine's 1-year cap.
+              # Suspend only AlarmNotification + ScheduledActions; Launch/Terminate/HealthCheck
+              # stay active so the group can still reach the capacity we set. Resumed
+              # implicitly at failback teardown (ASG desired=0 / stack delete).
+              try:
+                  asg.suspend_processes(
+                      AutoScalingGroupName=asg_name,
+                      ScalingProcesses=['AlarmNotification', 'ScheduledActions'],
+                  )
+                  logger.info(f'Suspended AlarmNotification/ScheduledActions on {asg_name}')
+              except ClientError:
+                  logger.warning(f'Could not suspend scaling processes on {asg_name}', exc_info=True)
               asg.update_auto_scaling_group(
                   AutoScalingGroupName=asg_name,
                   MinSize=min_size,
@@ -737,10 +753,14 @@ Resources:
           # ── check_all_asgs_healthy ───────────────────────────────────────────
 
           def _check_all_asgs_healthy(event):
-              """Poll all ASGs in asg_configs until desired instances reach InService."""
+              """Poll all ASGs in asg_configs until desired instances reach InService.
+              Returns an incremented 'attempts' counter so ASGsHealthyRoute can bound this
+              poll loop and fail fast (HealthCheckTimedOut) instead of retrying for the whole
+              execution lifetime if a group never reaches its target."""
               region         = os.environ['AWS_REGION']
               asg_configs    = event.get('asg_configs', [])
               app_stack_name = event.get('app_stack_name', '')
+              attempt        = int(event.get('attempt', 0))
               asg_client     = boto3.client('autoscaling', region_name=region)
               all_healthy = True
               results     = []
@@ -761,8 +781,8 @@ Resources:
                       all_healthy = False
                   logger.info(f'ASG {asg_name}: desired={desired} in_service={in_service} healthy={healthy}')
                   results.append({'asg_name': asg_name, 'desired': desired, 'in_service': in_service, 'healthy': healthy})
-              logger.info(f'All ASGs healthy: {all_healthy}')
-              return {'all_healthy': all_healthy, 'asg_health': results}
+              logger.info(f'All ASGs healthy: {all_healthy} (attempt {attempt + 1})')
+              return {'all_healthy': all_healthy, 'asg_health': results, 'attempts': attempt + 1}
 
 
           # ── check_scale_results ───────────────────────────────────────────────
@@ -1879,9 +1899,17 @@ Resources:
             "ScaleResultsRoute": {
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.scale_check.all_succeeded", "BooleanEquals": true, "Next": "WaitForInstances"}
+                {"Variable": "$.scale_check.all_succeeded", "BooleanEquals": true, "Next": "InitHealthPoll"}
               ],
               "Default": "FailoverFailed"
+            },
+
+            "InitHealthPoll": {
+              "Comment": "Seed the health-poll attempt counter so ASGsHealthyRoute can bound the WaitForInstances/CheckASGsHealthy loop instead of retrying forever.",
+              "Type": "Pass",
+              "Result": {"attempts": 0},
+              "ResultPath": "$.asg_health_result",
+              "Next": "WaitForInstances"
             },
 
             "WaitForInstances": {
@@ -1898,7 +1926,8 @@ Resources:
               "Parameters": {
                 "action":           "check_all_asgs_healthy",
                 "asg_configs.$":    "$.asg_configs",
-                "app_stack_name.$": "$.app_stack_name"
+                "app_stack_name.$": "$.app_stack_name",
+                "attempt.$":        "$.asg_health_result.attempts"
               },
               "ResultPath": "$.asg_health_result",
               "Next": "ASGsHealthyRoute",
@@ -1907,10 +1936,11 @@ Resources:
             },
 
             "ASGsHealthyRoute": {
-              "Comment": "Proceed to CodeDeploy only once all ASGs have their desired instances InService.",
+              "Comment": "Proceed to CodeDeploy only once all ASGs have their desired instances InService. Bounded by attempts so a group that never reaches capacity (a scaling policy fighting the DR target, or instances failing to launch) fails fast instead of looping for the state machine's lifetime.",
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.asg_health_result.all_healthy", "BooleanEquals": true, "Next": "PostScaleRoute"}
+                {"Variable": "$.asg_health_result.all_healthy", "BooleanEquals": true, "Next": "PostScaleRoute"},
+                {"Variable": "$.asg_health_result.attempts", "NumericGreaterThanEquals": 30, "Next": "HealthCheckTimedOut"}
               ],
               "Default": "WaitForInstances"
             },
@@ -2006,6 +2036,12 @@ Resources:
 
             "Complete": {
               "Type": "Succeed"
+            },
+
+            "HealthCheckTimedOut": {
+              "Type": "Fail",
+              "Error": "ASGHealthCheckTimedOut",
+              "Cause": "ASGs did not reach their desired InService capacity within the poll budget (30 attempts, ~30 min). Likely a dynamic scaling policy scaling instances back down, or instances failing to launch / health-check. Check the check_all_asgs_healthy Lambda logs and the ASG scaling activities."
             },
 
             "FailoverFailed": {
