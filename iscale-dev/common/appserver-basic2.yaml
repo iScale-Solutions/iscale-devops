@@ -298,6 +298,10 @@ Parameters:
       ClientDomainName, or Name-EnvShort + ClientDomainName). Set it to serve extra names
       on one instance, e.g. a space-separated list for a DR alias:
       "pesonet20.pchcdev.com pesonet20-tdr.pchcdev.com".
+      When a list is given, the FIRST name is the canonical host: custom-data.sh gets
+      BASE_URL=https://<first>/ (always a single URL) plus BASE_URLS as the space-separated
+      set of every name as its own https://<name>/ URL. Order matters — put the live domain
+      first so BASE_URL keeps pointing at it during DR.
     Type: String
     Default: ''
   LoadBalancerPriority:
@@ -454,22 +458,42 @@ Resources:
                 - |
                   STACK_NAME=${AWS::StackName}
                   AWS_REGION=${AWS::Region}
-                  DOMAIN=${DOMAIN}
+                  DOMAIN="${DOMAIN}"
                   ENVIRONMENT=${ENVIRONMENT}
                   CLIENT_NAME=${CLIENT_NAME}
                   EFS_ID=${EFS_ID}
                   APPLICATION_SITE=${APPLICATION_SITE}
                   INSTANCE_ROLE=${INSTANCE_ROLE}
                   SECRET_ID=${SECRET_ID}
-                  BASE_URL=https://${DOMAIN}/
+                  BASE_URL=https://${PRIMARY_DOMAIN}/
+                  BASE_URLS="https://${BASE_URL_HOSTS}/"
                   BUCKET_NAME=${BUCKET_NAME}
                   CACHE_HOST=${CACHE_HOST}
                   CACHE_PORT=${CACHE_PORT}
                   DB_HOST=${DB_HOST}
                   DB_PORT=${DB_PORT}
+                # DOMAIN may be a space-separated list of nginx server_name values (see
+                # ServerNameOverride). PRIMARY_DOMAIN is always the single canonical host, so
+                # BASE_URL stays one well-formed URL; BASE_URLS carries every name as its own URL.
                 - DOMAIN: !If
                     - HasServerNameOverride
                     - !Ref ServerNameOverride
+                    - !If
+                      - HasLoadBalancerHostName
+                      - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+                      - !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+                  PRIMARY_DOMAIN: !If
+                    - HasServerNameOverride
+                    - !Select [0, !Split [' ', !Ref ServerNameOverride]]
+                    - !If
+                      - HasLoadBalancerHostName
+                      - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+                      - !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+                  # Joined so the surrounding 'https://' and '/' in the template complete the
+                  # first and last entry: a.com b.com -> a.com/ https://b.com
+                  BASE_URL_HOSTS: !If
+                    - HasServerNameOverride
+                    - !Join ['/ https://', !Split [' ', !Ref ServerNameOverride]]
                     - !If
                       - HasLoadBalancerHostName
                       - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
@@ -555,22 +579,42 @@ Resources:
                 - |
                   STACK_NAME=${AWS::StackName}
                   AWS_REGION=${AWS::Region}
-                  DOMAIN=${DOMAIN}
+                  DOMAIN="${DOMAIN}"
                   ENVIRONMENT=${ENVIRONMENT}
                   CLIENT_NAME=${CLIENT_NAME}
                   EFS_ID=${EFS_ID}
                   APPLICATION_SITE=${APPLICATION_SITE}
                   INSTANCE_ROLE=${INSTANCE_ROLE}
                   SECRET_ID=${SECRET_ID}
-                  BASE_URL=https://${DOMAIN}/
+                  BASE_URL=https://${PRIMARY_DOMAIN}/
+                  BASE_URLS="https://${BASE_URL_HOSTS}/"
                   BUCKET_NAME=${BUCKET_NAME}
                   CACHE_HOST=${CACHE_HOST}
                   CACHE_PORT=${CACHE_PORT}
                   DB_HOST=${DB_HOST}
                   DB_PORT=${DB_PORT}
+                # DOMAIN may be a space-separated list of nginx server_name values (see
+                # ServerNameOverride). PRIMARY_DOMAIN is always the single canonical host, so
+                # BASE_URL stays one well-formed URL; BASE_URLS carries every name as its own URL.
                 - DOMAIN: !If
                     - HasServerNameOverride
                     - !Ref ServerNameOverride
+                    - !If
+                      - HasLoadBalancerHostName
+                      - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+                      - !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+                  PRIMARY_DOMAIN: !If
+                    - HasServerNameOverride
+                    - !Select [0, !Split [' ', !Ref ServerNameOverride]]
+                    - !If
+                      - HasLoadBalancerHostName
+                      - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
+                      - !Join ['.', [!Join ['-',[!Ref Name, !FindInMap [EnvShort, !Ref EnvName, Name]]], !Ref ClientDomainName]]
+                  # Joined so the surrounding 'https://' and '/' in the template complete the
+                  # first and last entry: a.com b.com -> a.com/ https://b.com
+                  BASE_URL_HOSTS: !If
+                    - HasServerNameOverride
+                    - !Join ['/ https://', !Split [' ', !Ref ServerNameOverride]]
                     - !If
                       - HasLoadBalancerHostName
                       - !Join ['.', [!Ref LoadBalancerHostName, !Ref ClientDomainName]]
