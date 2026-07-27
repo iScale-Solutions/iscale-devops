@@ -588,53 +588,82 @@ def _handle_check_both_stacks_status(event: dict) -> dict:
 # property and leaves the ASG's actual (drifted) capacity untouched.)
 # ---------------------------------------------------------------------------
 
-def _find_asg_from_stack_name(region: str, stack_name: str) -> str:
-    """Find AppServerAutoScalingGroup physical ID from a CFN stack whose name contains stack_name."""
-    cf = boto3.client('cloudformation', region_name=region)
-    target = None
-    kwargs = {'StackStatusFilter': [
-        'CREATE_COMPLETE', 'UPDATE_COMPLETE', 'UPDATE_ROLLBACK_COMPLETE',
-    ]}
-    while True:
-        resp = cf.list_stacks(**kwargs)
-        for s in resp.get('StackSummaries', []):
-            if stack_name in s['StackName']:
-                target = s['StackName']
-                break
-        if target or not resp.get('NextToken'):
-            break
-        kwargs['NextToken'] = resp['NextToken']
-    if not target:
-        raise Exception(f'No active CFN stack found containing: {stack_name}')
-    rk = {}
-    while True:
-        rr = cf.list_stack_resources(StackName=target, **rk)
-        for res in rr.get('StackResourceSummaries', []):
-            if res['LogicalResourceId'] == 'AppServerAutoScalingGroup':
-                return res['PhysicalResourceId']
-        if not rr.get('NextToken'):
-            break
-        rk['NextToken'] = rr['NextToken']
-    raise Exception(f'AppServerAutoScalingGroup resource not found in stack: {target}')
+def _discover_live_asg(region: str, app_stack_name: str, tag_suffix: str) -> str:
+    """Find the currently-live ASG for one app-server role (e.g. 'api', 'tre',
+    'skiq', 'cs') by its LAUNCH TEMPLATE NAME — never by the ASG's own physical
+    name, and never by walking CFN stack resources.
+
+    Copied verbatim from dr-failover-v2's _discover_live_asg so failback scales
+    DOWN the exact ASG failover scaled UP. ASG names are not stable: CodeDeploy
+    blue/green replaces the CFN-managed ASG with one it names itself
+    ('CodeDeploy_<dg-id>_d-<deployment-id>') and renames it again on every deploy,
+    so neither the ASG name nor a CFN AppServerAutoScalingGroup resource lookup
+    (the old _find_asg_from_stack_name) reliably finds the live group — the CFN
+    resource can still point at a stale, already-replaced ASG, which failback
+    would then scale to zero while the real live group keeps billing. Tags are
+    unreliable too. LaunchTemplate.LaunchTemplateName IS stable —
+    appserver-basic2.yaml names it '<app_stack_name>-<suffix>-LaunchTemplate' and
+    the replacement ASG launches from the same template. Matching requires BOTH
+    app_stack_name and '<app_stack_name>-<tag_suffix>' (word boundary after the
+    suffix) in the LaunchTemplateName. If several match (a stale pre-swap ASG
+    lingering beside its CodeDeploy replacement) the most recently created one is
+    chosen."""
+    if not app_stack_name or not tag_suffix:
+        raise ValueError('app_stack_name and tag_suffix are required to discover an ASG')
+    import re
+    pattern    = re.compile(re.escape(f'{app_stack_name}-{tag_suffix}') + r'(-|$)')
+    asg_client = boto3.client('autoscaling', region_name=region)
+    paginator  = asg_client.get_paginator('describe_auto_scaling_groups')
+    candidates = []
+    for page in paginator.paginate():
+        for group in page.get('AutoScalingGroups', []):
+            lt_spec = group.get('LaunchTemplate')
+            if not lt_spec:
+                mip = group.get('MixedInstancesPolicy') or {}
+                lt_spec = ((mip.get('LaunchTemplate') or {})
+                           .get('LaunchTemplateSpecification'))
+            lt_name = (lt_spec or {}).get('LaunchTemplateName', '')
+            if lt_name and pattern.search(lt_name):
+                candidates.append(group)
+    if not candidates:
+        raise Exception(
+            f'No ASG found with a LaunchTemplateName matching app_stack_name={app_stack_name!r} '
+            f'tag_suffix={tag_suffix!r} (looked for "{app_stack_name}-{tag_suffix}-LaunchTemplate"). '
+            f'Checked every ASG in region {region} by Launch Template name, not by ASG name or tags.'
+        )
+    if len(candidates) > 1:
+        names = [c['AutoScalingGroupName'] for c in candidates]
+        logger.warning(
+            f'{len(candidates)} ASGs matched app_stack_name={app_stack_name!r} '
+            f'tag_suffix={tag_suffix!r}: {names} — a stale pre-swap ASG may still '
+            f'exist. Picking the most recently created.'
+        )
+    candidates.sort(key=lambda g: g.get('CreatedTime'), reverse=True)
+    chosen = candidates[0]['AutoScalingGroupName']
+    logger.info(f'Discovered live ASG by LaunchTemplateName: {chosen} (app_stack_name={app_stack_name} tag_suffix={tag_suffix})')
+    return chosen
 
 
 def _handle_set_asg_capacity(event: dict) -> dict:
-    """Same action/defaults as dr-failover-v2's set_asg_capacity — min/desired/max
-    default to 0, so a failback asg_configs entry needs only asg_name or
-    server_stack_name to scale that ASG down."""
+    """Same action/defaults/discovery as dr-failover-v2's set_asg_capacity —
+    min/desired/max default to 0, so a failback asg_configs entry needs only
+    asg_name or tag_suffix to scale that ASG down. tag_suffix resolves the live
+    ASG by LaunchTemplateName (see _discover_live_asg), so failback tears down the
+    exact ASG failover scaled up even after CodeDeploy blue/green renamed it."""
     import os
     inp              = event.get('input', event)
     region           = os.environ.get('AWS_REGION', 'us-east-2')
     asg_name         = inp.get('asg_name', '')
-    stack_name       = inp.get('server_stack_name', '')
+    tag_suffix       = inp.get('tag_suffix', '')
+    app_stack_name   = event.get('app_stack_name', '')
     min_size         = int(inp.get('min_size', 0))
     desired_capacity = int(inp.get('desired_capacity', 0))
     max_size         = int(inp.get('max_size', desired_capacity))
-    if not asg_name and not stack_name:
-        raise ValueError('asg_name or server_stack_name is required for set_asg_capacity')
+    if not asg_name and not tag_suffix:
+        raise ValueError('asg_name or tag_suffix is required for set_asg_capacity')
     if not asg_name:
-        asg_name = _find_asg_from_stack_name(region, stack_name)
-        logger.info("[SET_ASG_CAPACITY] Discovered ASG=%s | stack_name_contains=%s", asg_name, stack_name)
+        asg_name = _discover_live_asg(region, app_stack_name, tag_suffix)
+        logger.info("[SET_ASG_CAPACITY] Discovered ASG=%s | app_stack_name=%s | tag_suffix=%s", asg_name, app_stack_name, tag_suffix)
     asg = boto3.client('autoscaling', region_name=region)
     asg.update_auto_scaling_group(
         AutoScalingGroupName=asg_name,

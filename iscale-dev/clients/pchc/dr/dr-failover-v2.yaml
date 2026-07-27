@@ -18,8 +18,8 @@ AWSTemplateFormatVersion: 2010-09-09
 #     tag_suffix: the same short role suffix as in asg_configs (api/tre/skiq/cs) — used to
 #       discover the ASG to wire this deployment group to, by tag content
 #     deployment_group_name and asg_name are auto-discovered (random CFN suffixes)
-#     (omit key entirely to skip; switches deployment groups from Ec2TagFilters → AutoScalingGroups
-#     so lifecycle hooks fire when instances launch — must run BEFORE ScaleASGs)
+#     Drives BOTH DetachCodeDeployASGs (before ScaleASGs, application_name only) and
+#     UpdateCodeDeployGroups (after CheckASGsHealthy). Omit the key to skip both.
 #   codedeploy_configs=[{application_name, s3_bucket,
 #     deployment_group_name (optional — omit to auto-discover via ListDeploymentGroups),
 #     s3_key (optional — omit to auto-discover latest object by LastModified),
@@ -33,8 +33,23 @@ AWSTemplateFormatVersion: 2010-09-09
 # Lambda actions: discover | pitr_restore | check_db_status | update_secrets |
 #   check_efs_recovery_point | restore_efs | check_restore_job |
 #   update_stack | check_stack_status | notify |
-#   set_asg_capacity | check_all_asgs_healthy | update_codedeploy_group | trigger_codedeploy | check_codedeploy
+#   set_asg_capacity | check_all_asgs_healthy | detach_codedeploy_asgs |
+#   update_codedeploy_group | trigger_codedeploy | check_codedeploy
 # Per-app EventBridge triggers: dr-trigger-<app>.yaml imports StateMachineArn.
+#
+# CodeDeploy ordering — why detach comes before scale:
+#   An ASG attached to a deployment group carries CodeDeploy's managed launch hook, so every
+#   instance it launches runs a full deployment of the group's LAST SUCCESSFUL revision before
+#   reaching InService. On failover that revision is stale, and the current build is deployed
+#   again immediately after — two passes over the fleet, both on the RTO critical path.
+#   The order is therefore: DetachCodeDeployASGs (drop the hook) → ScaleASGs → CheckASGsHealthy
+#   (instances boot the DR AMI straight to InService) → UpdateCodeDeployGroups (re-attach, so
+#   later scale-out is covered) → TriggerCodeDeployParallel (the one real deployment). Because
+#   that deployment has instances it succeeds, which is what finally advances the group's last
+#   successful revision.
+#   Rejected alternative: firing a deployment while the ASG is at DesiredCapacity 0 to "prime"
+#   the revision. It fails with no instances to target, and a failed deployment never advances
+#   lastSuccessfulDeployment, so scale-out still installs the stale build. Verified by test.
 #
 # EFS SG design — how NFS access is established after restore:
 #   AWS Backup creates a brand-new EFS file system (newFileSystem=true). The
@@ -194,7 +209,8 @@ Resources:
       Description: >-
         DR Failover engine worker. Actions: discover | pitr_restore | check_db_status |
         update_secrets | update_stack | check_stack_status | notify |
-        set_asg_capacity | update_codedeploy_group | trigger_codedeploy | check_codedeploy.
+        set_asg_capacity | detach_codedeploy_asgs | update_codedeploy_group |
+        trigger_codedeploy | check_codedeploy.
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.12
@@ -241,6 +257,7 @@ Resources:
               if action == 'set_asg_capacity':          return _set_asg_capacity(event)
               if action == 'check_all_asgs_healthy':    return _check_all_asgs_healthy(event)
               if action == 'check_scale_results':       return _check_scale_results(event)
+              if action == 'detach_codedeploy_asgs':    return _detach_codedeploy_asgs(event)
               if action == 'update_codedeploy_group':   return _update_codedeploy_group(event)
               if action == 'trigger_codedeploy':        return _trigger_codedeploy(event)
               if action == 'check_codedeploy':          return _check_codedeploy(event)
@@ -887,6 +904,73 @@ Resources:
               }
 
 
+          # ── detach_codedeploy_asgs ────────────────────────────────────────────
+
+          def _detach_codedeploy_asgs(event):
+              """
+              Remove every ASG from a deployment group, which also removes CodeDeploy's
+              managed launch hook from those ASGs.
+
+              Run BEFORE ScaleASGs. While an ASG is attached to a deployment group, each
+              instance it launches enters Pending:Wait and runs a full deployment of the
+              group's LAST SUCCESSFUL revision before reaching InService. On a DR failover
+              that revision is stale — the current build is deployed a second time straight
+              afterwards — so the launch-time pass is a whole wasted deployment across the
+              fleet, sitting on the critical path of the RTO.
+
+              Detaching first lets instances boot from the DR AMI straight to InService with
+              no deployment at all. UpdateCodeDeployGroups re-attaches the ASG after the fleet
+              is up, and TriggerCodeDeployParallel then runs the single real deployment. That
+              deployment succeeds (it has instances), so it becomes the group's last
+              successful one and any later scale-out during the DR stay is current too.
+
+              Idempotent: a no-op on a clean DR region. It matters on re-runs, because the DR
+              region's deployment groups keep whatever wiring the previous drill left behind.
+              """
+              # Accepts event directly or wrapped under 'input' (state machine passes "input.$": "$")
+              inp      = event.get('input', event)
+              region   = os.environ['AWS_REGION']
+              app_name = inp.get('application_name', '')
+              if not app_name:
+                  raise ValueError('application_name is required for detach_codedeploy_asgs')
+              cd       = boto3.client('codedeploy', region_name=region)
+              dg_names = cd.list_deployment_groups(applicationName=app_name).get('deploymentGroups', [])
+              if not dg_names:
+                  logger.info(f'No deployment groups for {app_name} — nothing to detach.')
+                  return {'application_name': app_name, 'detached': False}
+              dg_name = dg_names[0]
+              info    = cd.get_deployment_group(
+                  applicationName=app_name,
+                  deploymentGroupName=dg_name,
+              )['deploymentGroupInfo']
+              current = [g['name'] for g in info.get('autoScalingGroups', [])]
+              if not current:
+                  logger.info(f'{app_name}/{dg_name} has no ASG attached — nothing to detach.')
+                  return {
+                      'application_name':      app_name,
+                      'deployment_group_name': dg_name,
+                      'detached':              False,
+                  }
+              # Passing an empty list is how UpdateDeploymentGroup clears the ASGs. ec2TagFilters
+              # is deliberately NOT passed — omitted fields are left untouched, and the tag
+              # filters are irrelevant while nothing is being deployed.
+              cd.update_deployment_group(
+                  applicationName=app_name,
+                  currentDeploymentGroupName=dg_name,
+                  autoScalingGroups=[],
+              )
+              logger.info(
+                  f'Detached {current} from {app_name}/{dg_name} — CodeDeploy launch hook removed, '
+                  f'instances will now reach InService without a deployment.'
+              )
+              return {
+                  'application_name':      app_name,
+                  'deployment_group_name': dg_name,
+                  'detached':              True,
+                  'previous_asgs':         current,
+              }
+
+
           # ── update_codedeploy_group ───────────────────────────────────────────
 
           def _update_codedeploy_group(event):
@@ -1413,7 +1497,7 @@ Resources:
             "AppStackSnapshotPrecheckRoute": {
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.app_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "WireCodeDeployRoute"}
+                {"Variable": "$.app_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "DetachCodeDeployASGs"}
               ],
               "Default": "UpdateAppStackSnapshot"
             },
@@ -1716,7 +1800,7 @@ Resources:
             "AppStackPITRPrecheckRoute": {
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.app_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "WireCodeDeployRoute"}
+                {"Variable": "$.app_precheck.deploy_paid_resources_active", "BooleanEquals": true, "Next": "DetachCodeDeployASGs"}
               ],
               "Default": "UpdateAppStackPITR"
             },
@@ -1789,22 +1873,57 @@ Resources:
               "Type": "Choice",
               "Choices": [
                 {"Variable": "$.app_status.stack_rollback", "BooleanEquals": true, "Next": "FailoverFailed"},
-                {"Variable": "$.app_status.stack_complete", "BooleanEquals": true, "Next": "WireCodeDeployRoute"}
+                {"Variable": "$.app_status.stack_complete", "BooleanEquals": true, "Next": "DetachCodeDeployASGs"}
               ],
               "Default": "WaitAppStack"
             },
 
+            "DetachCodeDeployASGs": {
+              "Comment": "Detach any ASG left attached to a deployment group by a previous run, removing CodeDeploy's managed launch hook. Without this, every instance ScaleASGs launches would sit in Pending:Wait running a full deployment of the last successful — stale — revision before reaching InService, and the current build would then be deployed a second time. That launch-time pass is the wasted one this reorder removes. No-op on a clean DR region. Deliberately Catch-through: a failed detach only costs the optimisation, never the failover.",
+              "Type": "Map",
+              "ItemsPath": "$.codedeploy_wiring_configs",
+              "MaxConcurrency": 0,
+              "Iterator": {
+                "StartAt": "DetachOneGroup",
+                "States": {
+                  "DetachOneGroup": {
+                    "Type": "Task",
+                    "Resource": "${LambdaFunction.Arn}",
+                    "Parameters": {
+                      "action":  "detach_codedeploy_asgs",
+                      "input.$": "$"
+                    },
+                    "End": true,
+                    "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 2, "BackoffRate": 2}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "DetachOneCaughtError", "ResultPath": "$.error"}]
+                  },
+                  "DetachOneCaughtError": {
+                    "Comment": "End this branch normally so sibling detaches keep running, matching ScaleASGs' fault isolation. Reference the whole item rather than a named key — a malformed config entry must not turn a swallowed error into an uncatchable States.Runtime failure. The run degrades to the old launch-time deployment; the final deployment still lands the correct revision.",
+                    "Type": "Pass",
+                    "Parameters": {
+                      "failed": true,
+                      "item.$": "$"
+                    },
+                    "End": true
+                  }
+                }
+              },
+              "ResultPath": "$.detach_results",
+              "Next": "ScaleASGs",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "ScaleASGs", "ResultPath": "$.detach_error"}]
+            },
+
             "WireCodeDeployRoute": {
-              "Comment": "If codedeploy_wiring_configs is present, switch deployment groups to ASG targeting before scaling (so lifecycle hooks are active when instances launch). Omit the key to skip.",
+              "Comment": "Runs AFTER the fleet is InService, not before it. Re-attaches each deployment group to its ASG so the launch hook exists for any scale-out later in the DR stay, then hands to the single real deployment. Omit codedeploy_wiring_configs to skip.",
               "Type": "Choice",
               "Choices": [
                 {"Variable": "$.codedeploy_wiring_configs", "IsPresent": true, "Next": "UpdateCodeDeployGroups"}
               ],
-              "Default": "ScaleASGs"
+              "Default": "PostScaleRoute"
             },
 
             "UpdateCodeDeployGroups": {
-              "Comment": "Switch each CodeDeploy deployment group from Ec2TagFilters to AutoScalingGroups. Clears tag filters so deployments are ASG-scoped only. Runs before ScaleASGs so lifecycle hooks fire as instances launch.",
+              "Comment": "Switch each CodeDeploy deployment group from Ec2TagFilters to AutoScalingGroups. Clears tag filters so deployments are ASG-scoped only. Attaching an ASG does not deploy to the instances already in it — it only reinstalls the launch hook; the running fleet is handled by the deployment in PostScaleRoute.",
               "Type": "Map",
               "ItemsPath": "$.codedeploy_wiring_configs",
               "Parameters": {
@@ -1836,12 +1955,12 @@ Resources:
                 }
               },
               "ResultPath": "$.wiring_results",
-              "Next": "ScaleASGs",
+              "Next": "PostScaleRoute",
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailoverFailed", "ResultPath": "$.error"}]
             },
 
             "ScaleASGs": {
-              "Comment": "App stack is UPDATE_COMPLETE — Launch Template now has the DR AMI. Scale each ASG to its target capacity, in parallel (MaxConcurrency 0 = unlimited). asg_configs: [{asg_name, min_size, desired_capacity, max_size}, ...]. Pass [] to skip. Each iteration is fault-isolated — one ASG failing does not cancel the others (see SetOneASG's Catch), unlike a Map whose Catch routes to a Fail state, which would abort every still-running sibling iteration.",
+              "Comment": "App stack is UPDATE_COMPLETE — Launch Template now has the DR AMI. Scale each ASG to its target capacity, in parallel (MaxConcurrency 0 = unlimited). asg_configs: [{asg_name, min_size, desired_capacity, max_size}, ...]. Pass [] to skip. DetachCodeDeployASGs has already removed the CodeDeploy launch hook, so instances boot the DR AMI straight to InService with no deployment in the path. Each iteration is fault-isolated — one ASG failing does not cancel the others (see SetOneASG's Catch), unlike a Map whose Catch routes to a Fail state, which would abort every still-running sibling iteration.",
               "Type": "Map",
               "ItemsPath": "$.asg_configs",
               "Parameters": {
@@ -1936,17 +2055,17 @@ Resources:
             },
 
             "ASGsHealthyRoute": {
-              "Comment": "Proceed to CodeDeploy only once all ASGs have their desired instances InService. Bounded by attempts so a group that never reaches capacity (a scaling policy fighting the DR target, or instances failing to launch) fails fast instead of looping for the state machine's lifetime.",
+              "Comment": "Proceed to CodeDeploy only once all ASGs have their desired instances InService. With no launch hook attached this poll is purely EC2 readiness — under the old ordering it was also silently waiting out a stale deployment on every instance, so the 30-attempt budget now has far more headroom than it needs. Bounded by attempts so a group that never reaches capacity (a scaling policy fighting the DR target, or instances failing to launch) fails fast instead of looping for the state machine's lifetime.",
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.asg_health_result.all_healthy", "BooleanEquals": true, "Next": "PostScaleRoute"},
+                {"Variable": "$.asg_health_result.all_healthy", "BooleanEquals": true, "Next": "WireCodeDeployRoute"},
                 {"Variable": "$.asg_health_result.attempts", "NumericGreaterThanEquals": 30, "Next": "HealthCheckTimedOut"}
               ],
               "Default": "WaitForInstances"
             },
 
             "PostScaleRoute": {
-              "Comment": "Trigger CodeDeploy if codedeploy_configs is present in the payload; otherwise complete.",
+              "Comment": "The single real deployment of the run. Triggers CodeDeploy if codedeploy_configs is present; otherwise completes. Kept as a Choice because codedeploy_configs — unlike codedeploy_wiring_configs — is never normalised to [], so TriggerCodeDeployParallel's ItemsPath would raise States.Runtime if the key were absent.",
               "Type": "Choice",
               "Choices": [
                 {"Variable": "$.codedeploy_configs", "IsPresent": true, "Next": "TriggerCodeDeployParallel"}
@@ -2026,7 +2145,7 @@ Resources:
                 "action":         "notify",
                 "sns_topic_arn.$": "$.sns_topic_arn",
                 "subject":        "DR Failover Complete",
-                "message":        "DR failover completed. Network stack and app stack are UPDATE_COMPLETE. CodeDeploy groups wired to ASGs, capacities set, and deployments succeeded."
+                "message":        "DR failover completed. Network stack and app stack are UPDATE_COMPLETE. ASGs scaled with no launch hook attached, CodeDeploy groups re-wired to those ASGs once instances were InService, and the single application deployment succeeded."
               },
               "ResultPath": "$.notify_result",
               "Next": "Complete",
