@@ -16,6 +16,7 @@ Metadata:
           - DatabaseClusterArn
           - DatabaseInstanceName
           - DocDBClusterArn
+          - DocDBClusterType
           - CodeDeployApplicationName
           - CodeDeployASGDesiredSize
           - CodeDeployDeploymentGroupName
@@ -46,6 +47,8 @@ Metadata:
         default: Database Instance Name
       DocDBClusterArn:
         default: DocumentDB Cluster ARN
+      DocDBClusterType:
+        default: DocumentDB Cluster Type
       EC2InstanceId:
         default: EC2 Instance Id
       RedshiftClusterName:
@@ -105,6 +108,13 @@ Parameters:
     Description: The name of a DocumentDB database cluster
     Type: String
     Default: ''
+  DocDBClusterType:
+    Description: DocumentDB cluster type. Elastic clusters use the docdb-elastic API, instance clusters use the docdb API.
+    Type: String
+    Default: instance
+    AllowedValues:
+      - instance
+      - elastic
   EC2InstanceId:
     Description: Id of EC2 instance
     Type: String
@@ -152,6 +162,7 @@ Conditions:
   HasStopSchedule: !Not [!Equals [!Ref StopScheduleExpression, ""]]
   HasDBCluster: !Not [!Equals [!Ref DatabaseClusterArn, ""]]
   HasDocDBCluster: !Not [!Equals [!Ref DocDBClusterArn, ""]]
+  IsElasticDocDBCluster: !Equals [!Ref DocDBClusterType, elastic]
   HasDocDBClusterAndStartSchedule: !And [Condition: HasDocDBCluster, Condition: HasStartSchedule]
   HasDocDBClusterAndStopSchedule: !And [Condition: HasDocDBCluster, Condition: HasStopSchedule]
   HasDBInstance: !Not [!Equals [!Ref DatabaseInstanceName, ""]]
@@ -263,10 +274,14 @@ Resources:
             Version: 2012-10-17
             Statement:
               - Effect: Allow
-                Action:
-                  - docdb:DescribeDBClusters
-                  - docdb:StopDBCluster
-                  - docdb:StartDBCluster
+                Action: !If
+                  - IsElasticDocDBCluster
+                  - - docdb-elastic:GetCluster
+                    - docdb-elastic:StopCluster
+                    - docdb-elastic:StartCluster
+                  - - docdb:DescribeDBClusters
+                    - docdb:StopDBCluster
+                    - docdb:StartDBCluster
                 Resource: !Ref DocDBClusterArn
               - Effect: Allow
                 Action:
@@ -389,7 +404,8 @@ Resources:
       Environment:
         Variables:
           REGION: !Ref AWS::Region
-          CLUSTER_ID: !Ref DatabaseClusterArn
+          CLUSTER_ID: !Ref DocDBClusterArn
+          CLUSTER_TYPE: !Ref DocDBClusterType
       Code:
         ZipFile: |
           import boto3
@@ -402,15 +418,26 @@ Resources:
           def lambda_handler(event, context):
             region=os.environ['REGION']
             ClusterID=os.environ['CLUSTER_ID']
+            ClusterType=os.environ['CLUSTER_TYPE']
 
             try:
-              docdb = boto3.client('docdb',region_name=region)
+              if ClusterType == 'elastic':
+                docdb = boto3.client('docdb-elastic',region_name=region)
 
-              logger.info('Starting DocumentDB Cluster : ' + str(ClusterID))
-              docdb.start_db_cluster(DBClusterIdentifier=ClusterID)
+                logger.info('Starting DocumentDB Elastic Cluster : ' + str(ClusterID))
+                docdb.start_cluster(clusterArn=ClusterID)
+              else:
+                docdb = boto3.client('docdb',region_name=region)
+
+                # the docdb API takes the bare identifier, not the ARN
+                Identifier=ClusterID.split(':')[-1] if ClusterID.startswith('arn:') else ClusterID
+
+                logger.info('Starting DocumentDB Cluster : ' + str(Identifier))
+                docdb.start_db_cluster(DBClusterIdentifier=Identifier)
 
             except Exception:
               logger.exception('Error Encountered')
+              raise
 
   StartDocDBClusterFunctionPermission:
     Condition: HasDocDBClusterAndStartSchedule
@@ -605,7 +632,8 @@ Resources:
       Environment:
         Variables:
           REGION: !Ref AWS::Region
-          CLUSTER_ID: !Ref DatabaseClusterArn
+          CLUSTER_ID: !Ref DocDBClusterArn
+          CLUSTER_TYPE: !Ref DocDBClusterType
       Code:
         ZipFile: |
           import boto3
@@ -618,15 +646,26 @@ Resources:
           def lambda_handler(event, context):
             region=os.environ['REGION']
             ClusterID=os.environ['CLUSTER_ID']
+            ClusterType=os.environ['CLUSTER_TYPE']
 
             try:
-              docdb = boto3.client('docdb',region_name=region)
+              if ClusterType == 'elastic':
+                docdb = boto3.client('docdb-elastic',region_name=region)
 
-              logger.info('Stopping DocumentDB Cluster : ' + str(ClusterID))
-              docdb.stop_db_cluster(DBClusterIdentifier=ClusterID)
+                logger.info('Stopping DocumentDB Elastic Cluster : ' + str(ClusterID))
+                docdb.stop_cluster(clusterArn=ClusterID)
+              else:
+                docdb = boto3.client('docdb',region_name=region)
+
+                # the docdb API takes the bare identifier, not the ARN
+                Identifier=ClusterID.split(':')[-1] if ClusterID.startswith('arn:') else ClusterID
+
+                logger.info('Stopping DocumentDB Cluster : ' + str(Identifier))
+                docdb.stop_db_cluster(DBClusterIdentifier=Identifier)
 
             except Exception:
               logger.exception('Error Encountered')
+              raise
 
   StopDocDBClusterFunctionPermission:
     Condition: HasDocDBClusterAndStopSchedule
