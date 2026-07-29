@@ -437,6 +437,11 @@ Resources:
   # ensuring correct credentials are available before failover is triggered.
   # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
   # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
+  #
+  # NOTE: !Ref on this resource returns the full ARN, NOT the name. Never pass !Ref DRDBSecret as
+  # SharedSecretId to the *ServerStacks — appserver.yaml builds the IAM resource ARN itself as
+  # 'arn:aws:secretsmanager:<region>:<account>:secret:${SharedSecretId}-*', so an ARN input nests
+  # one ARN inside another and the AccessSecrets policy matches nothing. Pass the name join below.
   DRDBSecret:
     Condition: IsDR
     Type: AWS::SecretsManager::Secret
@@ -653,10 +658,13 @@ Resources:
           - !Select [ 1, !Split [ '/', !Ref PortalELBStack]]
           - ''
         NetworkStackName: !Ref NetworkStackName
+        # Keyed off the same condition that gates DBStack, so the GetAtt is only reached when the
+        # stack exists. Every other state (PITR failover, DR standby) falls through to the local
+        # name join, which is the same string database.yaml would emit — see DRDBSecret above.
         SharedSecretId: !If
-          - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
-          - ''
+          - IsDeployPaidResourcesAndNotPITR
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda
@@ -782,10 +790,13 @@ Resources:
           - ''
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
+        # Keyed off the same condition that gates DBStack, so the GetAtt is only reached when the
+        # stack exists. Every other state (PITR failover, DR standby) falls through to the local
+        # name join, which is the same string database.yaml would emit — see DRDBSecret above.
         SharedSecretId: !If
-          - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
-          - ''
+          - IsDeployPaidResourcesAndNotPITR
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda
@@ -924,10 +935,13 @@ Resources:
           - ''
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
+        # Keyed off the same condition that gates DBStack, so the GetAtt is only reached when the
+        # stack exists. Every other state (PITR failover, DR standby) falls through to the local
+        # name join, which is the same string database.yaml would emit — see DRDBSecret above.
         SharedSecretId: !If
-          - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
-          - ''
+          - IsDeployPaidResourcesAndNotPITR
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda
