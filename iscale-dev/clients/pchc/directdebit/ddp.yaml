@@ -437,6 +437,11 @@ Resources:
   # ensuring correct credentials are available before failover is triggered.
   # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
   # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
+  #
+  # NOTE: !Ref on this resource returns the full ARN, NOT the name. Never pass !Ref DRDBSecret as
+  # SharedSecretId to the *ServerStacks — appserver.yaml builds the IAM resource ARN itself as
+  # 'arn:aws:secretsmanager:<region>:<account>:secret:${SharedSecretId}-*', so an ARN input nests
+  # one ARN inside another and the AccessSecrets policy matches nothing. Pass the name join below.
   DRDBSecret:
     Condition: IsDR
     Type: AWS::SecretsManager::Secret
@@ -648,15 +653,29 @@ Resources:
         InstanceSubnet: Private
         InstanceType: t3.large
         LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', ddp]
+        # DR only: serve the live domain AND a DR alias on nginx (server_name).
+        # EnvShort is dynamic (TestDR->tdr, ProductionDR->pdr), so it works for any DR env.
+        # Live\other envs: AWS::NoValue -> param stays '' -> unchanged single-domain behavior.
+        ServerNameOverride: !If
+          - IsDR
+          - !Sub
+            - '${Host}.${Domain} ${Host}-portal-${EnvShort}.${Domain}'
+            - Host: ddp
+              Domain: !Ref ClientDomainName
+              EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+          - !Ref 'AWS::NoValue'
         LoadBalancerStackName: !If
           - IsDeployPaidResources
           - !Select [ 1, !Split [ '/', !Ref PortalELBStack]]
           - ''
         NetworkStackName: !Ref NetworkStackName
+        # Keyed off the same condition that gates DBStack, so the GetAtt is only reached when the
+        # stack exists. Every other state (PITR failover, DR standby) falls through to the local
+        # name join, which is the same string database.yaml would emit — see DRDBSecret above.
         SharedSecretId: !If
-          - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
-          - ''
+          - IsDeployPaidResourcesAndNotPITR
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda
@@ -776,16 +795,30 @@ Resources:
         InstanceSubnet: Private
         InstanceType: t3.large
         LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', api-ddp]
+        # DR only: serve the live domain AND a DR alias on nginx (server_name).
+        # EnvShort is dynamic (TestDR->tdr, ProductionDR->pdr), so it works for any DR env.
+        # Live\other envs: AWS::NoValue -> param stays '' -> unchanged single-domain behavior.
+        ServerNameOverride: !If
+          - IsDR
+          - !Sub
+            - '${Host}.${Domain} ${Host}-${EnvShort}.${Domain}'
+            - Host: api-ddp
+              Domain: !Ref ClientDomainName
+              EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+          - !Ref 'AWS::NoValue'
         LoadBalancerStackName: !If
           - IsDeployPaidResources
           - !Select [ 1, !Split [ '/', !Ref NetworkAPIELBStack]]
           - ''
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
+        # Keyed off the same condition that gates DBStack, so the GetAtt is only reached when the
+        # stack exists. Every other state (PITR failover, DR standby) falls through to the local
+        # name join, which is the same string database.yaml would emit — see DRDBSecret above.
         SharedSecretId: !If
-          - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
-          - ''
+          - IsDeployPaidResourcesAndNotPITR
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda
@@ -918,16 +951,30 @@ Resources:
         InstanceSubnet: Private
         InstanceType: !If [IsProd, t3.large, t3.medium]
         LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', ddp-skiq]
+        # DR only: serve the live domain AND a DR alias on nginx (server_name).
+        # EnvShort is dynamic (TestDR->tdr, ProductionDR->pdr), so it works for any DR env.
+        # Live\other envs: AWS::NoValue -> param stays '' -> unchanged single-domain behavior.
+        ServerNameOverride: !If
+          - IsDR
+          - !Sub
+            - '${Host}.${Domain} ${Host}-${EnvShort}.${Domain}'
+            - Host: ddp-skiq
+              Domain: !Ref ClientDomainName
+              EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+          - !Ref 'AWS::NoValue'
         LoadBalancerStackName: !If
           - IsDeployPaidResources
           - !Select [ 1, !Split [ '/', !Ref NetworkSidekiqELBStack]]
           - ''
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
+        # Keyed off the same condition that gates DBStack, so the GetAtt is only reached when the
+        # stack exists. Every other state (PITR failover, DR standby) falls through to the local
+        # name join, which is the same string database.yaml would emit — see DRDBSecret above.
         SharedSecretId: !If
-          - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
-          - ''
+          - IsDeployPaidResourcesAndNotPITR
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda
