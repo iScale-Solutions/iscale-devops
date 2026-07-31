@@ -5,6 +5,16 @@ AWSTemplateFormatVersion: 2010-09-09
 #   pitr_security_group_id, redshift_cluster_identifier,
 #   redshift_snapshot_identifier, snapshot_identifier, db_master_password,
 #   sns_topic_arn,
+#   app_template_url: S3 URL of the app stack's parent template, applied when the app stack
+#     is updated with DeployPaidResources=true. Publish the template to the bucket this
+#     stack creates (see the AppTemplateBucketName output), then pass its URL here, e.g.
+#       https://pchc-tdr-ue2-failover-v2-app-templates.s3.us-east-2.amazonaws.com/app-stacks/pchc-tdr-ue2-ddp.yaml
+#     Leave EMPTY ('') or omit the key to keep the previous behaviour of replaying whatever
+#     template CloudFormation already has stored — so apps that have not opted in are
+#     unaffected. Required because dr-failback's comment/uncomment cycle can permanently
+#     delete LoadBalancerStackName from the stored template, which silently drops the
+#     app-server target groups, the ASG TargetGroupARNs and the port-443 SG ingress.
+#     The bucket must be in the same region as the stack being updated.
 #   asg_configs=[{asg_name OR tag_suffix, min_size, desired_capacity, max_size}, ...]
 #     asg_name: explicit ASG name; tag_suffix: the short role suffix appserver-basic2.yaml
 #       bakes into the ASG's own Name tag (api/tre/skiq/cs, etc — NOT the CFN logical id
@@ -149,6 +159,25 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AdministratorAccess
+      # Redundant while AdministratorAccess is attached above, but stated explicitly so the
+      # app-template read keeps working when that managed policy is eventually scoped down.
+      # CloudFormation reads a TemplateURL using the *caller's* credentials, so this is the
+      # role that needs GetObject — not a CloudFormation service role.
+      Policies:
+        - PolicyName: AppTemplateBucketAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub '${AppTemplateBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !GetAtt AppTemplateBucket.Arn
 
   StepFunctionsRole:
     Type: AWS::IAM::Role
@@ -180,6 +209,86 @@ Resources:
                   - logs:DescribeResourcePolicies
                   - logs:DescribeLogGroups
                 Resource: '*'
+
+####
+# S3 — centralized app stack templates
+####
+
+  # Central store for the per-app parent templates (ddp.yaml, pesonet20.yaml, ...).
+  #
+  # Why this exists: update_stack previously ran with UsePreviousTemplate=True for app
+  # stacks, which replays whatever CloudFormation already has stored. dr-failback's
+  # 'comment' step rewrites that stored template to comment out LoadBalancerStackName,
+  # and a JSON round-trip then strips the comment lines outright — so the parameter is
+  # deleted, not restored. HasLoadBalancerStackName in common/appserver-basic2.yaml then
+  # evaluates false and the app-server target groups, the ASG TargetGroupARNs, and the
+  # port-443 security group ingress are all silently skipped. Publishing the app template
+  # here and passing it as TemplateURL makes each failover independent of whatever state
+  # the stored template was left in.
+  #
+  # Tenancy: this bucket is per-client and lives in the client's own account. Client
+  # templates must NOT go in the shared iscale-dev-cloudformation bucket, which grants
+  # bucket-wide s3:GetObject to 17 accounts across ~10 unrelated client organizations.
+  # That bucket stays for reusable common/ and include/ templates only.
+  #
+  # Region: CloudFormation requires a TemplateURL bucket in the same region as the stack
+  # being updated. This stack and the app stacks are both in the DR region, so
+  # ${AWS::Region} is correct — do not point this at a bucket in another region.
+  AppTemplateBucket:
+    Type: AWS::S3::Bucket
+    # Retain: the published templates are the failover's source of truth. Losing them on a
+    # stack delete would silently return every app to the UsePreviousTemplate fallback.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-app-templates'
+      VersioningConfiguration:
+        # Versioning is the rollback path for a bad template publish, and the audit trail
+        # for which template a given failover actually applied.
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldTemplateVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-app-templates'
+        - Key: Environment
+          Value: DR
+        - Key: Project
+          Value: PCHC-DR
+
+  AppTemplateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AppTemplateBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AppTemplateBucket.Arn
+              - !Sub '${AppTemplateBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
 
 ####
 # CloudWatch Logs
@@ -218,6 +327,7 @@ Resources:
       Environment:
         Variables:
           DEFAULT_NETWORK_TEMPLATE_URL: !Ref NetworkTemplateUrl
+          APP_TEMPLATE_BUCKET: !Ref AppTemplateBucket
       Code:
         ZipFile: |
           import logging
@@ -576,10 +686,43 @@ Resources:
 
               if stack_type == 'network':
                   _cfn_update(cf, stack_name, extra, template_url=template_url or None)
+                  used = template_url or ''
               else:
-                  _cfn_update(cf, stack_name, extra)  # UsePreviousTemplate — avoids 51200-byte TemplateBody limit
+                  # Two conditions must BOTH hold before the stored template is replaced:
+                  #
+                  #   1. app_template_url is non-empty in the event payload. Empty means
+                  #      "use whatever CloudFormation already has stored" — the pre-existing
+                  #      behaviour — so an app that has not opted in is untouched. This is
+                  #      per-app opt-in and it is visible in the payload rather than implied
+                  #      by the contents of a bucket.
+                  #
+                  #   2. This update is the one bringing paid resources up. That is the update
+                  #      whose template has to be correct: it re-evaluates
+                  #      HasLoadBalancerStackName and therefore creates the app-server target
+                  #      groups, the ASG TargetGroupARNs, and the port-443 SG ingress. The
+                  #      stored template cannot be trusted for it — dr-failback's 'comment'
+                  #      step strips LoadBalancerStackName out, and the paired 'uncomment'
+                  #      cannot restore it once a JSON round-trip has removed the markers.
+                  #      Substituting the template on a teardown or on any future unrelated
+                  #      update would apply accumulated template drift as a side effect.
+                  app_url        = (event.get('app_template_url') or '').strip()
+                  deploying_paid = str(extra.get('DeployPaidResources', '')).lower() == 'true'
 
-              return {'stack_name': stack_name, 'submitted': True}
+                  if app_url and deploying_paid:
+                      logger.info(f'[APP_TEMPLATE] {stack_name}: using published template {app_url}')
+                  else:
+                      if not app_url:
+                          reason = 'app_template_url is empty'
+                      else:
+                          reason = (f'DeployPaidResources is not true '
+                                    f'(value={extra.get("DeployPaidResources", "<unset>")!r})')
+                      logger.info(f'[APP_TEMPLATE] {stack_name}: {reason} — keeping the stored template')
+                      app_url = ''
+
+                  _cfn_update(cf, stack_name, extra, template_url=app_url or None)
+                  used = app_url
+
+              return {'stack_name': stack_name, 'submitted': True, 'template_url': used}
 
 
           # ── check_stack_status ────────────────────────────────────────────────
@@ -1361,7 +1504,7 @@ Resources:
               "Comment": "codedeploy_wiring_configs is optional in the event payload — default to [] so ScaleASGs/CheckASGsHealthy can safely reference it later to resolve live, CodeDeploy-managed ASGs (the source of truth once a stack has drifted from CloudFormation via blue/green) without a missing-path runtime error.",
               "Type": "Choice",
               "Choices": [
-                {"Variable": "$.codedeploy_wiring_configs", "IsPresent": true, "Next": "PrecheckNetworkStack"}
+                {"Variable": "$.codedeploy_wiring_configs", "IsPresent": true, "Next": "NormalizeAppTemplateUrl"}
               ],
               "Default": "DefaultWiringConfigs"
             },
@@ -1370,6 +1513,22 @@ Resources:
               "Type": "Pass",
               "Result": [],
               "ResultPath": "$.codedeploy_wiring_configs",
+              "Next": "NormalizeAppTemplateUrl"
+            },
+
+            "NormalizeAppTemplateUrl": {
+              "Comment": "app_template_url is optional — default to '' so the UpdateAppStack* states can reference it unconditionally. Without this a payload that omits the key would raise States.Runtime on the '.$' reference, which is NOT catchable and would kill the execution without even reaching FailoverFailed. Empty string means 'use the template CloudFormation already has stored', so existing payloads behave exactly as before.",
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.app_template_url", "IsPresent": true, "Next": "PrecheckNetworkStack"}
+              ],
+              "Default": "DefaultAppTemplateUrl"
+            },
+
+            "DefaultAppTemplateUrl": {
+              "Type": "Pass",
+              "Result": "",
+              "ResultPath": "$.app_template_url",
               "Next": "PrecheckNetworkStack"
             },
 
@@ -1810,9 +1969,10 @@ Resources:
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
-                "action":       "update_stack",
-                "stack_type":   "app",
-                "stack_name.$": "$.app_stack_name",
+                "action":            "update_stack",
+                "stack_type":        "app",
+                "stack_name.$":      "$.app_stack_name",
+                "app_template_url.$": "$.app_template_url",
                 "extra_params": {
                   "DeployPaidResources": "true",
                   "IsPITRMode":          "true",
@@ -1832,9 +1992,10 @@ Resources:
               "Type": "Task",
               "Resource": "${LambdaFunction.Arn}",
               "Parameters": {
-                "action":       "update_stack",
-                "stack_type":   "app",
-                "stack_name.$": "$.app_stack_name",
+                "action":            "update_stack",
+                "stack_type":        "app",
+                "stack_name.$":      "$.app_stack_name",
+                "app_template_url.$": "$.app_template_url",
                 "extra_params": {
                   "DeployPaidResources":           "true",
                   "IsPITRMode":                    "false",
@@ -2189,6 +2350,22 @@ Outputs:
     Value: !GetAtt StateMachine.Name
     Export:
       Name: !Sub '${AWS::StackName}-StateMachineName'
+
+  AppTemplateBucketName:
+    Description: >-
+      Centralized bucket holding the per-app parent templates. Publish with:
+      aws s3 cp ddp.yaml s3://<bucket>/app-stacks/pchc-tdr-ue2-ddp.yaml --region us-east-2
+      The object key must match the app stack name exactly; the failover Lambda resolves it
+      by stack name and falls back to the stored template when the object is absent.
+    Value: !Ref AppTemplateBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AppTemplateBucket'
+
+  AppTemplateBucketArn:
+    Description: ARN of the centralized app stack template bucket
+    Value: !GetAtt AppTemplateBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AppTemplateBucketArn'
 
   LambdaArn:
     Description: ARN of the DR Failover worker Lambda
