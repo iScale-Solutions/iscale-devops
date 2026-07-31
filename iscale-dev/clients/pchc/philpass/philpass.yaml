@@ -47,7 +47,7 @@ Metadata:
           - SnapshotIdentifier
           - DBMasterUserPassword
           - EnableCrossRegionBackupReplication
-          - AppCRRBucketArn
+          - EnableCodeDeployReplication
           - SourceDbInstanceArn
           - BackupReplicationRetentionPeriod
           - LiveSecretArn
@@ -97,8 +97,8 @@ Metadata:
         default: DB Master Password (DR failover only — leave blank for normal)
       EnableCrossRegionBackupReplication:
         default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
-      AppCRRBucketArn:
-        default: App CodeDeploy CRR Destination Bucket ARN (leave blank for DR stack — set on the live stack)
+      EnableCodeDeployReplication:
+        default: Enable CodeDeploy Artifact Replication to DR region (live stack only — leave false for DR stacks)
       SourceDbInstanceArn:
         default: Source DB Instance ARN (live region — required when replication is enabled)
       BackupReplicationRetentionPeriod:
@@ -248,13 +248,13 @@ Parameters:
     AllowedValues:
       - 'true'
       - 'false'
-  AppCRRBucketArn:
-    Description: |
-      (Live region only) ARN of the DR CodeDeploy artifacts bucket for the app server.
-      Obtain from the DeployStack output in the DR region (CodeDeployBucketArn).
-      Leave blank for DR stack deployments — the IsDR condition suppresses CRR automatically.
+  EnableCodeDeployReplication:
+    Description: Set to true on the live stack to enable CRR of CodeDeploy artifacts to the DR region bucket. Must be false on DR stacks.
     Type: String
-    Default: ''
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
   SourceDbInstanceArn:
     Description: |
       ARN of the live region RDS DB instance to replicate from.
@@ -398,6 +398,7 @@ Conditions:
     - !Equals [!Ref EnvName, ProductionDR]
   IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
   IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
+  IsEnableCodeDeployReplication: !Equals [!Ref EnableCodeDeployReplication, 'true']
   IsDRAndEnableCrossRegionBackupReplication: !And
     - Condition: IsDR
     - Condition: IsEnableCrossRegionBackupReplication
@@ -538,7 +539,13 @@ Resources:
         SNSStackName: !Ref SNSStackName
         # Live region replicates CodeDeploy artifacts into the DR bucket so the DR app servers
         # have code to deploy at failover. Suppressed on the DR stack itself (it is the destination).
-        ReplicationDestinationBucketArn: !If [IsDR, '', !Ref AppCRRBucketArn]
+        ReplicationDestinationBucketArn: !If
+          - IsEnableCodeDeployReplication
+          - !Sub
+            - 'arn:aws:s3:::${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-code-deploy'
+            - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+              DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+          - ''
 
   DBStack:
     # Set DeployPaidResources=false (DR standby) to suppress. At failover, set back to true and
@@ -893,5 +900,5 @@ Outputs:
 
   CodeDeployBucketArn:
     Condition: IsDR
-    Description: ARN of the CodeDeploy artifacts bucket — use as AppCRRBucketArn in the live stack when setting up CRR
+    Description: ARN of the CodeDeploy artifacts bucket in this DR region
     Value: !GetAtt DeployStack.Outputs.DeploymentBucketArn
