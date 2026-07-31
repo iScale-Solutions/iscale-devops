@@ -1805,6 +1805,133 @@ Resources:
       SourceSecurityGroupId: !GetAtt [ELBStack, Outputs.SecurityGroupId]
 
 ###
+# IWebFeExternalServer
+###
+
+  IWebFeExternalServerC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  IWebFeExternalServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref IWebFeExternalServerC2Role
+
+  IWebFeExternalServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL, Security, Group]]
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcCidrBlock'
+          Description: Allow all connections on all ports from inside VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL, Security, Group]]
+
+  AllowJumpHostIntoIWebFeExternalServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref IWebFeExternalServerSecurityGroup
+      FromPort: 3389
+      ToPort: 3389
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  IWebFeExternalServerInstance1:
+    # UAT OK
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref FEInstanceAMI
+      InstanceType: c5.2xlarge
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref IWebFeExternalServerInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds:
+        - !Ref IWebFeExternalServerSecurityGroup
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL1]]
+
+  # Proper way of adding additional EBS volume to an existing EC2 instance
+  # is to create the volume and then attach it to the instance. This is to prevent
+  # instance replacement. (modifying BlockDeviceMappings will cause instance replacement)
+  IWebFeExternalServer1Ebs1:
+    Type: AWS::EC2::Volume
+    Properties: 
+      Size: 50
+      Encrypted: true
+      VolumeType: gp3
+      AvailabilityZone: !GetAtt IWebFeExternalServerInstance1.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL1, EBS1]]
+  
+  IWebFeExternalServer1Ebs1Mountpoint:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref IWebFeExternalServerInstance1
+      VolumeId: !Ref IWebFeExternalServer1Ebs1
+      Device: xvdf
+
+  IWebFeExternalServer1HighCPUAlarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL1, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref IWebFeExternalServerInstance1
+
+###
 # PCHJUMPSVR
 ###
 
