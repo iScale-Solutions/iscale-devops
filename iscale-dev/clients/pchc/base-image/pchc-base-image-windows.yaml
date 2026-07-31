@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Base Image Builder for Windows Server
+
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+          - ImageRecipeVersion
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - NetworkStackName
+          - SNSStackName
+      - Label:
+          default: Parent Image Configuration
+        Parameters:
+          - WindowsServer2022SsmParameter
+      - Label:
+          default: Sharing Configuration
+        Parameters:
+          - ShareImage
+          - ShareAccountList
+          - SecondRegion
+          - ThirdRegion
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      ImageRecipeVersion:
+        default: Image Recipe Version Number
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      WindowsServer2022SsmParameter:
+        default: Windows Server 2022 SSM Parameter
+      ShareImage:
+        default: Share image with other account? If sharing, encryption will be disabled.
+      ShareAccountList:
+        default: List of AWS Account IDs to share the image with, separated by comma. (Required if ShareImage is true)
+      SecondRegion:
+        default: Secondary region to copy the image to (Optional)
+      ThirdRegion:
+        default: Tertiary region to copy the image to (Optional)
+      
+Parameters:
+  Name:
+    Description: Unique name/identifier (Can be client name or resource name).
+    Type: String
+    Default: image-builder
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale-dev
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ImageRecipeVersion:
+    Description: The version of the image recipe. (use format xx.xx.xx)
+    Type: String
+    Default: 1.0.0 # use date formatting for versioning (yyyy.mm.dd)
+    AllowedPattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+  NetworkStackName:
+    Description: The name of the network stack.
+    Type: String
+    Default: iscale-dev-dev-uw2-network # change this if needed
+    MinLength: 1
+  SNSStackName:
+    Description: the name of the SNS stack.
+    Type: String
+    Default: pchc-prd-ase1-image-builder-sns # change this if needed
+    MinLength: 1
+  WindowsServer2022SsmParameter:
+    Description: The SSM Parameter for the Windows Server 2022 base image.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: "/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base"
+  ShareImage:
+    Description: Select true to not encrypt the image and share it with other accounts
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  ShareAccountList:
+    Description: List of AWS Account IDs to share the image with, separated by comma. (Required if ShareImage is true)
+    Type: CommaDelimitedList
+    Default: 470455329885,050821737631
+  SecondRegion:
+    Description: Secondary region to copy the image to (Optional)
+    Type: String
+    Default: "us-east-1"
+  ThirdRegion:
+    Description: Tertiary region to copy the image to (Optional)
+    Type: String
+    Default: "us-east-2"
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsImageShared: !Equals [!Ref ShareImage, true]
+
+Resources:
+
+###
+# Image Recipe
+###
+
+# Windows Server 2022 Image Recipe
+
+  Windows2022ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, 'base-windows2022']]
+      Version: !Ref ImageRecipeVersion
+      ParentImage: !Ref WindowsServer2022SsmParameter # parent image, use the latest from parameter store
+      WorkingDirectory: /tmp
+      Description: !Join [' ', ['Base image for', !Ref OrgName, 'windows server 2022']]
+      Components: #Max 20
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/aws-cli-version-2-windows/1.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/amazon-cloudwatch-agent-windows/1.0.0']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/update-windows/1.0.1']]
+        - ComponentArn: !Join [':', ['arn:aws:imagebuilder', !Ref 'AWS::Region', 'aws:component/chocolatey/1.0.0']]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: !If [IsImageShared, false, true]
+            VolumeType: gp3
+            VolumeSize: 30
+
+###
+# Image Builder
+###
+
+  Windows2022ImageBuilder:
+    Type: AWS::CloudFormation::Stack
+    Properties: 
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/ec2-image-builder.yaml
+      Parameters: 
+        Name: windows2022
+        EnvName: !Ref EnvName
+        NetworkStackName: !Ref NetworkStackName
+        OrgName: !Ref OrgName
+        ImageRecipeARN: !Ref Windows2022ImageRecipe
+        ShareImage: !Ref ShareImage
+        SNSStackName: !Ref SNSStackName
+        ShareAccountList: !Join [',', !Ref ShareAccountList]
+        SecondRegion: !Ref SecondRegion
+        ThirdRegion: !Ref ThirdRegion
