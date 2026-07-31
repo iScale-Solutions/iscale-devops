@@ -507,6 +507,17 @@ Resources:
         InstanceSubnet: Private
         InstanceType: !Ref InstanceType
         LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', !Ref LoadBalancerHostName]
+        # DR only: serve the live domain AND a DR alias on nginx (server_name).
+        # EnvShort is dynamic (TestDR->tdr, ProductionDR->pdr), so it works for any DR env.
+        # Live/other envs: AWS::NoValue -> param stays '' -> unchanged single-domain behavior.
+        ServerNameOverride: !If
+          - IsDR
+          - !Sub
+            - '${Host}.${Domain} ${Host}-${EnvShort}.${Domain}'
+            - Host: mis
+              Domain: !Ref ClientDomainName
+              EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+          - !Ref 'AWS::NoValue'
         LoadBalancerPriority: 100
         LoadBalancerStackName: !If
           - IsDeployPaidResources
@@ -515,7 +526,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SharedSecretId: !If
           - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
+          - !If [IsPITRMode, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
           - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
@@ -1282,7 +1293,7 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-DBStandbySubnetGroup'
 
-  DBStandbySecurityGroup:
+  DBStandbySecurityGroupId:
     Condition: IsDR
     Description: Pre-deployed DB security group for PITR restore
     Value: !GetAtt DBStandbySecurityGroup.GroupId
