@@ -341,42 +341,6 @@ def _check_restore_job(event):
 
 # â”€â”€ update_stack â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-def _resolve_app_template_url(stack_name):
-    """
-    Resolve the published parent template for this app stack in the central bucket.
-
-    Layout: s3://$APP_TEMPLATE_BUCKET/app-stacks/<stack_name>.yaml
-    e.g.    s3://pchc-tdr-ue2-failover-v2-app-templates/app-stacks/pchc-tdr-ue2-ddp.yaml
-
-    Keyed on the stack name so no state machine input is needed â€” adding a
-    required "app_template_url.$" field would make the whole path mandatory and
-    raise an uncatchable States.Runtime for any payload that omitted it.
-
-    Returns '' when the bucket is unset or the object is absent, so the caller
-    falls back to replaying the stored template â€” same behaviour as before this
-    change. Publishing a template is therefore opt-in per app.
-    """
-    bucket = os.environ.get('APP_TEMPLATE_BUCKET', '')
-    if not bucket:
-        logger.warning('[APP_TEMPLATE] APP_TEMPLATE_BUCKET unset â€” using the stored template')
-        return ''
-    region = os.environ['AWS_REGION']
-    key    = f'app-stacks/{stack_name}.yaml'
-    try:
-        boto3.client('s3', region_name=region).head_object(Bucket=bucket, Key=key)
-    except ClientError as e:
-        code = e.response['Error']['Code']
-        logger.warning(
-            f'[APP_TEMPLATE] s3://{bucket}/{key} unavailable ({code}) â€” '
-            f'falling back to the stored template for {stack_name}. '
-            f'Target groups and the port-443 SG ingress will be missing if that '
-            f'stored template was stripped by a previous failback.'
-        )
-        return ''
-    url = f'https://{bucket}.s3.{region}.amazonaws.com/{key}'
-    logger.info(f'[APP_TEMPLATE] Using published template {url}')
-    return url
-
 def _update_stack_action(event):
     region      = os.environ['AWS_REGION']
     stack_name  = event.get('stack_name', '')
@@ -392,11 +356,37 @@ def _update_stack_action(event):
         _cfn_update(cf, stack_name, extra, template_url=template_url or None)
         used = template_url or ''
     else:
-        # Prefer the published template over UsePreviousTemplate. The stored template
-        # cannot be trusted: dr-failback's 'comment' step strips LoadBalancerStackName
-        # out of it and the paired 'uncomment' cannot restore it once a JSON round-trip
-        # has removed the comment markers.
-        app_url = event.get('app_template_url', '') or _resolve_app_template_url(stack_name)
+        # Two conditions must BOTH hold before the stored template is replaced:
+        #
+        #   1. app_template_url is non-empty in the event payload. Empty means
+        #      "use whatever CloudFormation already has stored" â€” the pre-existing
+        #      behaviour â€” so an app that has not opted in is untouched. This is
+        #      per-app opt-in and it is visible in the payload rather than implied
+        #      by the contents of a bucket.
+        #
+        #   2. This update is the one bringing paid resources up. That is the update
+        #      whose template has to be correct: it re-evaluates
+        #      HasLoadBalancerStackName and therefore creates the app-server target
+        #      groups, the ASG TargetGroupARNs, and the port-443 SG ingress. The
+        #      stored template cannot be trusted for it â€” dr-failback's 'comment'
+        #      step strips LoadBalancerStackName out, and the paired 'uncomment'
+        #      cannot restore it once a JSON round-trip has removed the markers.
+        #      Substituting the template on a teardown or on any future unrelated
+        #      update would apply accumulated template drift as a side effect.
+        app_url        = (event.get('app_template_url') or '').strip()
+        deploying_paid = str(extra.get('DeployPaidResources', '')).lower() == 'true'
+
+        if app_url and deploying_paid:
+            logger.info(f'[APP_TEMPLATE] {stack_name}: using published template {app_url}')
+        else:
+            if not app_url:
+                reason = 'app_template_url is empty'
+            else:
+                reason = (f'DeployPaidResources is not true '
+                          f'(value={extra.get("DeployPaidResources", "<unset>")!r})')
+            logger.info(f'[APP_TEMPLATE] {stack_name}: {reason} â€” keeping the stored template')
+            app_url = ''
+
         _cfn_update(cf, stack_name, extra, template_url=app_url or None)
         used = app_url
 
