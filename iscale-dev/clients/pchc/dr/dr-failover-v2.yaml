@@ -867,6 +867,7 @@ Resources:
               region           = os.environ['AWS_REGION']
               asg_name         = inp.get('asg_name') or ''
               tag_suffix       = inp.get('tag_suffix', '')
+              name_prefix      = inp.get('asg_name_prefix') or None
               app_stack_name   = event.get('app_stack_name', '')
               min_size         = int(inp.get('min_size', 0))
               desired_capacity = int(inp.get('desired_capacity', 0))
@@ -874,8 +875,8 @@ Resources:
               if not asg_name and not tag_suffix:
                   raise ValueError('asg_name or tag_suffix is required for set_asg_capacity')
               if not asg_name:
-                  asg_name = _discover_live_asg(region, app_stack_name, tag_suffix)
-                  logger.info(f'Discovered ASG: {asg_name} (app_stack_name={app_stack_name} tag_suffix={tag_suffix})')
+                  asg_name = _discover_live_asg(region, app_stack_name, tag_suffix, name_prefix)
+                  logger.info(f'Discovered ASG: {asg_name} (app_stack_name={app_stack_name} tag_suffix={tag_suffix} name_prefix={name_prefix})')
               if not asg_name:
                   raise Exception(f'Could not resolve an ASG name for tag_suffix={tag_suffix}')
               asg = boto3.client('autoscaling', region_name=region)
@@ -925,14 +926,15 @@ Resources:
               all_healthy = True
               results     = []
               for cfg in asg_configs:
-                  asg_name   = cfg.get('asg_name') or ''
-                  tag_suffix = cfg.get('tag_suffix', '')
-                  desired    = int(cfg.get('desired_capacity', 0))
+                  asg_name    = cfg.get('asg_name') or ''
+                  tag_suffix  = cfg.get('tag_suffix', '')
+                  name_prefix = cfg.get('asg_name_prefix') or None
+                  desired     = int(cfg.get('desired_capacity', 0))
                   if desired == 0:
                       results.append({'asg_name': asg_name or tag_suffix, 'desired': 0, 'in_service': 0, 'healthy': True})
                       continue
                   if not asg_name:
-                      asg_name = _discover_live_asg(region, app_stack_name, tag_suffix)
+                      asg_name = _discover_live_asg(region, app_stack_name, tag_suffix, name_prefix)
                   resp       = asg_client.describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
                   group      = resp['AutoScalingGroups'][0]
                   in_service = len([i for i in group['Instances'] if i['LifecycleState'] == 'InService'])
@@ -1122,6 +1124,7 @@ Resources:
               region         = os.environ['AWS_REGION']
               app_name       = inp.get('application_name', '')
               tag_suffix     = inp.get('tag_suffix', '')
+              name_prefix    = inp.get('asg_name_prefix') or None
               app_stack_name = event.get('app_stack_name', '')
               if not app_name or not tag_suffix:
                   raise ValueError(
@@ -1136,7 +1139,7 @@ Resources:
               dg_name = dg_names[0]
               logger.info(f'Discovered deployment group: {dg_name} (app={app_name})')
               # ASG resolution is pure tag discovery — see _discover_live_asg for why.
-              asg_name = _discover_live_asg(region, app_stack_name, tag_suffix)
+              asg_name = _discover_live_asg(region, app_stack_name, tag_suffix, name_prefix)
               # Switch from Ec2TagFilters to AutoScalingGroups so lifecycle hooks fire on scale-out
               cd.update_deployment_group(
                   applicationName=app_name,
@@ -1151,10 +1154,22 @@ Resources:
                   'asg_name':              asg_name,
               }
 
-          def _discover_live_asg(region, app_stack_name, tag_suffix):
+          def _discover_live_asg(region, app_stack_name, tag_suffix, name_prefix=None):
               """Find the currently-live ASG for one app-server role (e.g. 'api', 'tre', 'skiq',
               'cs') by its LAUNCH TEMPLATE NAME — never by the ASG's own physical name, and
               never by asking CodeDeploy or walking CFN stack resources.
+
+              name_prefix (optional): overrides app_stack_name as the LaunchTemplateName match
+              prefix, for apps whose nested app-server stacks don't share the app stack's own
+              name stem. paygate is the motivating case — app_stack_name is
+              'pchc-tdr-ue2-paygate' but its Launch Templates are 'pchc-tdr-ue2-pg-ui-...',
+              '-pg-pchc-', '-pg-pay-' (a different 'pg' stem, not a missing suffix — see the
+              'pddts.json "LaunchTemplate" tag_suffix' note in pchc-dr-automation's CLAUDE.md
+              for the *different* bare-suffix problem this is not). Passing
+              name_prefix='pchc-tdr-ue2-pg' with tag_suffix='ui'/'pchc'/'pay' matches those
+              directly. app_stack_name is still required and still passed through to logging —
+              only the regex prefix changes. Defaults to None so every other app's discovery is
+              byte-for-byte unchanged.
 
               ASG names are not stable: CodeDeploy blue/green replaces the original CFN-managed
               ASG with one it names itself ('CodeDeploy_<deployment-group-id>_d-<deployment-id>'),
@@ -1199,7 +1214,8 @@ Resources:
               if not app_stack_name or not tag_suffix:
                   raise ValueError('app_stack_name and tag_suffix are required to discover an ASG')
               import re
-              pattern    = re.compile(re.escape(f'{app_stack_name}-{tag_suffix}') + r'(-|$)')
+              prefix     = name_prefix or app_stack_name
+              pattern    = re.compile(re.escape(f'{prefix}-{tag_suffix}') + r'(-|$)')
               asg_client = boto3.client('autoscaling', region_name=region)
               paginator  = asg_client.get_paginator('describe_auto_scaling_groups')
               candidates = []
@@ -1216,19 +1232,20 @@ Resources:
               if not candidates:
                   raise Exception(
                       f'No ASG found with a LaunchTemplateName matching app_stack_name={app_stack_name!r} '
-                      f'tag_suffix={tag_suffix!r} (looked for "{app_stack_name}-{tag_suffix}-LaunchTemplate"). '
-                      f'Checked every ASG in region {region} by Launch Template name, not by ASG name or tags.'
+                      f'name_prefix={name_prefix!r} tag_suffix={tag_suffix!r} (looked for '
+                      f'"{prefix}-{tag_suffix}-LaunchTemplate"). Checked every ASG in region '
+                      f'{region} by Launch Template name, not by ASG name or tags.'
                   )
               if len(candidates) > 1:
                   names = [c['AutoScalingGroupName'] for c in candidates]
                   logger.warning(
-                      f'{len(candidates)} ASGs matched app_stack_name={app_stack_name!r} '
+                      f'{len(candidates)} ASGs matched prefix={prefix!r} '
                       f'tag_suffix={tag_suffix!r}: {names} — a stale pre-swap ASG may still '
                       f'exist. Picking the most recently created.'
                   )
               candidates.sort(key=lambda g: g.get('CreatedTime'), reverse=True)
               chosen = candidates[0]['AutoScalingGroupName']
-              logger.info(f'Discovered live ASG by LaunchTemplateName: {chosen} (app_stack_name={app_stack_name} tag_suffix={tag_suffix})')
+              logger.info(f'Discovered live ASG by LaunchTemplateName: {chosen} (app_stack_name={app_stack_name} name_prefix={name_prefix} tag_suffix={tag_suffix})')
               return chosen
 
 
