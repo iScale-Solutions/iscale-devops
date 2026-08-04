@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: DNS records for proutard.com
+
+Parameters:
+  OrgName:
+    Description: The name of the organization
+    Type: String
+    Default: proutard
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+  DNSSECKey:
+    Description: Enter the KMS key (from us-east-1) for DNSSSec (optional)
+    Type: String
+    Default: arn:aws:kms:us-east-1:178070162686:key/315d6bf8-09eb-4b0d-971c-5ef787b8d57b
+  DomainName:
+    Description: The domain name (e.g. example.com).
+    Type: String
+    Default: proutard.com
+
+Mappings: 
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+
+Resources:
+
+####
+# Route53 Section
+####
+
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join [' ',[Hosted Zone for, !Ref DomainName]]
+      Name: !Ref DomainName
+      HostedZoneTags:
+        - Key: Name
+          Value: !Ref 'AWS::StackName'
+        - Key: Organization
+          Value: !Ref OrgName
+
+  # DomainSSLValidationRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[_e8f718726886948c3099ec328c764242, !Ref DomainName]]
+  #     Type: CNAME
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - _b6c28a71cd06d559cfedd0e42240a417.acm-validations.aws.
+
+  # WWWSSLValidationRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: !Ref HostedZone
+  #     Name: !Join ['.',[_2da6cfcad0e4aef295f24fd4b298bc51, www, !Ref DomainName]]
+  #     Type: CNAME
+  #     TTL: 14400
+  #     ResourceRecords:
+  #       - _5ee579f55254fe592888e9e004fa5f2b.jkddzztszm.acm-validations.aws.
+
+  ###
+  # DNSSEC
+  ###
+
+  HostedZoneDNSSECSigningKey:
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: !Ref DNSSECKey
+      Name: key_signing_key
+      Status: ACTIVE
+
+  HostedZoneDNSSEC:
+    DependsOn: HostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref HostedZone
