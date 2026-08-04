@@ -25,28 +25,38 @@ Metadata:
       - Label:
           default: Instance Configuration
         Parameters:
-          - InstanceAmi
+          - InstanceAMI
           - InstanceType
       - Label:
           default: BSP Interface Configuration
         Parameters:
           - InstanceKeyName
-          - BSPInterfaceAMI
       - Label:
           default: Scheduler Configuration
         Parameters:
           - StartScheduleExpression
           - StopScheduleExpression
       - Label:
-          default: VPN Configuration
+          default: BSP Configuration
         Parameters:
-          # - InstanceAmi
-          - StrongswanActive
           - BSPMode
-          - StrongswanPPPPSK
-          - Strongswan3RDPSK
-          - StrongswanAMI
-          - BSPInterfaceHostname
+      - Label:
+          default: Disaster Recovery
+        Parameters:
+          - DeployPaidResources
+          - SnapshotIdentifier
+          - DBMasterUserPassword
+          - EnableCrossRegionBackupReplication
+          - EnableCodeDeployReplication
+          - SourceDbInstanceArn
+          - BackupReplicationRetentionPeriod
+          - LiveSecretArn
+          - DRRegion
+          - IsPITRMode
+          - PITRDBEndpoint
+          - ExternalEFSId
+          - BackupVaultEncryptionKeyArn
+          - HourlyEFSDRRetentionDays
 
     ParameterLabels:
       Name:
@@ -55,12 +65,8 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
-      BSPInterfaceHostname:
-        default: BSP interface hostname
       DeletionProtection:
         default: Protect core items against deletion
-      BSPInterfaceAMI:
-        default: Philpass Instance AMI ID
       InstanceKeyName:
         default: Instance Key Name
       InstanceType:
@@ -71,7 +77,7 @@ Metadata:
         default: Load Balancer SSL Certificate ARN
       LoadBalancerHostName:
         default: Load Balancer Host Name
-      InstanceAmi:
+      InstanceAMI:
         default: Instance AMI ID
       NetworkStackName:
         default: Network Stack Name
@@ -83,14 +89,34 @@ Metadata:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
-      StrongswanActive:
-        default: Active StrongSwan Instance (default is true)
-      StrongswanAMI:
-        default: Strongswan AMI ID
-      StrongswanPPPPSK:
-        default: StrongSwan PhilPassPlus Shared Key
-      Strongswan3RDPSK:
-        default: StrongSwan 3rd Party Shared Key
+      DeployPaidResources:
+        default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      SnapshotIdentifier:
+        default: DB Snapshot Identifier (DR failover restore — leave blank for normal)
+      DBMasterUserPassword:
+        default: DB Master Password (DR failover only — leave blank for normal)
+      EnableCrossRegionBackupReplication:
+        default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
+      EnableCodeDeployReplication:
+        default: Enable CodeDeploy Artifact Replication to DR region (live stack only — leave false for DR stacks)
+      SourceDbInstanceArn:
+        default: Source DB Instance ARN (live region — required when replication is enabled)
+      BackupReplicationRetentionPeriod:
+        default: Backup Retention Period in DR region (days)
+      LiveSecretArn:
+        default: Live Region Secret ARN (DR standby only — required for secrets sync)
+      DRRegion:
+        default: DR AWS Region (backup copy destination)
+      IsPITRMode:
+        default: PITR Mode (set by dr-failover-v2 only — do not change manually)
+      PITRDBEndpoint:
+        default: PITR DB Endpoint (set by dr-failover-v2 only — do not change manually)
+      ExternalEFSId:
+        default: Restored EFS ID (written by dr-failover before stack update — DR only)
+      BackupVaultEncryptionKeyArn:
+        default: KMS CMK ARN for EFS backup vault encryption (multi-region key replica required in DR region)
+      HourlyEFSDRRetentionDays:
+        default: Days to retain hourly EFS backup copies in DR vault (must span full incremental chain)
 
 Parameters:
   Name:
@@ -115,6 +141,10 @@ Parameters:
       - Staging
       - Development
       - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
   BSPMode:
     Description: BSP Resources to connect to
     Type: String
@@ -122,11 +152,6 @@ Parameters:
     AllowedValues:
       - Production
       - UAT
-  BSPInterfaceHostname:
-    Description: Hostname for the BSP interface instance
-    Type: String
-    Default: philpassv2
-    MinLength: 1
   ClientDomainName:
     Description: The client's domain name (e.g. example.com, iscale-software.com)
     Type: String
@@ -140,10 +165,6 @@ Parameters:
     AllowedValues:
       - true
       - false
-  BSPInterfaceAMI:
-    Description: Instance AMI ID
-    Type: AWS::EC2::Image::Id
-    Default: ami-00b8d9cb8a7161e41 #Default Amazon Linux 2 for Singapore
   InstanceKeyName:
     Description: Instance Key Name
     Type: String
@@ -156,7 +177,7 @@ Parameters:
       - t3.medium
       - t3.large
       - t3.xlarge
-  InstanceAmi:
+  InstanceAMI:
     Description: AMI ID of Philpass App
     Type: AWS::EC2::Image::Id
     Default: ami-0499b5b9a26be1426 # philpass base ami
@@ -191,25 +212,126 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
-  StrongswanActive:
-    Description: Set to false only to turn off Strongswan
+  DeployPaidResources:
+    Description: |
+      true (default): Deploy all paid resources — DB, LBs, and App Servers. Normal operation for all environments.
+      false: DR standby mode — suppress all paid resources to minimize idle cost. Only CodeDeploy infra stays alive.
+      DR failover: set back to true and provide SnapshotIdentifier to restore DB from the cross-region backup.
     Type: String
-    Default: true
+    Default: 'true'
     AllowedValues:
-      - true
-      - false
-  StrongswanAMI:
-    Description: Strongswan Instance AMI ID
-    Type: AWS::EC2::Image::Id
-    Default: ami-0499b5b9a26be1426
-  StrongswanPPPPSK:
-    Description: Password for PhilPassPlus PSK
+      - 'true'
+      - 'false'
+  SnapshotIdentifier:
+    Description: |
+      (DR Failover only) ARN of the RDS snapshot to restore the database from.
+      Obtain by copying the latest automated backup from the live region into the DR region before failover.
+      Leave blank for normal fresh DB creation — existing deployments are unaffected.
     Type: String
-    NoEcho: true
-  Strongswan3RDPSK:
-    Description: Password for 3rd Party PSK
+    Default: ''
+  DBMasterUserPassword:
+    Description: |
+      (DR Failover only) Master user password of the source database.
+      Provide this during snapshot restore so the Secrets Manager secret stays in sync with the restored DB credentials.
+      Leave blank for auto-generated password — existing deployments are unaffected.
     Type: String
+    Default: ''
     NoEcho: true
+  EnableCrossRegionBackupReplication:
+    Description: |
+      Set to true to enable cross-region automated backup replication for the DB.
+      Deploy with this enabled in the DR region stack, pointing SourceDbInstanceArn to the live DB.
+      Replicates daily snapshots + transaction logs — enables PITR with ~5 minute RPO in the DR region.
+      Default false — existing deployments are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  EnableCodeDeployReplication:
+    Description: Set to true on the live stack to enable CRR of CodeDeploy artifacts to the DR region bucket. Must be false on DR stacks.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  SourceDbInstanceArn:
+    Description: |
+      ARN of the live region RDS DB instance to replicate from.
+      Required when EnableCrossRegionBackupReplication=true.
+      Format: arn:aws:rds:<live-region>:<account-id>:db:<db-identifier>
+      Obtain from the live stack DBStack output: DBInstanceARN.
+    Type: String
+    Default: ''
+  BackupReplicationRetentionPeriod:
+    Description: Number of days to retain replicated backups in the DR region (1-35)
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+  LiveSecretArn:
+    Description: |
+      ARN of the live region Secrets Manager secret to replicate from.
+      Obtain from the live stack Secrets Manager console.
+      Only required when deploying in DR (ProductionDR) — leave blank for normal deployments.
+    Type: String
+    Default: ''
+  IsPITRMode:
+    Description: |
+      Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
+      When true, DBStack is suppressed (DB was restored externally via PITR) and all DB references
+      resolve from PITRDBEndpoint and the pre-deployed DBStandbySecurityGroup instead of DBStack outputs.
+      Default false — live stacks and snapshot-based failover are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  PITRDBEndpoint:
+    Description: |
+      Endpoint of the PITR-restored RDS instance. Written to SSM and Secrets Manager by the
+      dr-failover Step Functions machine before the app stack update. Only used when IsPITRMode=true.
+      Leave blank for all other deployments — existing stacks are unaffected.
+    Type: String
+    Default: ''
+  DRRegion:
+    Description: AWS region of the DR stack — used to construct the DR backup vault ARN for cross-region EFS copy
+    Type: String
+    Default: 'us-east-2'
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-1
+      - us-west-2
+      - ap-southeast-1
+      - ap-southeast-2
+  ExternalEFSId:
+    Description: |
+      (DR Failover only) ID of the EFS file system restored from cross-region backup.
+      Written by dr-failover before the stack update. When set, ServerStack skips EFS creation
+      and mounts this file system instead. Leave blank for normal operation — live stacks always
+      create their own EFS and are completely unaffected.
+    Type: String
+    Default: ''
+  HourlyEFSDRRetentionDays:
+    Description: |
+      Number of days to retain hourly EFS backup copies in the DR vault.
+      Hourly copies are the high-frequency incremental recovery points for Option B (< 1 hour RPO).
+      Daily copies serve as the long-term baseline; hourly copies layer on top.
+      Must be >= 2 (minimum for incremental chain integrity) and <= 35 (AWS Backup maximum).
+    Type: Number
+    Default: 14
+    MinValue: 2
+    MaxValue: 35
+  BackupVaultEncryptionKeyArn:
+    Description: |
+      ARN of the KMS CMK used to encrypt the backup vault and every recovery point stored in it.
+      Must be a multi-region key: the primary key in the live region encrypts the source vault, and
+      the replica key in the DR region encrypts the DRBackupVault, so cross-region copies are
+      immediately decryptable at DR restore time — no key import or manual re-encryption required.
+      Leave blank to use the default AWS-managed aws/backup key (NOT decryptable cross-region).
+    Type: String
+    Default: ''
 
 Mappings:
   Fn::Transform:
@@ -266,12 +388,41 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
-  HasKeyName: !Not [!Equals [!Ref InstanceKeyName, '']]
-  HasLoadBalancerHostName: !Not [!Equals [!Ref BSPInterfaceHostname, '']]
-  IsStrongswanActive: !Equals [!Ref StrongswanActive, true]
-  IsStrongswanAlarmActive: !And [Condition: IsStrongswanActive, Condition: IsProd]
-  IsBSPProd: !And [Condition: IsStrongswanActive, !Equals [!Ref BSPMode, Production]]
-  IsBSPUAT: !And [Condition: IsStrongswanActive, !Equals [!Ref BSPMode, UAT]]
+  IsDR: !Or
+    - !Equals [!Ref EnvName, ProductionDR]
+    - !Equals [!Ref EnvName, StagingDR]
+    - !Equals [!Ref EnvName, DevelopmentDR]
+    - !Equals [!Ref EnvName, TestDR]
+  IsProdOrProductionDR: !Or
+    - Condition: IsProd
+    - !Equals [!Ref EnvName, ProductionDR]
+  IsDeployPaidResources: !Equals [!Ref DeployPaidResources, 'true']
+  IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
+  IsEnableCodeDeployReplication: !Equals [!Ref EnableCodeDeployReplication, 'true']
+  IsDRAndEnableCrossRegionBackupReplication: !And
+    - Condition: IsDR
+    - Condition: IsEnableCrossRegionBackupReplication
+  # DR environments evaluate as non-prod, so the scheduler must also be gated on NotDR —
+  # otherwise it would stop resources during a failover.
+  IsNotProdAndDeployPaidResourcesAndNotDR: !And
+    - Condition: IsNotProd
+    - Condition: IsDeployPaidResources
+    - !Not [Condition: IsDR]
+  IsPITRMode: !Equals [!Ref IsPITRMode, 'true']
+  # DBStack and its dependents are suppressed when PITR mode is active — DB was restored externally.
+  IsDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsDeployPaidResources
+    - !Not [Condition: IsPITRMode]
+  IsBackupEncryptionKeyProvided: !Not [!Equals [!Ref BackupVaultEncryptionKeyArn, '']]
+  IsProdOrTest: !Or
+    - Condition: IsProd
+    - Condition: IsTest
+  # BackupStack is deliberately NOT deployed in DR: backup.yaml would create a vault with the
+  # same name as DRBackupVault, failing the stack update at failover. Consequence: the DR
+  # environment runs without a backup plan until failback.
+  IsProdOrTestAndDeployPaidResourcesAndNotPITR: !And
+    - Condition: IsProdOrTest
+    - Condition: IsDeployPaidResourcesAndNotPITR
 
 Resources:
 
@@ -281,7 +432,7 @@ Resources:
 
   BSPDNSResolverSecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties:
       GroupDescription: BSP DNS Resolver Security Group
       VpcId: 
@@ -299,7 +450,7 @@ Resources:
 
   BSPDNSResolver:
     Type: AWS::Route53Resolver::ResolverEndpoint
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties:
       Direction: OUTBOUND
       IpAddresses:
@@ -315,7 +466,7 @@ Resources:
 
   BSPDomainResolverRule:
     Type: AWS::Route53Resolver::ResolverRule
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties: 
       DomainName: bsp.gov.ph
       Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Domain, Rule]]
@@ -329,7 +480,7 @@ Resources:
 
   BSPDomainVPCAssociation:
     Type: AWS::Route53Resolver::ResolverRuleAssociation
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties: 
       ResolverRuleId: !Ref BSPDomainResolverRule
       VPCId:
@@ -338,1028 +489,25 @@ Resources:
 
   BSPDNSResolverLogGroup:
     Type: AWS::Logs::LogGroup
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties:
       LogGroupName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], BSP, Resolver]]
 
   BSPDNSResolverLog:
     Type: AWS::Route53Resolver::ResolverQueryLoggingConfig
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties:
       DestinationArn: !GetAtt BSPDNSResolverLogGroup.Arn
   
   BSPDNSResolverLogAssociation:
     Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
-    Condition: IsProd
+    Condition: IsProdOrProductionDR
     Properties: 
       ResolverQueryLogConfigId: !Ref BSPDNSResolverLog
       ResourceId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-VpcId'
   
-  ###
-  # Custom Network resources for BSP
-  ###
-  
-  # StrongSwanSecurityGroup:
-  #   Type: AWS::EC2::SecurityGroup
-  #   Properties:
-  #     GroupDescription: StrongSwan Public Security Group
-  #     VpcId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-VpcId'
-
-  # AllowICMPIntoStrongSwan:
-  #   Condition: IsStrongswanActive
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     IpProtocol: icmp
-  #     GroupId: !Ref StrongSwanSecurityGroup
-  #     FromPort: -1
-  #     ToPort: -1
-  #     CidrIp:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-VpcCidrBlock'
-
-  # AllowHTTPSIntoStrongSwan:
-  #   Condition: IsStrongswanActive
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     IpProtocol: tcp
-  #     GroupId: !Ref StrongSwanSecurityGroup
-  #     FromPort: 443
-  #     ToPort: 443
-  #     CidrIp:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-VpcCidrBlock'
-
-  # AllowDNSIntoStrongSwan:
-  #   Condition: IsStrongswanActive
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     IpProtocol: udp
-  #     GroupId: !Ref StrongSwanSecurityGroup
-  #     FromPort: 53
-  #     ToPort: 53
-  #     CidrIp:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-VpcCidrBlock'
-
-  # StrongSwanAZ1ENI:
-  #   Type: AWS::EC2::NetworkInterface
-  #   Properties:
-  #     Description: !Join
-  #       - ' '
-  #       - - Gateway Main ENI
-  #         - !Select
-  #           - 0
-  #           - Fn::GetAZs: !Ref 'AWS::Region'
-  #     GroupSet:
-  #       - !Ref StrongSwanSecurityGroup
-  #     PrivateIpAddress: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ1] #Registered with BSP
-  #     SourceDestCheck: false
-  #     SubnetId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PublicSubnetId1'
-  #     Tags:
-  #       - Key: Name
-  #         Value: StrongSwan public ENI
-
-  # StrongSwanAZ2ENI:
-  #   Type: AWS::EC2::NetworkInterface
-  #   Properties:
-  #     Description: !Join
-  #       - ' '
-  #       - - BSP Access ENI
-  #         - !Select
-  #           - 1
-  #           - Fn::GetAZs: !Ref 'AWS::Region'
-  #     GroupSet:
-  #       - !Ref StrongSwanSecurityGroup
-  #     PrivateIpAddress: !FindInMap [BSPConfig, !Ref BSPMode, StrongSwanENIPrivIPAZ2] #Registered with BSP
-  #     SourceDestCheck: false
-  #     SubnetId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PublicSubnetId2'
-  #     Tags:
-  #       - Key: Name
-  #         Value: StrongSwan public ENI
-
-  # BSPVPNGatewayEIP1: # - Hardcoded for BSP
-  #   DeletionPolicy: Retain #Make sure to retain always
-  #   UpdateReplacePolicy: Retain
-  #   Type: AWS::EC2::EIP
-  #   Properties:
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join [' ', [!Ref Name, !Ref EnvName, BSP registered IP - AZ1]]
-
-  # BSPVPNGatewayEIP2: # - Hardcoded for BSP
-  #   DeletionPolicy: Retain #Make sure to retain always
-  #   UpdateReplacePolicy: Retain
-  #   Type: AWS::EC2::EIP
-  #   Properties:
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join [' ', [!Ref Name, !Ref EnvName, BSP registered IP - AZ2]]
-
-  ##
-  # BSP target resources
-  ##
-
-  # BSP3rdPartyRouteAZ1:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsStrongswanActive
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # BSP3rdPartyRouteAZ2:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsStrongswanActive
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyResource]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPResource1AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsStrongswanActive
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPResource1AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsStrongswanActive
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource1], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPResource2AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP2 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPResource2AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP2 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource2], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPResource3AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP3 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPResource3AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP3 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource3], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPResource4AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP4 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPResource4AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP4 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource4], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPResource5AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP5 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPResource5AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP5 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource5], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPResource6AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP6 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPResource6AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No IP6 except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPResource6], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPDRResource1AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No DR resource except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPDRResource1AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No DR resource except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource1], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPDRResource2AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No DR resource except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPDRResource2AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No DR resource except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource2], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPDRResource3AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No DR resource except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPDRResource3AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No DR resource except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource3], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # PPPDRResource4AZ1Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No DR resource except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # PPPDRResource4AZ2Route:
-  #   Type: AWS::EC2::Route
-  #   Condition: IsBSPProd #No DR resource except in prod
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, Production, PPPDRResource4], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # BSPPhilPassPlusRouteDNS1AZ1:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # BSPPhilPassPlusRouteDNS1AZ2:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer1], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  # BSPPhilPassPlusRouteDNS2AZ1:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable1'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-
-  # BSPPhilPassPlusRouteDNS2AZ2:
-  #   Type: AWS::EC2::Route
-  #   Properties:
-  #     RouteTableId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-PrivateRouteTable2'
-  #     DestinationCidrBlock: !Join ['', [!FindInMap [BSPConfig, !Ref BSPMode, PPPDNSServer2], '/32']]
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-
-  ##
-  # StrongSwan EC2 instances
-  ##
-  # StrongSwanLaunchConfig:
-  #   Type: AWS::AutoScaling::LaunchConfiguration
-  #   Metadata:
-  #     AWS::CloudFormation::Init:
-  #       configSets:
-  #         AZ1ConfigProd:
-  #           - NetworkFiles
-  #           - PSK
-  #           - AZ1ConfigProd
-  #           - StartStrongSwan
-  #         AZ2ConfigProd:
-  #           - NetworkFiles
-  #           - PSK
-  #           - AZ2ConfigProd
-  #           - StartStrongSwan
-  #         AZ1ConfigUAT:
-  #           - NetworkFiles
-  #           - PSK
-  #           - AZ1ConfigUAT
-  #           - StartStrongSwan
-  #         AZ2ConfigUAT:
-  #           - NetworkFiles
-  #           - PSK
-  #           - AZ2ConfigUAT
-  #           - StartStrongSwan
-
-  #       StartStrongSwan:
-  #         commands:
-  #           01_restart_strongswan:
-  #             command: '/usr/sbin/strongswan restart'
-  #             ignoreErrors: true
-  #           02_create_nat_tables:
-  #             command: '/sbin/iptables-restore < /etc/iptables.rules'
-
-  #       NetworkFiles:
-  #         commands:
-  #           ip_forward:
-  #             command: 'echo 1 > /proc/sys/net/ipv4/ip_forward'
-  #           send_redirects:
-  #             command: 'echo 0 > /proc/sys/net/ipv4/conf/eth0/send_redirects'
-  #         files:
-  #           /etc/sysctl.d/nat.conf:
-  #             content: |
-  #               net.ipv4.ip_forward = 1
-  #               net.ipv4.conf.eth0.send_redirects = 0
-
-  #       PSK:
-  #         files:
-  #           /etc/strongswan/ipsec.secrets:
-  #             content: !Sub
-  #               - |
-  #                 @pchc ${PPP_GATEWAY} : PSK "${PSK_PPP}"
-  #                 @pchc ${PPP_DR_GATEWAY} : PSK "${PSK_PPP}"
-  #                 @pchc ${3RD_GATEWAY} : PSK "${PSK_3RD}"
-  #               - PSK_PPP: !Ref StrongswanPPPPSK
-  #                 PSK_3RD: !Ref Strongswan3RDPSK
-  #                 PPP_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PPPGateway]
-  #                 PPP_DR_GATEWAY: !If
-  #                   - IsBSPUAT
-  #                   - !FindInMap [BSPConfig, UAT, PPPGateway]
-  #                   - !FindInMap [BSPConfig, Production, PPPDRGateway]
-  #                 3RD_GATEWAY: !FindInMap [BSPConfig, !Ref BSPMode, PP3rdPartyGateway]
-
-  #       AZ1ConfigProd:
-  #         files:
-  #           /etc/iptables.rules:
-  #             content: !Sub
-  #               - |
-  #                 *nat
-  #                 :PREROUTING ACCEPT [18:1376]
-  #                 :INPUT ACCEPT [15:1148]
-  #                 :OUTPUT ACCEPT [222:17540]
-  #                 :POSTROUTING ACCEPT [222:17540]
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${PPP_DR_SUBNET} -o eth0 -j MASQUERADE
-  #                 COMMIT
-  #               - 3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
-  #                 PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
-  #                 PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
-  #                 PRIVATE_SUBNET_AZ1: !FindInMap [BSPConfig, Production, StrongSwanPrivateSubnetAZ1]
-  #             permissions: 0700
-  #             owner: root
-  #             group: root
-  #           /etc/strongswan/ipsec.conf:
-  #             content: !Sub
-  #               - |
-  #                 config setup
-  #                   charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
-
-  #                 conn bspPPPlus
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     forceencaps=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${PPP_GATEWAY}
-  #                     rightsubnet=${PPP_SUBNET}
-  #                     ike=aes256-sha256-modp2048
-  #                     ikelifetime=43200s
-  #                     esp=aes128-sha256-modp2048
-
-  #                 conn bspPPPlusDR
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${PPP_DR_GATEWAY}
-  #                     rightsubnet=${PPP_DR_SUBNET}
-  #                     ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
-  #                     ikelifetime=43200s #Time before re authentication of keys
-  #                     esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
-
-  #                 conn bspPP3rd
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     forceencaps=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${3RD_GATEWAY}
-  #                     rightsubnet=${3RD_SUBNET}
-  #                     ike=aes256-sha256-modp2048
-  #                     ikelifetime=43200s
-  #                     esp=aes128-sha256-modp2048
-  #               - 3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
-  #                 PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
-  #                 PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
-  #                 LEFT_IP: !FindInMap [BSPConfig, Production, StrongSwanENIPrivIPAZ1]
-  #                 LEFT_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPublicSubnetAZ1]
-  #                 PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
-  #                 PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
-  #                 3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
-  #             permissions: 0700
-  #             owner: root
-  #             group: root
-
-  #       AZ2ConfigProd:
-  #         files:
-  #           /etc/iptables.rules:
-  #             content: !Sub
-  #               - |
-  #                 *nat
-  #                 :PREROUTING ACCEPT [18:1376]
-  #                 :INPUT ACCEPT [15:1148]
-  #                 :OUTPUT ACCEPT [222:17540]
-  #                 :POSTROUTING ACCEPT [222:17540]
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${PPP_DR_SUBNET} -o eth0 -j MASQUERADE
-  #                 COMMIT
-  #               - 3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
-  #                 PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
-  #                 PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
-  #                 PRIVATE_SUBNET_AZ2: !FindInMap [BSPConfig, Production, StrongSwanPrivateSubnetAZ2]
-  #             permissions: 0700
-  #             owner: root
-  #             group: root
-  #           /etc/strongswan/ipsec.conf:
-  #             content: !Sub
-  #               - |
-  #                 config setup
-  #                   charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
-
-  #                 conn bspPPPlus
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${PPP_GATEWAY}
-  #                     rightsubnet=${PPP_SUBNET}
-  #                     ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
-  #                     ikelifetime=43200s #Time before re authentication of keys
-  #                     esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
-
-  #                 conn bspPPPlusDR
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${PPP_DR_GATEWAY}
-  #                     rightsubnet=${PPP_DR_SUBNET}
-  #                     ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
-  #                     ikelifetime=43200s #Time before re authentication of keys
-  #                     esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
-
-  #                 conn bspPP3rd
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${3RD_GATEWAY}
-  #                     rightsubnet=${3RD_SUBNET}
-  #                     ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
-  #                     ikelifetime=43200s #Time before re authentication of keys
-  #                     esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
-  #               - 3RD_SUBNET: !FindInMap [BSPConfig, Production, PP3rdPartySubnetCIDR]
-  #                 PPP_SUBNET: !FindInMap [BSPConfig, Production, PPPSubnetCIDR]
-  #                 PPP_DR_SUBNET: !FindInMap [BSPConfig, Production, PPPDRSubnetCIDR]
-  #                 LEFT_IP: !FindInMap [BSPConfig, Production, StrongSwanENIPrivIPAZ2]
-  #                 LEFT_SUBNET: !FindInMap [BSPConfig, Production, StrongSwanPublicSubnetAZ2]
-  #                 PPP_GATEWAY: !FindInMap [BSPConfig, Production, PPPGateway]
-  #                 PPP_DR_GATEWAY: !FindInMap [BSPConfig, Production, PPPDRGateway]
-  #                 3RD_GATEWAY: !FindInMap [BSPConfig, Production, PP3rdPartyGateway]
-  #             permissions: 0700
-  #             owner: root
-  #             group: root
-        
-  #       AZ1ConfigUAT:
-  #         files:
-  #           /etc/iptables.rules:
-  #             content: !Sub
-  #               - |
-  #                 *nat
-  #                 :PREROUTING ACCEPT [18:1376]
-  #                 :INPUT ACCEPT [15:1148]
-  #                 :OUTPUT ACCEPT [222:17540]
-  #                 :POSTROUTING ACCEPT [222:17540]
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ1} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
-  #                 COMMIT
-  #               - 3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
-  #                 PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
-  #                 PRIVATE_SUBNET_AZ1: !FindInMap [BSPConfig, UAT, StrongSwanPrivateSubnetAZ1]
-  #             permissions: 0700
-  #             owner: root
-  #             group: root
-  #           /etc/strongswan/ipsec.conf:
-  #             content: !Sub
-  #               - |
-  #                 config setup
-  #                   charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
-
-  #                 conn bspPPPlus
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     forceencaps=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${PPP_GATEWAY}
-  #                     rightsubnet=${PPP_SUBNET}
-  #                     ike=aes256-sha256-modp2048
-  #                     ikelifetime=43200s
-  #                     esp=aes128-sha256-modp2048
-
-  #                 conn bspPP3rd
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     forceencaps=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${3RD_GATEWAY}
-  #                     rightsubnet=${3RD_SUBNET}
-  #                     ike=aes256-sha256-modp2048
-  #                     ikelifetime=43200s
-  #                     esp=aes128-sha256-modp2048
-  #               - 3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
-  #                 PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
-  #                 LEFT_IP: !FindInMap [BSPConfig, UAT, StrongSwanENIPrivIPAZ1]
-  #                 LEFT_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPublicSubnetAZ1]
-  #                 PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
-  #                 3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
-  #             permissions: 0700
-  #             owner: root
-  #             group: root
-
-  #       AZ2ConfigUAT:
-  #         files:
-  #           /etc/iptables.rules:
-  #             content: !Sub
-  #               - |
-  #                 *nat
-  #                 :PREROUTING ACCEPT [18:1376]
-  #                 :INPUT ACCEPT [15:1148]
-  #                 :OUTPUT ACCEPT [222:17540]
-  #                 :POSTROUTING ACCEPT [222:17540]
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${3RD_SUBNET} -o eth0 -j MASQUERADE
-  #                 -A POSTROUTING -s ${PRIVATE_SUBNET_AZ2} -d ${PPP_SUBNET} -o eth0 -j MASQUERADE
-  #                 COMMIT
-  #               - 3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
-  #                 PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
-  #                 PRIVATE_SUBNET_AZ2: !FindInMap [BSPConfig, UAT, StrongSwanPrivateSubnetAZ2]
-  #             permissions: 0700
-  #             owner: root
-  #             group: root
-  #           /etc/strongswan/ipsec.conf:
-  #             content: !Sub
-  #               - |
-  #                 config setup
-  #                   charondebug="net 1, ike 1, cfg 1, enc 1, knl 1"
-
-  #                 conn bspPPPlus
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     forceencaps=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${PPP_GATEWAY}
-  #                     rightsubnet=${PPP_SUBNET}
-  #                     ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
-  #                     ikelifetime=43200s #Time before re authentication of keys
-  #                     esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
-
-  #                 conn bspPP3rd
-  #                     authby=secret
-  #                     auto=start
-  #                     keyexchange=ikev1
-  #                     type=tunnel
-  #                     leftfirewall=yes
-  #                     forceencaps=yes
-  #                     leftid=pchc
-  #                     left=${LEFT_IP} #Registered with BSP
-  #                     leftsubnet=${LEFT_SUBNET}
-  #                     right=${3RD_GATEWAY}
-  #                     rightsubnet=${3RD_SUBNET}
-  #                     ike=aes256-sha256-modp2048 #Internet key exchange, type of encryption
-  #                     ikelifetime=43200s #Time before re authentication of keys
-  #                     esp=aes128-sha256-modp2048 #Encapsulation security suite of protocols
-  #               - 3RD_SUBNET: !FindInMap [BSPConfig, UAT, PP3rdPartySubnetCIDR]
-  #                 PPP_SUBNET: !FindInMap [BSPConfig, UAT, PPPSubnetCIDR]
-  #                 LEFT_IP: !FindInMap [BSPConfig, UAT, StrongSwanENIPrivIPAZ2]
-  #                 LEFT_SUBNET: !FindInMap [BSPConfig, UAT, StrongSwanPublicSubnetAZ2]
-  #                 PPP_GATEWAY: !FindInMap [BSPConfig, UAT, PPPGateway]
-  #                 3RD_GATEWAY: !FindInMap [BSPConfig, UAT, PP3rdPartyGateway]
-  #             permissions: 0700
-  #             owner: root
-  #             group: root
-  #   Properties:
-  #     KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-  #     ImageId: !Ref StrongswanAMI
-  #     InstanceType: t3.nano
-
-  # StrongSwanEC2Role:
-  #   Type: AWS::IAM::Role
-  #   Properties:
-  #     AssumeRolePolicyDocument:
-  #       Version: 2012-10-17
-  #       Statement:
-  #         - Effect: Allow
-  #           Principal:
-  #             Service:
-  #               - ec2.amazonaws.com
-  #           Action:
-  #             - sts:AssumeRole
-  #     Path: /
-  #     Policies:
-  #       - PolicyName: AccessStackDetails
-  #         PolicyDocument:
-  #           Version: 2012-10-17
-  #           Statement:
-  #           - Effect: Allow
-  #             Action:
-  #               - cloudformation:DescribeStackResource
-  #             Resource: '*'
-  #       - PolicyName: EC2ReadTagPolicy
-  #         PolicyDocument:
-  #           Version: 2012-10-17
-  #           Statement:
-  #             - Effect: Allow
-  #               Action:
-  #                 - ec2:DescribeTags
-  #                 - ec2:DescribeInstances
-  #               Resource: '*'
-  #     ManagedPolicyArns:
-  #       - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforSSM'
-
-  # StrongSwanInstanceProfile:
-  #   Type: AWS::IAM::InstanceProfile
-  #   Properties:
-  #     Roles:
-  #       - !Ref StrongSwanEC2Role
-
-  # StrongSwanInstanceAZ1:
-  #   Condition: IsStrongswanActive
-  #   Type: AWS::EC2::Instance
-  #   Properties:
-  #     IamInstanceProfile: !Ref StrongSwanInstanceProfile
-  #     DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
-  #     KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-  #     ImageId: !Ref StrongswanAMI
-  #     InstanceType: t3.nano
-  #     NetworkInterfaces:
-  #       - DeviceIndex: 0
-  #         NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a]]
-  #     UserData:
-  #       Fn::Base64: !Sub
-  #         - |
-  #           #!/bin/bash -xe
-  #            /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c ${AZ1CONFIG} --region ${AWS::Region} --role ${ROLE}
-  #           # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
-  #            /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
-  #           # Signal the status from cfn-init
-  #            /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource StrongSwanLaunchConfig  --region ${AWS::Region}
-  #         - AZ1CONFIG: !If [IsBSPUAT, AZ1ConfigUAT, AZ1ConfigProd]
-  #           ROLE: !Ref StrongSwanEC2Role
-  
-  # StrongSwanPublicEIPAttachAZ1:
-  #   Type: AWS::EC2::EIPAssociation
-  #   Properties:
-  #     NetworkInterfaceId: !Ref StrongSwanAZ1ENI
-  #     AllocationId: !GetAtt BSPVPNGatewayEIP1.AllocationId
-
-  # LowDiskSpaceStrongSwanAZ1Alarm:
-  #   Condition: IsStrongswanAlarmActive
-  #   Type: AWS::CloudWatch::Alarm
-  #   Properties:
-  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, disk]]
-  #     MetricName: disk_used_percent
-  #     Namespace: CWAgent
-  #     ComparisonOperator: GreaterThanOrEqualToThreshold
-  #     EvaluationPeriods: 1
-  #     Period: 60
-  #     Statistic: Average
-  #     Threshold: 80
-  #     AlarmActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     OKActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     Dimensions:
-  #       - Name: ImageId
-  #         Value: !Ref StrongswanAMI
-  #       - Name: InstanceId
-  #         Value: !Ref StrongSwanInstanceAZ1
-  #       - Name: path
-  #         Value: /
-  #       - Name: fstype
-  #         Value: xfs
-  #       - Name: InstanceType
-  #         Value: t3.nano
-  #       - Name: device
-  #         Value: nvme0n1p1
-
-  # LowMemStrongSwanAZ1Alarm:
-  #   Condition: IsStrongswanAlarmActive
-  #   Type: AWS::CloudWatch::Alarm
-  #   Properties:
-  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, low, mem]]
-  #     MetricName: mem_used_percent
-  #     Namespace: CWAgent
-  #     ComparisonOperator: GreaterThanOrEqualToThreshold
-  #     EvaluationPeriods: 1
-  #     Period: 60
-  #     Statistic: Average
-  #     Threshold: 80
-  #     AlarmActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     OKActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     Dimensions:
-  #       - Name: ImageId
-  #         Value: !Ref StrongswanAMI
-  #       - Name: InstanceId
-  #         Value: !Ref StrongSwanInstanceAZ1
-  #       - Name: InstanceType
-  #         Value: t3.nano
-
-  # HighCPUStrongSwanAZ1Alarm:
-  #   Condition: IsStrongswanAlarmActive
-  #   Type: AWS::CloudWatch::Alarm
-  #   Properties:
-  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, a, high, cpu]]
-  #     MetricName: CPUUtilization
-  #     Namespace: AWS/EC2
-  #     ComparisonOperator: GreaterThanOrEqualToThreshold
-  #     EvaluationPeriods: 1
-  #     Period: 60
-  #     Statistic: Average
-  #     Threshold: 80
-  #     AlarmActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     OKActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     Dimensions:
-  #       - Name: InstanceId
-  #         Value: !Ref StrongSwanInstanceAZ1
-
-  # StrongSwanInstanceAZ2:
-  #   Condition: IsStrongswanActive
-  #   Type: AWS::EC2::Instance
-  #   Properties:
-  #     IamInstanceProfile: !Ref StrongSwanInstanceProfile
-  #     DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
-  #     KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
-  #     ImageId: !Ref StrongswanAMI
-  #     InstanceType: t3.nano
-  #     NetworkInterfaces:
-  #       - DeviceIndex: 0
-  #         NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b]]
-  #     UserData:
-  #       Fn::Base64: !Sub
-  #         - |
-  #           #!/bin/bash -xe
-  #            /usr/local/bin/cfn-init -v --stack ${AWS::StackName} --resource StrongSwanLaunchConfig -c ${AZ2CONFIG} --region ${AWS::Region} --role ${ROLE}
-  #           # Start up the cfn-hup daemon to listen for changes to the EC2 metadata
-  #            /usr/local/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
-  #           # Signal the status from cfn-init
-  #            /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource StrongSwanLaunchConfig  --region ${AWS::Region}
-  #         - AZ2CONFIG: !If [IsBSPUAT, AZ2ConfigUAT, AZ2ConfigProd]
-  #           ROLE: !Ref StrongSwanEC2Role
-          
-
-  # StrongSwanPublicEIPAttachAZ2:
-  #   Type: AWS::EC2::EIPAssociation
-  #   Properties:
-  #     NetworkInterfaceId: !Ref StrongSwanAZ2ENI
-  #     AllocationId: !GetAtt BSPVPNGatewayEIP2.AllocationId
-
-  # LowDiskSpaceStrongSwanAZ2Alarm:
-  #   Condition: IsStrongswanAlarmActive
-  #   Type: AWS::CloudWatch::Alarm
-  #   Properties:
-  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, disk]]
-  #     MetricName: disk_used_percent
-  #     Namespace: CWAgent
-  #     ComparisonOperator: GreaterThanOrEqualToThreshold
-  #     EvaluationPeriods: 1
-  #     Period: 60
-  #     Statistic: Average
-  #     Threshold: 80
-  #     AlarmActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     OKActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     Dimensions:
-  #       - Name: ImageId
-  #         Value: !Ref StrongswanAMI
-  #       - Name: InstanceId
-  #         Value: !Ref StrongSwanInstanceAZ2
-  #       - Name: path
-  #         Value: /
-  #       - Name: fstype
-  #         Value: xfs
-  #       - Name: InstanceType
-  #         Value: t3.nano
-  #       - Name: device
-  #         Value: nvme0n1p1
-
-  # LowMemStrongSwanAZ2Alarm:
-  #   Condition: IsStrongswanAlarmActive
-  #   Type: AWS::CloudWatch::Alarm
-  #   Properties:
-  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, low, mem]]
-  #     MetricName: mem_used_percent
-  #     Namespace: CWAgent
-  #     ComparisonOperator: GreaterThanOrEqualToThreshold
-  #     EvaluationPeriods: 1
-  #     Period: 60
-  #     Statistic: Average
-  #     Threshold: 80
-  #     AlarmActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     OKActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     Dimensions:
-  #       - Name: ImageId
-  #         Value: !Ref StrongswanAMI
-  #       - Name: InstanceId
-  #         Value: !Ref StrongSwanInstanceAZ2
-  #       - Name: InstanceType
-  #         Value: t3.nano
-
-  # HighCPUStrongSwanAZ2Alarm:
-  #   Condition: IsStrongswanAlarmActive
-  #   Type: AWS::CloudWatch::Alarm
-  #   Properties:
-  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, gateway, b, high, cpu]]
-  #     MetricName: CPUUtilization
-  #     Namespace: AWS/EC2
-  #     ComparisonOperator: GreaterThanOrEqualToThreshold
-  #     EvaluationPeriods: 1
-  #     Period: 60
-  #     Statistic: Average
-  #     Threshold: 80
-  #     AlarmActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     OKActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     Dimensions:
-  #       - Name: InstanceId
-  #         Value: !Ref StrongSwanInstanceAZ2
-
   ###
   # PhilPass Application Resources
   ###
@@ -1377,6 +525,7 @@ Resources:
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
         SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+        DeployPaidResources: !Ref DeployPaidResources
 
   DeployStack:
     Type: AWS::CloudFormation::Stack
@@ -1388,8 +537,21 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+        # Live region replicates CodeDeploy artifacts into the DR bucket so the DR app servers
+        # have code to deploy at failover. Suppressed on the DR stack itself (it is the destination).
+        ReplicationDestinationBucketArn: !If
+          - IsEnableCodeDeployReplication
+          - !Sub
+            - 'arn:aws:s3:::${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-code-deploy'
+            - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+              DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+          - ''
 
   DBStack:
+    # Set DeployPaidResources=false (DR standby) to suppress. At failover, set back to true and
+    # provide SnapshotIdentifier to restore the DB from the cross-region backup.
+    # Also suppressed when IsPITRMode=true — the DB was restored externally by dr-failover-v2.
+    Condition: IsDeployPaidResourcesAndNotPITR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
@@ -1405,6 +567,9 @@ Resources:
         Engine: mysql
         EngineVersion: 8.4.7
         Family: mysql8.4
+        # DR only: this instance is the DMS CDC source at failback (dr-failback-dms-sync.yaml), and
+        # DMS cannot read MIXED binlogs. Must be set at creation - binlogs cannot be re-rendered later.
+        BinlogFormat: !If [IsDR, ROW, '']
         InstanceType: db.t4g.micro
         MasterUser: root
         MultiAz: !If [IsProd, true, false]
@@ -1412,11 +577,14 @@ Resources:
         OrgName: !Ref OrgName
         SNSStackName: !Ref SNSStackName
         StorageEncrypted: true
+        SnapshotIdentifier: !Ref SnapshotIdentifier
+        MasterUserPassword: !Ref DBMasterUserPassword
+        ExistingSecretArn: !If [IsDR, !Ref DRDBSecret, '']
 
   DBSchedulerStack:
     DependsOn:
       - DBStack
-    Condition: IsNotProd
+    Condition: IsNotProdAndDeployPaidResourcesAndNotDR
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
@@ -1432,13 +600,142 @@ Resources:
             - DBStack
             - Outputs.DBInstanceName
 
+####
+# Disaster Recovery
+# All resources below are deployed ONLY when EnvName is a DR variant (ProductionDR, StagingDR, etc.).
+# These resources are always-on in the DR region at zero/minimal cost.
+# They pre-provision the infrastructure needed to activate the environment at failover time.
+####
+
+  # Placeholder Secrets Manager secret for DB credentials in the DR region.
+  # Created at DR stack deploy time with placeholder values.
+  # The secrets-sync Lambda overwrites the values whenever the live region secret rotates,
+  # ensuring correct credentials are available before failover is triggered.
+  # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
+  # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
+  DRDBSecret:
+    Condition: IsDR
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+      Description: !Sub 'DR placeholder secret for ${OrgName} ${Name} — values synced from the live region secret by the secrets-sync Lambda before failover.'
+      SecretString: !Sub |
+        {
+          "DB_ROOT_USER": "root",
+          "DB_ROOT_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "DB_NAME": "${Name}db",
+          "DB_USER": "${Name}",
+          "DB_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "MAGENTO_ADMIN_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE"
+        }
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: DRSync
+          Value: 'true'
+        - Key: SourceSecretArn
+          Value: !Ref LiveSecretArn
+
+  # Pre-deployed DB subnet group for PITR restore in DR standby.
+  # Uses -standby suffix to avoid naming conflict with DBStack's own subnet group at failover.
+  DBStandbySubnetGroup:
+    Condition: IsDR
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      DBSubnetGroupName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+
+  # Pre-deployed DB security group for PITR restore in DR standby.
+  # App server stacks can add ingress rules to this SG at restore time.
+  DBStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, db, standby]]
+
+  # Always-on vault in the DR region — exists independently of DeployPaidResources so the live region's
+  # CopyActions have a destination even during cold standby. Excluded from BackupStack to avoid naming
+  # conflicts at failover. EncryptionKeyArn must be the REPLICA of the multi-region CMK in this region
+  # so cross-region copies are immediately decryptable at DR restore time.
+  DRBackupVault:
+    Condition: IsDR
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+      EncryptionKeyArn: !If [IsBackupEncryptionKeyProvided, !Ref BackupVaultEncryptionKeyArn, !Ref 'AWS::NoValue']
+      BackupVaultTags:
+        Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, vault]]
+        Environment: !Ref EnvName
+        Organization: !Ref OrgName
+
+  # Pre-deployed EFS security group for the DR region.
+  # Allows NFS (2049) inbound from app server SGs — appserver-basic2.yaml adds the ingress rules
+  # automatically when UseExternalEFS=true (ExternalEFSId is non-empty).
+  # Also used as the mount target SG when dr-failover creates mount targets for the restored EFS.
+  EFSStandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, efs, standby]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+
+  # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
+  # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
+  # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
+  DBReplicationStack:
+    Condition: IsDRAndEnableCrossRegionBackupReplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-replication.yaml
+      Parameters:
+        Name: !Ref Name
+        OrgName: !Ref OrgName
+        EnvName: !Ref EnvName
+        SourceDbInstanceArn: !Ref SourceDbInstanceArn
+        BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
+
   AllowDBConnectionFromJumpHost:
+    Condition: IsDeployPaidResources
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: TCP
-      GroupId: !GetAtt [DBStack, Outputs.SecurityGroupId]
-      FromPort: !GetAtt [DBStack, Outputs.DBInstancePort]
-      ToPort: !GetAtt [DBStack, Outputs.DBInstancePort]
+      GroupId: !If
+        - IsPITRMode
+        - !GetAtt DBStandbySecurityGroup.GroupId
+        - Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]
+      FromPort: !If
+        - IsPITRMode
+        - 3306
+        - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
+      ToPort: !If
+        - IsPITRMode
+        - 3306
+        - Fn::GetAtt: [DBStack, Outputs.DBInstancePort]
       SourceSecurityGroupId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
@@ -1460,8 +757,9 @@ Resources:
   #       UseFriendlyNames: TRUE
 
   ServerStack:
+    # DBStack removed from DependsOn — it is conditional now, and DependsOn on a
+    # suppressed resource fails the stack in DR standby.
     DependsOn:
-      - DBStack
       - DeployStack
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -1482,20 +780,23 @@ Resources:
         #   Fn::GetAtt:
         #     - CacheStack
         #     - Outputs.SecurityGroupId
+        ASGDesiredSize: !If [IsDR, 0, 1]
         ClientDomainName: !Ref ClientDomainName
-        DatabaseEndpoint:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstanceAddress
-        DatabasePort:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBInstancePort
-        DatabaseSecurityGroupId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.SecurityGroupId
-        InstanceAMI: !Ref InstanceAmi
+        DatabaseEndpoint: !If
+          - IsDeployPaidResources
+          - !If [IsPITRMode, !Ref PITRDBEndpoint, Fn::GetAtt: [DBStack, Outputs.DBInstanceAddress]]
+          - ''
+        DatabasePort: !If
+          - IsDeployPaidResources
+          - !If [IsPITRMode, '3306', Fn::GetAtt: [DBStack, Outputs.DBInstancePort]]
+          - 3306
+        DatabaseSecurityGroupId: !If
+          - IsDeployPaidResources
+          - !If [IsPITRMode, !GetAtt DBStandbySecurityGroup.GroupId, Fn::GetAtt: [DBStack, Outputs.SecurityGroupId]]
+          - ''
+        ExternalEFSID: !If [IsDR, !Ref ExternalEFSId, '']
+        ExternalEFSSecurityGroup: !If [IsDR, !GetAtt EFSStandbySecurityGroup.GroupId, '']
+        InstanceAMI: !Ref InstanceAMI
         # InstanceAMI: ami-01e07f712a046fa8a 
         #InstanceKeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
         InstancePort: 80
@@ -1503,222 +804,39 @@ Resources:
         InstanceType: !Ref InstanceType
         # LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref BSPInterfaceHostname, !Ref 'AWS::NoValue']
         # LoadBalancerHostName: !If [HasLoadBalancerHostName, !Ref LoadBalancerHostName, !Ref 'AWS::NoValue']
-        LoadBalancerHostName: philpass2 # uat for the mean time
+        LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', philpass2] # uat for the mean time
+        # DR only: serve the live domain AND a DR alias on nginx (server_name).
+        # EnvShort is dynamic (TestDR->tdr, ProductionDR->pdr), so it works for any DR env.
+        # Live/other envs: AWS::NoValue -> param stays '' -> unchanged single-domain behavior.
+        ServerNameOverride: !If
+          - IsDR
+          - !Sub
+            - '${Host}.${Domain} ${Host}-${EnvShort}.${Domain}'
+            - Host: philpass
+              Domain: !Ref ClientDomainName
+              EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+          - !Ref 'AWS::NoValue'
         LoadBalancerPriority: 50
-        LoadBalancerStackName: !Select [ 1, !Split [ '/', !Ref ELBStack]]
+        LoadBalancerStackName: !If
+          - IsDeployPaidResources
+          - !Select [ 1, !Split [ '/', !Ref ELBStack]]
+          - ''
         NetworkStackName: !Ref NetworkStackName
-        SharedSecretId:
-          Fn::GetAtt:
-            - DBStack
-            - Outputs.DBSecretManagerKeyId
+        SharedSecretId: !If
+          - IsDeployPaidResources
+          - !If [IsPITRMode, !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]], Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
+          - ''
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         LaunchTemplate: True
         VolumeType: gp3
         VolumeSize: 16 # GB, size must be equal or greater than the size of the AMI root volume, which is 16GB
 
-###
-# BSP Interface
-###
-
-  # BSPInterfaceEC2Role:
-  #   Type: AWS::IAM::Role
-  #   Properties:
-  #     AssumeRolePolicyDocument:
-  #       Version: 2012-10-17
-  #       Statement:
-  #         - Effect: Allow
-  #           Principal:
-  #             Service:
-  #               - ec2.amazonaws.com
-  #           Action:
-  #             - sts:AssumeRole
-  #     Path: /
-  #     ManagedPolicyArns:
-  #       - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforSSM'
-  #     Policies:
-  #       - PolicyName: EC2ReadTagPolicy
-  #         PolicyDocument:
-  #           Version: 2012-10-17
-  #           Statement:
-  #             - Effect: Allow
-  #               Action:
-  #                 - ec2:DescribeTags
-  #                 - ec2:DescribeInstances
-  #               Resource: '*'
-
-  # BSPInterfaceIamInstanceProfile:
-  #   Type: AWS::IAM::InstanceProfile
-  #   Properties:
-  #     #InstanceProfileName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,BSP,Interface]]
-  #     Roles:
-  #       - !Ref BSPInterfaceEC2Role
-
-  # BSPInterfaceSecurityGroup:
-  #   Type: AWS::EC2::SecurityGroup
-  #   Properties:
-  #     GroupDescription: BSP Interface Security Group
-  #     VpcId:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-VpcId'
-
-  # AllowHTTPOnBSPInterfaceFromELB:
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties: 
-  #     IpProtocol: TCP
-  #     GroupId: !Ref BSPInterfaceSecurityGroup
-  #     FromPort: 80
-  #     ToPort: 80
-  #     SourceSecurityGroupId: 
-  #       Fn::GetAtt:
-  #         - ELBStack
-  #         - Outputs.SecurityGroupId
-
-  # # AllowSSHOnBSPInterfaceFromJumpHost:
-  # #   Type: AWS::EC2::SecurityGroupIngress
-  # #   Properties: 
-  # #     IpProtocol: TCP
-  # #     GroupId: !Ref BSPInterfaceSecurityGroup
-  # #     FromPort: 22
-  # #     ToPort: 22
-  # #     SourceSecurityGroupId: 
-  # #       Fn::ImportValue:
-  # #         !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
-  
-  # BSPInterfaceInstance:
-  #   Type: AWS::EC2::Instance
-  #   Properties:
-  #     DisableApiTermination: !If [IsProd, !Ref DeletionProtection, false]
-  #     ImageId: !Ref BSPInterfaceAMI
-  #     InstanceType: t3.medium
-  #     IamInstanceProfile: !Ref BSPInterfaceIamInstanceProfile
-  #     NetworkInterfaces:
-  #       - AssociatePublicIpAddress: false
-  #         DeviceIndex: 0
-  #         GroupSet:
-  #           - !Ref BSPInterfaceSecurityGroup
-  #         SubnetId:
-  #           Fn::ImportValue:
-  #             Fn::Sub: '${NetworkStackName}-PrivateSubnetId1'
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name,BSP,Interface]]
-
-  # AllowBSPinterfaceIntoDB:
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     Description: Allow connection from BSP Interface
-  #     IpProtocol: TCP
-  #     GroupId:
-  #       Fn::GetAtt:
-  #         - DBStack
-  #         - Outputs.SecurityGroupId
-  #     FromPort:
-  #       Fn::GetAtt:
-  #         - DBStack
-  #         - Outputs.DBInstancePort
-  #     ToPort:
-  #       Fn::GetAtt:
-  #         - DBStack
-  #         - Outputs.DBInstancePort
-  #     SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
-
-  # AllowBSPinterfaceIntoCache:
-  #   Type: AWS::EC2::SecurityGroupIngress
-  #   Properties:
-  #     Description: Allow connection from BSP Interface
-  #     IpProtocol: TCP
-  #     GroupId:
-  #       Fn::GetAtt:
-  #         - CacheStack
-  #         - Outputs.SecurityGroupId
-  #     FromPort:
-  #       Fn::GetAtt:
-  #         - CacheStack
-  #         - Outputs.ClusterPort
-  #     ToPort:
-  #       Fn::GetAtt:
-  #         - CacheStack
-  #         - Outputs.ClusterPort
-  #     SourceSecurityGroupId: !Ref BSPInterfaceSecurityGroup
-
-  # BSPInterfaceTargetGroup:
-  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
-  #   Properties:
-  #     Matcher: 
-  #       HttpCode: 200,301,302
-  #     Port: 80
-  #     Protocol: HTTP
-  #     TargetType: instance
-  #     Targets:
-  #       - Id: !Ref BSPInterfaceInstance
-  #     VpcId:
-  #       Fn::ImportValue:
-  #         !Sub "${NetworkStackName}-VpcId"
-  #     Tags:
-  #       - Key: Name
-  #         Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP,interface,target,group]]
-
-  # BSPInterfaceListenerRule:
-  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
-  #   Properties: 
-  #     Actions: 
-  #       - Type: forward
-  #         TargetGroupArn: !Ref BSPInterfaceTargetGroup
-  #     Conditions: 
-  #       - Field: host-header
-  #         Values: 
-  #           - !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
-  #     ListenerArn:
-  #       Fn::GetAtt:
-  #         - ELBStack
-  #         - Outputs.ApplicationListenerArn
-  #     Priority: 105
-
-  # BSPInterfaceInstancePublicDNSRecord:
-  #   Type: AWS::Route53::RecordSet
-  #   Properties:
-  #     HostedZoneName: !Join ['.', [!Ref ClientDomainName, '']]
-  #     Name: !Join ['.', [!Ref BSPInterfaceHostname, !Ref ClientDomainName]]
-  #     Type: A
-  #     AliasTarget:
-  #       DNSName:
-  #         Fn::GetAtt:
-  #           - ELBStack
-  #           - Outputs.DNSName
-  #       EvaluateTargetHealth: true
-  #       HostedZoneId:
-  #         Fn::GetAtt:
-  #           - ELBStack
-  #           - Outputs.CanonicalHostedZoneID
-
-  # HighCPUBSPInterfaceAlarm:
-  #   Condition: IsProd
-  #   Type: AWS::CloudWatch::Alarm
-  #   Properties:
-  #     AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, BSP, interface, high, cpu]]
-  #     MetricName: CPUUtilization
-  #     Namespace: AWS/EC2
-  #     ComparisonOperator: GreaterThanOrEqualToThreshold
-  #     EvaluationPeriods: 1
-  #     Period: 60
-  #     Statistic: Average
-  #     Threshold: 80
-  #     AlarmActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     OKActions:
-  #       - Fn::ImportValue:
-  #           !Sub '${SNSStackName}-TopicArn'
-  #     Dimensions:
-  #       - Name: InstanceId
-  #         Value: !Ref BSPInterfaceInstance
-
   BackupStack:
-    Condition: IsProd
+    Condition: IsProdOrTestAndDeployPaidResourcesAndNotPITR
     DependsOn:
       - DBStack
-      # - ServerStack
+      - ServerStack
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/backup.yaml
@@ -1731,6 +849,9 @@ Resources:
           - - Fn::GetAtt:
               - DBStack
               - Outputs.DBInstanceARN
+            - Fn::GetAtt:
+              - ServerStack
+              - Outputs.AppServerEFSArn
             # - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref StrongSwanInstanceAZ1]]]]  
             # - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref StrongSwanInstanceAZ2]]]]  
             # - !Join [':', ['arn', !Ref 'AWS::Partition', 'ec2', !Ref 'AWS::Region', !Ref 'AWS::AccountId', !Join ['/', ['instance', !Ref BSPInterfaceInstance]]]]  
@@ -1738,268 +859,57 @@ Resources:
         DailyExpiration: 60 #60 days requirement
         WeeklyExpiration: 180 #6 months but requirement is 4 weeks
         MonthlyExpiration: 3650 # 10 years
+        # Hourly incremental plan targets EFS only — RDS does not support AWS Backup incremental.
+        # Each hourly recovery point contains the complete EFS state (AWS Backup resolves the
+        # incremental chain internally); restoring from the latest hourly always gives full data.
+        EnableHourlyBackup: !If [IsProdOrTest, 'true', 'false']
+        HourlyBackupARNList:
+          Fn::GetAtt: [ServerStack, Outputs.AppServerEFSArn]
+        # Copy recovery points into the DR region vault so they are restorable at failover.
+        # The destination vault is DRBackupVault, created by the DR stack in DRRegion.
+        EnableCrossRegionBackup: 'true'
+        CrossRegionBackupVaultArn: !Sub
+          - 'arn:aws:backup:${DRRegion}:${AWS::AccountId}:backup-vault:${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-vault'
+          - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+            DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+        # KMS CMK for the source vault — must match the key used for DRBackupVault so cross-region
+        # copies are immediately decryptable in the DR region without key re-import.
+        EncryptionKeyArn: !Ref BackupVaultEncryptionKeyArn
+        # Retain hourly EFS copies in DR — within this window restore to any hour (Option B).
+        # Beyond it, fall back to the daily baseline copies.
+        HourlyDRRetentionDays: !Ref HourlyEFSDRRetentionDays
 
-###
-# Connectivity Analyser
-###
+Outputs:
 
-  # StrongSwanAZ1CanReachInternet:
-  #   Type: AWS::EC2::NetworkInsightsPath
-  #   Condition: IsStrongswanActive
-  #   Properties:
-  #     Source: !Ref StrongSwanInstanceAZ1
-  #     Destination:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-InternetGateway'
-  #     Protocol: tcp
-  #     Tags:
-  #       - Key: Name
-  #         Value: StrongSwan AZ1 to Internet
+  DRDBSecretArn:
+    Condition: IsDR
+    Description: ARN of the DR Secrets Manager secret — set this in the secrets-sync Lambda so it keeps values current from the live region
+    Value: !Ref DRDBSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-DRDBSecretArn'
 
-  # StrongSwanAZ2CanReachInternet:
-  #   Type: AWS::EC2::NetworkInsightsPath
-  #   Condition: IsStrongswanActive
-  #   Properties:
-  #     Source: !Ref StrongSwanInstanceAZ2
-  #     Destination:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-InternetGateway'
-  #     Protocol: tcp
-  #     Tags:
-  #       - Key: Name
-  #         Value: StrongSwan AZ2 to Internet
+  DBStandbySubnetGroup:
+    Condition: IsDR
+    Description: Pre-deployed DB subnet group for PITR restore — use in restore-db-instance-from-db-snapshot command
+    Value: !Ref DBStandbySubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySubnetGroup'
 
-  # BSPInterfaceCanReachInternet:
-  #   Type: AWS::EC2::NetworkInsightsPath
-  #   Condition: IsStrongswanActive
-  #   Properties:
-  #     Source: !Ref BSPInterfaceInstance
-  #     Destination:
-  #       Fn::ImportValue:
-  #         !Sub '${NetworkStackName}-InternetGateway'
-  #     Protocol: tcp
-  #     Tags:
-  #       - Key: Name
-  #         Value: BSP Interface to Internet
+  DBStandbySecurityGroupId:
+    Condition: IsDR
+    Description: Pre-deployed DB security group for PITR restore — use in restore-db-instance-from-db-snapshot command
+    Value: !GetAtt DBStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-DBStandbySecurityGroupId'
 
-  # BSPInterfaceCanReachStrongSwanAZ1:
-  #   Type: AWS::EC2::NetworkInsightsPath
-  #   Condition: IsStrongswanActive
-  #   Properties:
-  #     Source: !Ref BSPInterfaceInstance
-  #     Destination: !Ref StrongSwanAZ1ENI
-  #     DestinationPort: 443
-  #     Protocol: tcp
-  #     Tags:
-  #       - Key: Name
-  #         Value: BSP Interface to StrongSwan AZ1
+  EFSStandbySecurityGroupId:
+    Condition: IsDR
+    Description: Pre-deployed EFS security group — pass as efs_security_group_id in the dr-failover state machine input
+    Value: !GetAtt EFSStandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-EFSStandbySecurityGroupId'
 
-  # BSPInterfaceCanReachStrongSwanAZ2:
-  #   Type: AWS::EC2::NetworkInsightsPath
-  #   Condition: IsStrongswanActive
-  #   Properties:
-  #     Source: !Ref BSPInterfaceInstance
-  #     Destination: !Ref StrongSwanAZ1ENI
-  #     DestinationPort: 443
-  #     Protocol: tcp
-  #     Tags:
-  #       - Key: Name
-  #         Value: BSP Interface to StrongSwan AZ2
-
-
-  # Dashboard: #Semi-hardcoded for now
-  #   Type: AWS::CloudWatch::Dashboard
-  #   Properties:
-  #       DashboardName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
-  #       DashboardBody: !Sub
-  #         - |
-  #           {
-  #             "widgets": [
-  #               {
-  #                 "height": 12,
-  #                 "width": 6,
-  #                 "y": 0,
-  #                 "x": 0,
-  #                 "type": "alarm",
-  #                 "properties": {
-  #                   "title": "Alarms",
-  #                   "alarms": [
-  #                     "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${OrgName}-${ENV_SHORT}-${REGION_SHORT}-${Name}-BSP-interface-high-cpu",
-  #                     "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${OrgName}-${ENV_SHORT}-${REGION_SHORT}-${Name}-BSP-gateway-a-high-cpu",
-  #                     "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${OrgName}-${ENV_SHORT}-${REGION_SHORT}-${Name}-BSP-gateway-b-high-cpu",
-  #                     "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${OrgName}-${ENV_SHORT}-${REGION_SHORT}-${Name}-BSP-gateway-a-low-disk",
-  #                     "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${OrgName}-${ENV_SHORT}-${REGION_SHORT}-${Name}-BSP-gateway-b-low-disk",
-  #                     "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${OrgName}-${ENV_SHORT}-${REGION_SHORT}-${Name}-BSP-gateway-a-low-mem",
-  #                     "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${OrgName}-${ENV_SHORT}-${REGION_SHORT}-${Name}-BSP-gateway-b-low-mem",
-  #                     "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${OrgName}-${ENV_SHORT}-${REGION_SHORT}-${Name}-db-errors",
-  #                     "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${OrgName}-${ENV_SHORT}-${REGION_SHORT}-${Name}-db-error-denied"
-  #                   ]
-  #                 }
-  #               },
-  #               {
-  #                 "height": 6,
-  #                 "width": 6,
-  #                 "y": 0,
-  #                 "x": 6,
-  #                 "type": "metric",
-  #                 "properties": {
-  #                   "metrics": [
-  #                     [ "AWS/EC2", "CPUUtilization", "InstanceId", "${GATEWAYAZ1_ID}", { "label": "BSP-gateway-AZ1" } ],
-  #                     [ "...", "${GATEWAYAZ1_ID}", { "label": "BSP-Gateway-AZ2" } ],
-  #                     [ "...", "${GATEWAY_ID}", { "label": "BSP-Interface" } ],
-  #                     [ "AWS/RDS", ".", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS" } ]
-  #                   ],
-  #                   "view": "timeSeries",
-  #                   "stacked": false,
-  #                   "region": "${AWS::Region}",
-  #                   "period": 300,
-  #                   "title": "CPU",
-  #                   "stat": "Average",
-  #                   "yAxis": {
-  #                     "left": {
-  #                       "label": "Utilization"
-  #                     },
-  #                     "right": {
-  #                       "label": "Time"
-  #                     }
-  #                   }
-  #                 }
-  #               },
-  #               {
-  #                   "height": 6,
-  #                   "width": 6,
-  #                   "y": 6,
-  #                   "x": 6,
-  #                   "type": "metric",
-  #                   "properties": {
-  #                       "metrics": [
-  #                           [ { "expression": "(m4/(1024*1000000))*100", "label": "RDS", "id": "e1", "region": "${AWS::Region}" } ],
-  #                           [ "CWAgent", "mem_used_percent", "InstanceId", "${GATEWAYAZ1_ID}", "ImageId", "${GATEWAY_AMI}", "InstanceType", "t3.nano", { "label": "BSP-gateway-AZ1", "id": "m1" } ],
-  #                           [ "...", "${GATEWAYAZ2_ID}", ".", ".", ".", ".", { "label": "BSP-gateway-AZ2", "id": "m2" } ],
-  #                           [ "...", "${GATEWAY_ID}", ".", "${BSP_INTERFACE_AMI}", ".", "t3.medium", { "label": "BSP-Interface", "id": "m3" } ],
-  #                           [ "AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m4", "visible": false } ]
-  #                       ],
-  #                       "view": "timeSeries",
-  #                       "stacked": false,
-  #                       "region": "${AWS::Region}",
-  #                       "period": 300,
-  #                       "title": "Memory",
-  #                       "stat": "Average",
-  #                       "yAxis": {
-  #                           "left": {
-  #                               "label": "Utilization"
-  #                           },
-  #                           "right": {
-  #                               "label": "Time"
-  #                           }
-  #                       }
-  #                   }
-  #               },
-  #               {
-  #                 "height": 6,
-  #                 "width": 6,
-  #                 "y": 0,
-  #                 "x": 12,
-  #                 "type": "metric",
-  #                 "properties": {
-  #                   "metrics": [
-  #                     [ "AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB" } ],
-  #                     [ "AWS/RDS", "ReadLatency", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "label": "RDS Read" } ],
-  #                     [ ".", "WriteLatency", ".", ".", { "label": "RDS Write" } ]
-  #                   ],
-  #                   "view": "timeSeries",
-  #                   "stacked": false,
-  #                   "region": "${AWS::Region}",
-  #                   "period": 300,
-  #                   "title": "Performance",
-  #                   "stat": "Average",
-  #                   "yAxis": {
-  #                     "left": {
-  #                       "showUnits": true,
-  #                       "label": "Time"
-  #                     },
-  #                     "right": {
-  #                       "label": "Duration"
-  #                     }
-  #                   }
-  #                 }
-  #               },
-  #               {
-  #                   "height": 6,
-  #                   "width": 6,
-  #                   "y": 0,
-  #                   "x": 18,
-  #                   "type": "metric",
-  #                   "properties": {
-  #                       "metrics": [
-  #                           [ "AWS/EC2", "NetworkIn", "InstanceId", "${GATEWAYAZ2_ID}", { "label": "BSP-gateway-AZ1 (In)" } ],
-  #                           [ "...", "${GATEWAYAZ2_ID}", { "label": "BSP-gateway-AZ2 (n)" } ],
-  #                           [ "...", "${GATEWAY_ID}", { "label": "BSP-Interface (In)" } ],
-  #                           [ "...", "i-00973696088a677bd", { "label": "Jump Host (In)" } ],
-  #                           [ ".", "NetworkOut", ".", "${GATEWAYAZ1_ID}", { "label": "BSP-gateway-AZ1 (Out)" } ],
-  #                           [ "...", "${GATEWAYAZ2_ID}", { "label": "BSP-gateway-AZ2 (Out)" } ],
-  #                           [ "...", "${GATEWAY_ID}", { "label": "BSP-Interface (Out)" } ],
-  #                           [ "...", "i-00973696088a677bd", { "label": "Jump Host (Out)" } ]
-  #                       ],
-  #                       "view": "timeSeries",
-  #                       "stacked": false,
-  #                       "title": "Network",
-  #                       "region": "${AWS::Region}",
-  #                       "period": 300,
-  #                       "stat": "Average"
-  #                   }
-  #               },
-  #               {
-  #                   "height": 6,
-  #                   "width": 6,
-  #                   "y": 6,
-  #                   "x": 12,
-  #                   "type": "metric",
-  #                   "properties": {
-  #                       "metrics": [
-  #                           [ "CWAgent", "disk_used_percent", "path", "/", "InstanceId", "${GATEWAYAZ2_ID}", "ImageId", "${GATEWAY_AMI}", "InstanceType", "t3.nano", "device", "nvme0n1p1", "fstype", "xfs", { "label": "BSP-gateway-AZ2" } ],
-  #                           [ "...", "${GATEWAY_ID}", ".", "${BSP_INTERFACE_AMI}", ".", "t3.medium", ".", ".", ".", ".", { "label": "BSP-Interface" } ],
-  #                           [ "...", "${GATEWAYAZ1_ID}", ".", "${GATEWAY_AMI}", ".", "t3.nano", ".", ".", ".", ".", { "label": "BSP-gateway-AZ1" } ],
-  #                           [ { "expression": "100*(m1/(20*1024*1000000))", "label": "RDS", "id": "e2", "region": "${AWS::Region}" } ],
-  #                           [ "AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${DB_INSTANCE_ID}", { "id": "m1", "visible": false } ]
-  #                       ],
-  #                       "view": "timeSeries",
-  #                       "stacked": false,
-  #                       "region": "${AWS::Region}",
-  #                       "period": 300,
-  #                       "title": "Space",
-  #                       "stat": "Average"
-  #                   }
-  #               },
-  #               {
-  #                 "height": 6,
-  #                 "width": 6,
-  #                 "y": 6,
-  #                 "x": 18,
-  #                 "type": "metric",
-  #                 "properties": {
-  #                   "metrics": [
-  #                     [ "AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${ELB_FULL_NAME}", { "label": "ELB HTTP 5XX_Count" } ],
-  #                     [ ".", "HTTPCode_ELB_4XX_Count", ".", ".", { "label": "ELB HTTP 4XX_Count" } ]
-  #                   ],
-  #                   "view": "timeSeries",
-  #                   "stacked": false,
-  #                   "region": "${AWS::Region}",
-  #                   "title": "Error Count",
-  #                   "period": 300,
-  #                   "stat": "Average"
-  #                 }
-  #               }
-  #             ]
-  #           }
-  #         - ZONE1_RDS: i-0377cd12b214e52f4
-  #           ZONE1_RDS_REPLICA: i-0377cd12b214e52f4
-  #           BSP_INTERFACE_AMI: !Ref BSPInterfaceAMI
-  #           DB_INSTANCE_ID: !GetAtt [DBStack, Outputs.DBInstanceName]
-  #           ELB_FULL_NAME: !GetAtt [ELBStack, Outputs.LoadBalancerFullName]
-  #           GATEWAY_AMI: !Ref StrongswanAMI
-  #           # GATEWAY_ID: !Ref BSPInterfaceInstance
-  #           # GATEWAYAZ1_ID: !Ref StrongSwanInstanceAZ1
-  #           GATEWAYAZ2_ID: !Ref StrongSwanInstanceAZ2
-  #           ENV_SHORT: !FindInMap [EnvShort, !Ref EnvName, Name]
-  #           REGION_SHORT: !FindInMap [RegionShort, !Ref 'AWS::Region', Name]
+  CodeDeployBucketArn:
+    Condition: IsDR
+    Description: ARN of the CodeDeploy artifacts bucket in this DR region
+    Value: !GetAtt DeployStack.Outputs.DeploymentBucketArn

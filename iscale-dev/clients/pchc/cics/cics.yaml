@@ -53,18 +53,24 @@ Metadata:
           default: Disaster Recovery
         Parameters:
           - DeployPaidResources
+          - EnableCrossRegionBackupReplication
+          - BackupReplicationRetentionPeriod
+          - IsPITRMode
+          # first DB — cics (DBStack)
           - SnapshotIdentifier
           - DBMasterUserPassword
-          - EnableCrossRegionBackupReplication
           - SourceDbInstanceArn
-          - BackupReplicationRetentionPeriod
           - LiveSecretArn
-          - IsPITRMode
-          # for second DB cicsfe
+          # second DB — cicsfe (DBFEStack)
           - SnapshotIdentifierFe
           - DBFEMasterUserPassword
           - SourceDbFeInstanceArn
           - LiveSecretArn2
+          # third DB — cicsfer8 (DBFER8Stack)
+          - SnapshotIdentifierFeR8
+          - DBFER8MasterUserPassword
+          - SourceDbFeR8InstanceArn
+          - LiveSecretArn3
 
     ParameterLabels:
       Name:
@@ -73,52 +79,54 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
-      ADPassword:
-        default: Active Directory Password
+      NetworkStackName:
+        default: Network Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
       DeletionProtection:
         default: Protect core items against deletion
-      FEInstanceAMI:
-        default: FE Instance AMI ID
-      InstanceAMI:
-        default: Instance AMI ID
-      SIOSInstanceAMI:
-        default: SIOS Instance AMI ID
-      InstanceKeyName:
-        default: Instance Key Name
-      InstanceType:
-        default: Instance Type
+      ClientDomainName:
+        default: Domain Name
       LoadBalancerCertificateArn:
         default: Load Balancer SSL Certificate ARN
       LoadBalancerHostName:
         default: Load Balancer Host Name (overrides region default)
-      NetworkStackName:
-        default: Network Stack Name
+      InstanceKeyName:
+        default: Instance Key Name
+      InstanceAMI:
+        default: Instance AMI ID
+      FEInstanceAMI:
+        default: FE Instance AMI ID
+      SIOSInstanceAMI:
+        default: SIOS Instance AMI ID
+      InstanceType:
+        default: Instance Type
       RDPPort:
         default: RDP Port Number
-      SNSStackName:
-        default: SNS Topic Stack Name
-      ClientDomainName:
-        default: Domain Name
       StartScheduleExpression:
         default: Start Schedule CRON Expression
       StopScheduleExpression:
         default: Stop Schedule CRON Expression
+      ADPassword:
+        default: Active Directory Password
       DeployPaidResources:
         default: Deploy Paid Resources (false = DR standby, true = active/failover)
+      EnableCrossRegionBackupReplication:
+        default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
+      BackupReplicationRetentionPeriod:
+        default: Backup Retention Period in DR region (days)
+      IsPITRMode:
+        default: PITR Mode (set by dr-failover-v2 only — do not change manually)
+      # first DB — cics (DBStack)
       SnapshotIdentifier:
         default: DB Snapshot Identifier (DR failover restore — leave blank for normal)
       DBMasterUserPassword:
         default: DB Master Password (DR failover only — leave blank for normal)
-      EnableCrossRegionBackupReplication:
-        default: Enable Cross-Region Backup Replication (deploy in DR region to activate)
       SourceDbInstanceArn:
         default: Source DB Instance ARN (live region — required when replication is enabled)
-      BackupReplicationRetentionPeriod:
-        default: Backup Retention Period in DR region (days)
       LiveSecretArn:
         default: Live Region Secret ARN (DR standby only — required for secrets sync)
-      IsPITRMode:
-        default: PITR Mode (set by dr-failover-v2 only — do not change manually)
+      # second DB — cicsfe (DBFEStack)
       SnapshotIdentifierFe:
         default: FE DB Snapshot Identifier (DR failover restore — leave blank for normal)
       DBFEMasterUserPassword:
@@ -127,6 +135,15 @@ Metadata:
         default: Source FE DB Instance ARN (live region — required when replication is enabled)
       LiveSecretArn2:
         default: Live Region FE Secret ARN (DR standby only — required for secrets sync)
+      # third DB — cicsfer8 (DBFER8Stack)
+      SnapshotIdentifierFeR8:
+        default: FE R8 DB Snapshot Identifier (DR failover restore — leave blank for normal)
+      DBFER8MasterUserPassword:
+        default: FE R8 DB Master Password (DR failover only — leave blank for normal)
+      SourceDbFeR8InstanceArn:
+        default: Source FE R8 DB Instance ARN (live region — required when replication is enabled)
+      LiveSecretArn3:
+        default: Live Region FE R8 Secret ARN (DR standby only — required for secrets sync)
 
 Parameters:
   Name:
@@ -155,16 +172,15 @@ Parameters:
       - StagingDR
       - DevelopmentDR
       - TestDR
-  ADPassword:
-    Description: Active Directory admin password
+  NetworkStackName:
+    Description: The name of the network stack
     Type: String
-    MinLength: 8
-    NoEcho: true
-  ClientDomainName:
-    Description: The client's domain name (e.g. example.com, iscale-software.com)
+    Default: pchc-dev-ase1-network
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the SNS stack
     Type: String
-    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
-    Default: pchcdev.com
+    Default: pchc-dev-ase1-sns
     MinLength: 1
   DeletionProtection:
     Description: Set to true to enable (valid only in Production mode)
@@ -173,28 +189,16 @@ Parameters:
     AllowedValues:
       - true
       - false
-  FEInstanceAMI:
-    Description: Instance AMI ID
-    Type: AWS::EC2::Image::Id
-    Default: ami-0526b9747c2c87a0b #Default Windows 2019 base server
-    # ami-03edf490ad235d721 for UAT oregon
-  InstanceAMI:
-    Description: Instance AMI ID
-    Type: AWS::EC2::Image::Id
-    Default: ami-0d694fc7ea154072a #Default Windows 2019 base 
-    # ami-03edf490ad235d721 for UAT oregon, baked base windows
-  InstanceKeyName:
-    Description: Instance Key Name
+  ClientDomainName:
+    Description: The client's domain name (e.g. example.com, iscale-software.com)
     Type: String
-    Default: ''
-  InstanceType:
-    Description: Type of instance for app server
+    AllowedPattern: ^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,7}$
+    Default: pchcdev.com
+    MinLength: 1
+  LoadBalancerCertificateArn:
+    Description: SSL Certificate for the ELB
     Type: String
-    Default: t3.medium
-    AllowedValues:
-      - t3.medium
-      - t3.large
-      - t3.xlarge
+    Default: arn:aws:acm:ap-southeast-1:470455329885:certificate/9f713d5d-cb7c-4e8e-acc2-46862d610ec8
   LoadBalancerHostName:
     Description: >-
       (Optional) Custom hostname prefix for the ALB listener rule and Route53 record
@@ -203,30 +207,36 @@ Parameters:
     Type: String
     Default: ''
     MaxLength: 12
-  LoadBalancerCertificateArn:
-    Description: SSL Certificate for the ELB
+  InstanceKeyName:
+    Description: Instance Key Name
     Type: String
-    Default: arn:aws:acm:ap-southeast-1:470455329885:certificate/9f713d5d-cb7c-4e8e-acc2-46862d610ec8
-  NetworkStackName:
-    Description: The name of the network stack
+    Default: ''
+  InstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0d694fc7ea154072a #Default Windows 2019 base 
+  FEInstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0526b9747c2c87a0b #Default Windows 2019 base server
+  SIOSInstanceAMI:
+    Description: Instance AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-06b2f14c1d8417d36 #Default SIOS Windows 2019 Marketplace Image
+  InstanceType:
+    Description: Type of instance for app server
     Type: String
-    Default: pchc-dev-ase1-network
-    MinLength: 1
+    Default: t3.medium
+    AllowedValues:
+      - t3.medium
+      - t3.large
+      - t3.xlarge
   RDPPort:
     Description: RDP port number
     Type: Number
     Default: 3389
     MinValue: 1
     MaxValue: 65535
-  SIOSInstanceAMI:
-    Description: Instance AMI ID
-    Type: AWS::EC2::Image::Id
-    Default: ami-06b2f14c1d8417d36 #Default SIOS Windows 2019 Marketplace Image
-  SNSStackName:
-    Description: The name of the SNS stack
-    Type: String
-    Default: pchc-dev-ase1-sns
-    MinLength: 1
   StartScheduleExpression:
     Description: Schedule expression when to start the objects
     Type: String
@@ -235,6 +245,11 @@ Parameters:
     Description: Schedule expression when to stop the objects
     Type: String
     Default: cron(0 10 ? * MON-FRI *)
+  ADPassword:
+    Description: Active Directory admin password
+    Type: String
+    MinLength: 8
+    NoEcho: true
   DeployPaidResources:
     Description: |
       true (default): Deploy all paid resources — DB, Cache, LBs, and App Servers. Normal operation for all environments.
@@ -245,6 +260,35 @@ Parameters:
     AllowedValues:
       - 'true'
       - 'false'
+  EnableCrossRegionBackupReplication:
+    Description: |
+      Set to true to enable cross-region automated backup replication for the DB.
+      Deploy with this enabled in the DR region stack, pointing SourceDbInstanceArn to the live DB.
+      Replicates daily snapshots + transaction logs — enables PITR with ~5 minute RPO in the DR region.
+      Default false — existing deployments are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  BackupReplicationRetentionPeriod:
+    Description: Number of days to retain replicated backups in the DR region (1-35)
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+  IsPITRMode:
+    Description: |
+      Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
+      When true, DBStack is suppressed (DB was restored externally via PITR) and all DB references
+      resolve from PITRDBEndpoint and the pre-deployed DBStandbySecurityGroup instead of DBStack outputs.
+      Default false — live stacks and snapshot-based failover are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  # first DB — cics (DBStack)
   SnapshotIdentifier:
     Description: |
       (DR Failover only) ARN of the RDS snapshot to restore the database from.
@@ -260,17 +304,6 @@ Parameters:
     Type: String
     Default: ''
     NoEcho: true
-  EnableCrossRegionBackupReplication:
-    Description: |
-      Set to true to enable cross-region automated backup replication for the DB.
-      Deploy with this enabled in the DR region stack, pointing SourceDbInstanceArn to the live DB.
-      Replicates daily snapshots + transaction logs — enables PITR with ~5 minute RPO in the DR region.
-      Default false — existing deployments are completely unaffected.
-    Type: String
-    Default: 'false'
-    AllowedValues:
-      - 'true'
-      - 'false'
   SourceDbInstanceArn:
     Description: |
       ARN of the live region RDS DB instance to replicate from.
@@ -279,12 +312,6 @@ Parameters:
       Obtain from the live stack DBStack output: DBInstanceARN.
     Type: String
     Default: ''
-  BackupReplicationRetentionPeriod:
-    Description: Number of days to retain replicated backups in the DR region (1-35)
-    Type: Number
-    Default: 7
-    MinValue: 1
-    MaxValue: 35
   LiveSecretArn:
     Description: |
       ARN of the live region Secrets Manager secret to replicate from.
@@ -292,18 +319,7 @@ Parameters:
       Only required when deploying in DR (ProductionDR) — leave blank for normal deployments.
     Type: String
     Default: ''
-  IsPITRMode:
-    Description: |
-      Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
-      When true, DBStack is suppressed (DB was restored externally via PITR) and all DB references
-      resolve from PITRDBEndpoint and the pre-deployed DBStandbySecurityGroup instead of DBStack outputs.
-      Default false — live stacks and snapshot-based failover are completely unaffected.
-    Type: String
-    Default: 'false'
-    AllowedValues:
-      - 'true'
-      - 'false'
-  # for second DB cicsfe
+  # second DB — cicsfe (DBFEStack)
   SnapshotIdentifierFe:
     Description: |
       (DR Failover only) ARN of the RDS snapshot to restore the FE database (cicsfe) from.
@@ -334,12 +350,50 @@ Parameters:
       Only required when deploying in DR (ProductionDR) — leave blank for normal deployments.
     Type: String
     Default: ''
+  # third DB — cicsfer8 (DBFER8Stack)
+  SnapshotIdentifierFeR8:
+    Description: |
+      (DR Failover only) ARN of the RDS snapshot to restore the FE R8 database from.
+      Obtain by copying the latest automated backup from the live region into the DR region before failover.
+      Leave blank for normal fresh DB creation — existing deployments are unaffected.
+    Type: String
+    Default: ''
+  DBFER8MasterUserPassword:
+    Description: |
+      (DR Failover only) Master user password of the source FE R8 database.
+      Provide this during snapshot restore so the Secrets Manager secret stays in sync with the restored DB credentials.
+      Leave blank for auto-generated password — existing deployments are unaffected.
+    Type: String
+    Default: ''
+    NoEcho: true
+  SourceDbFeR8InstanceArn:
+    Description: |
+      ARN of the live region FE R8 RDS DB instance to replicate from.
+      Required when EnableCrossRegionBackupReplication=true.
+      Format: arn:aws:rds:<live-region>:<account-id>:db:<db-identifier>
+      Obtain from the live stack DBFER8Stack output: DBInstanceARN.
+    Type: String
+    Default: ''
+  LiveSecretArn3:
+    Description: |
+      ARN of the live region FE R8 Secrets Manager secret to replicate from.
+      Obtain from the live stack Secrets Manager console.
+      Only required when deploying in DR (ProductionDR) — leave blank for normal deployments.
+    Type: String
+    Default: ''
 
 Mappings:
   Fn::Transform:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+  RegionAMI:
+    ap-southeast-1: # Singapore
+      BaseWindowsServer2022: ami-111
+    us-west-2: # Oregon
+      BaseWindowsServer2022: ami-09a323355e6ed68ca
+    us-east-2: # Ohio
+      BaseWindowsServer2022: ami-111
 
 Conditions:
   Fn::Transform:
@@ -1041,7 +1095,7 @@ Resources:
           Ebs:
             DeleteOnTermination: true
             Encrypted: true
-            VolumeSize: 30
+            VolumeSize: 30 # 50GB in prod
             VolumeType: gp3
       SecurityGroupIds:
         - !Ref GLBLSCPSVRSecurityGroup
@@ -1224,7 +1278,7 @@ Resources:
           Ebs:
             DeleteOnTermination: true
             Encrypted: true
-            VolumeSize: 30
+            VolumeSize: 30 # 50GB in prod
             VolumeType: gp3
       SecurityGroupIds:
         - !Ref IWEBAPPSVRSecurityGroup
@@ -1805,6 +1859,384 @@ Resources:
       SourceSecurityGroupId: !GetAtt [ELBStack, Outputs.SecurityGroupId]
 
 ###
+# IWebFeExternalServer
+###
+
+  IWebFeExternalServerEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  IWebFeExternalServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref IWebFeExternalServerEC2Role
+
+  IWebFeExternalServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL, Security, Group]]
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcCidrBlock'
+          Description: Allow all connections on all ports from inside VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL, Security, Group]]
+
+  AllowJumpHostIntoIWebFeExternalServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref IWebFeExternalServerSecurityGroup
+      FromPort: 3389
+      ToPort: 3389
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  IWebFeExternalServerInstance1:
+    # UAT OK
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', BaseWindowsServer2022]
+      InstanceType: c5.large
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref IWebFeExternalServerInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds:
+        - !Ref IWebFeExternalServerSecurityGroup
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL1]]
+
+  # Proper way of adding additional EBS volume to an existing EC2 instance
+  # is to create the volume and then attach it to the instance. This is to prevent
+  # instance replacement. (modifying BlockDeviceMappings will cause instance replacement)
+  IWebFeExternalServer1Ebs1:
+    Type: AWS::EC2::Volume
+    Properties: 
+      Size: 50
+      Encrypted: true
+      VolumeType: gp3
+      AvailabilityZone: !GetAtt IWebFeExternalServerInstance1.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL1, EBS1]]
+  
+  IWebFeExternalServer1Ebs1Mountpoint:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref IWebFeExternalServerInstance1
+      VolumeId: !Ref IWebFeExternalServer1Ebs1
+      Device: xvdf
+
+  IWebFeExternalServer1HighCPUAlarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-EXTERNAL1, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref IWebFeExternalServerInstance1
+
+###
+# IWebFeInternalServer
+###
+
+  IWebFeInternalServerEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  IWebFeInternalServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref IWebFeInternalServerEC2Role
+
+  IWebFeInternalServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-INTERNAL, Security, Group]]
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcCidrBlock'
+          Description: Allow all connections on all ports from inside VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-INTERNAL, Security, Group]]
+
+  AllowJumpHostIntoIWebFeInternalServer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref IWebFeInternalServerSecurityGroup
+      FromPort: 3389
+      ToPort: 3389
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  IWebFeInternalServerInstance1:
+    # UAT OK
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', BaseWindowsServer2022]
+      InstanceType: c5.large
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref IWebFeInternalServerInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds:
+        - !Ref IWebFeInternalServerSecurityGroup
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-INTERNAL1]]
+
+  # Proper way of adding additional EBS volume to an existing EC2 instance
+  # is to create the volume and then attach it to the instance. This is to prevent
+  # instance replacement. (modifying BlockDeviceMappings will cause instance replacement)
+  IWebFeInternalServer1Ebs1:
+    Type: AWS::EC2::Volume
+    Properties: 
+      Size: 50
+      Encrypted: true
+      VolumeType: gp3
+      AvailabilityZone: !GetAtt IWebFeInternalServerInstance1.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-INTERNAL1, EBS1]]
+  
+  IWebFeInternalServer1Ebs1Mountpoint:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref IWebFeInternalServerInstance1
+      VolumeId: !Ref IWebFeInternalServer1Ebs1
+      Device: xvdf
+
+  IWebFeInternalServer1HighCPUAlarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWEBFE-INTERNAL1, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref IWebFeInternalServerInstance1
+
+###
+# IWebFeApp R8 Server IWebFeAppR8Server
+###
+
+  IWebFeAppR8ServerEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  IWebFeAppR8ServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref IWebFeAppR8ServerEC2Role
+
+  IWebFeAppR8ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-VpcId'
+      GroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWebFeAppR8Server, Security, Group]]
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 
+            Fn::ImportValue:
+              !Sub '${NetworkStackName}-VpcCidrBlock'
+          Description: Allow all connections on all ports from inside VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWebFeAppR8Server, Security, Group]]
+
+  AllowJumpHostIntoIWebFeAppR8Server:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from jump host
+      IpProtocol: TCP
+      GroupId: !Ref IWebFeAppR8ServerSecurityGroup
+      FromPort: 3389
+      ToPort: 3389
+      SourceSecurityGroupId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+  IWebFeAppR8ServerInstance1:
+    # UAT OK
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', BaseWindowsServer2022]
+      InstanceType: c5.large
+      DisableApiTermination: !Ref DeletionProtection
+      IamInstanceProfile: !Ref IWebFeAppR8ServerInstanceProfile
+      KeyName: !If [HasKeyName, !Ref InstanceKeyName, !Ref 'AWS::NoValue']
+      # NOTE: Modifying BlockDeviceMappings will cause instance replacement. 
+      # If you need to add additional EBS volume to an existing EC2 instance,
+      # create the volume and then attach it to the instance.
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+      SecurityGroupIds:
+        - !Ref IWebFeAppR8ServerSecurityGroup
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${NetworkStackName}-PrivateSubnetId1'
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWebFeAppR8Server1]]
+
+  # Proper way of adding additional EBS volume to an existing EC2 instance
+  # is to create the volume and then attach it to the instance. This is to prevent
+  # instance replacement. (modifying BlockDeviceMappings will cause instance replacement)
+  IWebFeAppR8Server1Ebs1:
+    Type: AWS::EC2::Volume
+    Properties: 
+      Size: 50
+      Encrypted: true
+      VolumeType: gp3
+      AvailabilityZone: !GetAtt IWebFeAppR8ServerInstance1.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWebFeAppR8Server1, EBS1]]
+  
+  IWebFeAppR8Server1Ebs1Mountpoint:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref IWebFeAppR8ServerInstance1
+      VolumeId: !Ref IWebFeAppR8Server1Ebs1
+      Device: xvdf
+
+  IWebFeAppR8Server1HighCPUAlarm:
+    Condition: IsProd
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, IWebFeAppR8Server1, high, cpu]]
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      OKActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref IWebFeAppR8ServerInstance1
+
+###
 # PCHJUMPSVR
 ###
 
@@ -2186,6 +2618,8 @@ Resources:
 ##
 # Active Directory
 ##
+
+# find a solution for DR failover/failback
 
   ActiveDirectory:
     Type: AWS::DirectoryService::MicrosoftAD
@@ -2728,6 +3162,167 @@ Resources:
       ToPort: 1433
       SourceSecurityGroupId: !Ref CICSFEAPPSVRSecurityGroup
 
+##
+# FrontEnd R8 Database
+##
+
+  SQLServerR8OptionGroup:
+    Type: AWS::RDS::OptionGroup
+    Properties:
+      EngineName: sqlserver-se
+      MajorEngineVersion: '16.00'
+      OptionGroupDescription: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, fer8]]
+      OptionConfigurations:
+        - OptionName: SQLSERVER_BACKUP_RESTORE
+          OptionSettings:
+            - Name: IAM_ROLE_ARN
+              Value: !GetAtt SQLServerBackupRestoreIAMRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, fer8]]
+
+  DBFER8Stack:
+    Condition: IsDeployPaidResourcesAndNotPITR
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/database.yaml
+      Parameters:
+        Name: !Join ['',[!Ref Name, fer8]]
+        DatabaseName: !Join ['',[!Join ['',[!Ref Name, fer8]], !FindInMap [EnvShort, !Ref EnvName, Name], db]]
+        AllocatedStorage: 1000
+        BackupRetentionPeriod: !If [IsProd, 30, 7]
+        DeletionProtection: !If [IsProd, !Ref DeletionProtection, false]
+        Domain: !Ref ActiveDirectory
+        EnableEnhancedMonitoring: !If [IsProd, true, false]
+        EnablePerformanceInsights: !If [IsProd, true, false]
+        EnvName: !Ref EnvName
+        Engine: sqlserver-se
+        EngineVersion: 16.00.4255.1.v1
+        Family: sqlserver-se-16.0
+        InstanceType: db.m5.xlarge
+        MasterUser: admin
+        MultiAz: true
+        NetworkStackName: !Ref NetworkStackName
+        NetworkType: Private
+        OptionGroupName: !Ref SQLServerR8OptionGroup
+        Port: 1433
+        OrgName: !Ref OrgName
+        SNSStackName: !Ref SNSStackName
+        StorageEncrypted: true
+        StorageType: gp3
+        SnapshotIdentifier: !Ref SnapshotIdentifierFeR8
+        MasterUserPassword: !Ref DBFER8MasterUserPassword
+        ExistingSecretArn: !If [IsDR, !Ref DRDBFER8Secret, '']
+
+####
+# Disaster Recovery
+# All resources below are deployed ONLY when EnvName is a DR variant (ProductionDR, StagingDR, etc.).
+# These resources are always-on in the DR region at zero/minimal cost.
+# They pre-provision the infrastructure needed to activate the environment at failover time.
+####
+
+  # Placeholder Secrets Manager secret for DB credentials in the DR region.
+  # Created at DR stack deploy time with placeholder values.
+  # The secrets-sync Lambda overwrites the values whenever the live region secret rotates,
+  # ensuring correct credentials are available before failover is triggered.
+  # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
+  # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
+  DRDBFER8Secret:
+    Condition: IsDR
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfer8]]
+      Description: !Sub 'DR placeholder secret for ${OrgName} ${Name} — values synced from the live region secret by the secrets-sync Lambda before failover.'
+      SecretString: !Sub |
+        {
+          "DB_ROOT_USER": "root",
+          "DB_ROOT_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "DB_NAME": "${Name}db",
+          "DB_USER": "${Name}",
+          "DB_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE",
+          "MAGENTO_ADMIN_PASSWORD": "PLACEHOLDER_SYNC_FROM_LIVE"
+        }
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfer8]]
+        - Key: Environment
+          Value: !Ref EnvName
+        - Key: Organization
+          Value: !Ref OrgName
+        - Key: DRSync
+          Value: 'true'
+        - Key: SourceSecretArn
+          Value: !Ref LiveSecretArn3
+
+  # Pre-deployed DB subnet group for PITR restore in DR standby.
+  # Uses -dr suffix to avoid naming conflict with DBStack's own subnet group at failover.
+  DBFER8StandbySubnetGroup:
+    Condition: IsDR
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfer8, db, standby]]
+      DBSubnetGroupName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfer8, db, standby]]
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId1'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId2'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-InternalSubnetId3'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfer8, db, standby]]
+
+  # Pre-deployed DB security group for PITR restore in DR standby (cicsfer8).
+  # Attached to the restored cicsfer8 instance at failover; app server stacks add
+  # ingress rules to this SG at restore time.
+  DBFER8StandbySecurityGroup:
+    Condition: IsDR
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfer8, db, standby]]
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], cicsfer8, db, standby]]
+
+  # Cross-region automated backup replication — provides ~5 min RPO via PITR without a running replica.
+  # Enable by setting EnableCrossRegionBackupReplication=true and providing SourceDbInstanceArn.
+  # Only deployed in DR environments (IsDR condition) with replication explicitly enabled.
+  DBFER8ReplicationStack:
+    Condition: IsDRAndEnableCrossRegionBackupReplication
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/db-replication.yaml
+      Parameters:
+        Name: cicsfer8
+        OrgName: !Ref OrgName
+        EnvName: !Ref EnvName
+        SourceDbInstanceArn: !Ref SourceDbFeR8InstanceArn
+        BackupRetentionPeriod: !Ref BackupReplicationRetentionPeriod
+  
+  AllowIWebFeInternalServerIntoDBFER8:
+    Condition: IsDeployPaidResourcesAndNotPITR
+    DependsOn:
+      - DBFER8Stack
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from IWebFeInternalServer
+      IpProtocol: TCP
+      GroupId: !GetAtt [DBFER8Stack, Outputs.SecurityGroupId]
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !Ref IWebFeInternalServerSecurityGroup
+
+  AllowIWebFeInternalServerIntoStandbyDBFER8:
+    Condition: IsDRAndPITR
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow connection from IWebFeInternalServer (PITR standby)
+      IpProtocol: TCP
+      GroupId: !GetAtt DBFER8StandbySecurityGroup.GroupId
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !Ref IWebFeInternalServerSecurityGroup
+
 ###
 # S3 Buckets
 ###
@@ -2863,6 +3458,8 @@ Resources:
 ###
 # File Server for Windows
 ###
+
+# dedicated fileserver for windows only. find solution for dr
 
   FileServerStack:
     Condition: IsMainRegion
@@ -3173,6 +3770,13 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-DBFEStandbySubnetGroup'
 
+  DBFER8StandbySubnetGroupName:
+    Condition: IsDR
+    Description: cicsfer8 DB standby subnet group name (use as the R8 PITR subnet group at failover).
+    Value: !Ref DBFER8StandbySubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBFER8StandbySubnetGroup'
+
   # DR standby DB security groups — pre-deployed (Condition: IsDR), attached to the
   # restored instances at failover. Surfaced for cics-dr-failover's payload
   # (pitr_security_group_id / pitr_fe_security_group_id).
@@ -3189,3 +3793,33 @@ Outputs:
     Value: !GetAtt DBFEStandbySecurityGroup.GroupId
     Export:
       Name: !Sub '${AWS::StackName}-DBFEStandbySecurityGroup'
+
+  DBFER8StandbySecurityGroupId:
+    Condition: IsDR
+    Description: cicsfer8 DB standby security group id (use as the R8 PITR security group id at failover).
+    Value: !GetAtt DBFER8StandbySecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-DBFER8StandbySecurityGroup'
+  
+# Required for VPC Peering connections (cics-dsapp)
+  
+  DBSecurityGroup:
+    Condition: IsDeployPaidResources
+    Description: DB Server Security Group
+    Value: !GetAtt [DBStack, Outputs.SecurityGroupId]
+    Export:
+      Name: !Sub '${AWS::StackName}-DBSecurityGroup'
+
+  DBPort:
+    Condition: IsDeployPaidResources
+    Description: DB Server Security Group
+    Value: !GetAtt [DBStack, Outputs.DBInstancePort]
+    Export:
+      Name: !Sub '${AWS::StackName}-DBPort'
+
+  CICSAPPSVRSecurityGroup:
+    Condition: IsDeployPaidResources
+    Description: App Servers Security Group
+    Value: !GetAtt CICSAPPSVRSecurityGroup.GroupId
+    Export:
+      Name: !Sub '${AWS::StackName}-CICSAPPSVRSecurityGroup'

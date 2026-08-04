@@ -1,0 +1,247 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+# Deploy twice, same template:
+#   1. Requester in the LIVE region - creates the peering; record the pcx- id.
+#   2. Accept the peering in the DR region console (it must be active before step 3).
+#   3. Accepter in the DR region - adds the DR-side route + DB ingress; pass the pcx- as VPCPeeringId.
+#
+# Only InternalRouteTable1 is passed: 1/2/3 are three exports of one DefaultRouteTable, so passing
+# 2 or 3 as well would duplicate the route and fail (RouteAlreadyExists).
+
+Description: >-
+  Cross-region prerequisite for dr-failback-dms-sync.yaml: VPC peering (live <-> DR), the internal
+  route on both sides, and the DR-side DB ingress that lets the live-region DMS instance reach the DR
+  source DB. Deploy twice - Requester in the live region, then Accepter in the DR region after
+  accepting the peering.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+          - RequesterOrAccepter
+      - Label:
+          default: Requester - live region (leave defaults if deploying as Accepter)
+        Parameters:
+          - RequesterNetworkStackName
+          - AccepterVpcId
+          - AccepterCidr
+          - AccepterRegion
+      - Label:
+          default: Accepter - DR region (leave defaults if deploying as Requester)
+        Parameters:
+          - TargetNetworkStackName
+          - VPCPeeringId
+          - RequesterCidrBlock
+          - TargetDbSecurityGroupId
+          - TargetDbPort
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      RequesterOrAccepter:
+        default: "Is this deployment the peering REQUESTER (live) or ACCEPTER (DR)?"
+
+      RequesterNetworkStackName:
+        default: Live-region network stack name (the DMS VPC)
+      AccepterVpcId:
+        default: DR VPC ID
+      AccepterCidr:
+        default: DR VPC CIDR block
+      AccepterRegion:
+        default: DR region code
+
+      TargetNetworkStackName:
+        default: DR-region network stack name
+      VPCPeeringId:
+        default: VPC Peering ID (from the Requester deployment)
+      RequesterCidrBlock:
+        default: Live VPC CIDR block
+      TargetDbSecurityGroupId:
+        default: DR source DB security group ID
+      TargetDbPort:
+        default: DR source DB port
+
+Parameters:
+  Name:
+    Description: Unique name/identifier matching the app stack
+    Type: String
+    MinLength: 3
+    MaxLength: 20
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: pchc
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters, numbers and hyphen.
+    MaxLength: 12
+  EnvName:
+    Description: The name of the environment
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+      - ProductionDR
+      - StagingDR
+      - DevelopmentDR
+      - TestDR
+  RequesterOrAccepter:
+    Description: The live VPC (where DMS runs) is the Requester. The DR VPC is the Accepter.
+    Type: String
+    MinLength: 1
+    AllowedValues:
+      - Requester
+      - Accepter
+
+  RequesterNetworkStackName:
+    Description: Live-region network stack name. Must match the NetworkStackName given to
+      dr-failback-dms-sync.yaml - the DMS replication instance lives in this VPC's internal subnets.
+      Ignored when deploying as Accepter.
+    Type: String
+    Default: ''
+  AccepterVpcId:
+    Description: VPC ID of the DR VPC. Explicit value - cross-region imports cannot resolve.
+      Ignored when deploying as Accepter.
+    Type: String
+    Default: ''
+  AccepterCidr:
+    Description: CIDR block of the DR VPC (e.g. 10.100.0.0/24). Becomes the destination of the
+      live-side routes. Ignored when deploying as Accepter.
+    Type: String
+    AllowedPattern: '(((\d{1,3})\.){3}\d{1,3}/\d{1,2})?'
+    Default: ''
+  AccepterRegion:
+    Description: Region code of the DR VPC (e.g. us-east-2 for UAT DR, us-west-2 for Prod DR).
+      Ignored when deploying as Accepter.
+    Type: String
+    Default: ''
+
+  TargetNetworkStackName:
+    Description: DR-region network stack name. Ignored when deploying as Requester.
+    Type: String
+    Default: ''
+  VPCPeeringId:
+    Description: The pcx- ID created by the Requester deployment. Accept the connection in the DR
+      region before deploying this. Ignored when deploying as Requester.
+    Type: String
+    Default: ''
+  RequesterCidrBlock:
+    Description: CIDR block of the live VPC (e.g. 10.8.0.0/24). Becomes the destination of the
+      DR-side routes AND the source of the DB ingress rule below. Ignored when deploying as Requester.
+    Type: String
+    AllowedPattern: '(((\d{1,3})\.){3}\d{1,3}/\d{1,2})?'
+    Default: ''
+  TargetDbSecurityGroupId:
+    Description: Security group attached to the DR source RDS instance. Read this off the RESTORED
+      instance, not the app stack - a PITR-restored DB takes its SG from pitr_security_group_id in
+      the failover payload, which need not be the app stack's DB SG. Hence a literal ID rather than
+      an ImportValue. Ignored when deploying as Requester.
+    Type: String
+    Default: ''
+  TargetDbPort:
+    Description: Port the DR source DB listens on. Must match SourcePort in dr-failback-dms-sync.yaml.
+    Type: Number
+    Default: 3306
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsRequester: !Equals [!Ref RequesterOrAccepter, 'Requester']
+  IsAccepter: !Equals [!Ref RequesterOrAccepter, 'Accepter']
+
+Resources:
+
+####
+# Requester (live) side: create the peering and route the DMS internal subnets to the DR VPC.
+####
+
+  RequesterVPCPeering:
+    Condition: IsRequester
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        PeerRegion: !Ref AccepterRegion
+
+        RequesterVpcId: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
+        RequesterCidr: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
+        RequesterInternalRouteTable1: !ImportValue
+          'Fn::Sub': '${RequesterNetworkStackName}-InternalRouteTable1'
+
+        TargetVpcId: !Ref AccepterVpcId
+        TargetCidr: !Ref AccepterCidr
+
+####
+# Accepter (DR) side: attach the return route to the existing peering (creates no peering).
+# Only the internal route table is wired - the DR source DB lands in the internal subnets
+# (DBSubnetGroup uses InternalSubnetId1/2), which share DefaultRouteTable. Private route tables
+# carry no DMS traffic.
+####
+
+  AccepterVPCPeering:
+    Condition: IsAccepter
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/vpc-peering.yaml
+      Parameters:
+        Name: !Ref Name
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        CreateVPCPeering: false
+        CrossRegionVPCPeeringId: !Ref VPCPeeringId
+
+        RequesterCidr: !Ref RequesterCidrBlock
+
+        TargetVpcId: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackName}-VpcId'
+        TargetCidr: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackName}-VpcCidrBlock'
+        TargetInternalRouteTable1: !ImportValue
+          'Fn::Sub': '${TargetNetworkStackName}-InternalRouteTable1'
+
+####
+# DR source DB ingress - the cross-region prerequisite dr-failback-dms-sync.yaml cannot own.
+# CIDR-based, not SG-to-SG: an SG reference never resolves across regions/VPCs.
+####
+
+  AllowDMSIntoDRSourceDb:
+    Condition: IsAccepter
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow the live-region DMS failback replication instance to reach the DR source DB
+      GroupId: !Ref TargetDbSecurityGroupId
+      IpProtocol: tcp
+      FromPort: !Ref TargetDbPort
+      ToPort: !Ref TargetDbPort
+      CidrIp: !Ref RequesterCidrBlock
+
+Outputs:
+
+  VPCPeeringId:
+    Condition: IsRequester
+    Description: pcx- id, consumed by dr-failback-dms-peering to pass into the Accepter deploy.
+    Value: !GetAtt RequesterVPCPeering.Outputs.PeeringConnectionId

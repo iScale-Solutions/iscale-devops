@@ -22,6 +22,11 @@ Metadata:
           - ShardCapacity
           - ShardCount
           - ShardInstanceCount
+      - Label:
+          default: Schedules
+        Parameters:
+          - StartScheduleExpression
+          - StopScheduleExpression
 
     ParameterLabels:
       Name:
@@ -30,6 +35,10 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
+      StartScheduleExpression:
+        default: Start Schedule CRON Expression
+      StopScheduleExpression:
+        default: Stop Schedule CRON Expression
 
 Parameters:
   Name:
@@ -87,8 +96,16 @@ Parameters:
     Description: 'The number of replica instances applying to all shards in the cluster. A shardInstanceCount value of 1 means there is one writer instance, and any additional instances are replicas that can be used for reads and to improve availability.'
     Type: Number
     Default: 1
+  StartScheduleExpression:
+    Description: The cron expression to start the DocumentDB cluster. Times are UTC. Default is a valid expression that never fires in practice (01 Jan 2199) so the cluster stays off until someone sets a real start time.
+    Type: String
+    Default: "cron(0 0 1 1 ? 2199)" # never fires - project is parked
+  StopScheduleExpression:
+    Description: The cron expression to stop the DocumentDB cluster. Times are UTC.
+    Type: String
+    Default: "cron(0 10 ? * MON-SUN *)" # every day 10:00 UTC = 18:00 Asia/Manila (GMT+8)
 
-Mappings: 
+Mappings:
   Fn::Transform:
     Name: AWS::Include
     Parameters:
@@ -99,6 +116,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  IsElasticCluster: !Equals [!Ref ClusterType, elastic]
 
 Resources:
 
@@ -239,6 +257,33 @@ Resources:
       SourceSecurityGroupId:
         Fn::ImportValue:
           !Sub '${NetworkStackName}-JumpHostSecurityGroupId'
+
+###
+# Document DB Scheduler Section
+###
+
+# Stops the DocumentDB cluster on a schedule to park the project outside working hours.
+# Non-prod only - production is never scheduled off.
+
+  DocumentDBSchedulerStack:
+    Condition: IsNotProd
+    DependsOn:
+      - DocumentDBStack
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://iscale-dev-cloudformation.s3-us-west-2.amazonaws.com/common/scheduler.yaml
+      Parameters:
+        Name: !Join ['-', [!Select [0, !Split ['-', !Ref Name]], docdb]]
+        EnvName: !Ref EnvName
+        OrgName: !Ref OrgName
+        UseFriendlyNames: FALSE
+        DocDBClusterType: !Ref ClusterType
+        DocDBClusterArn: !If
+          - IsElasticCluster
+          - !GetAtt DocumentDBStack.Outputs.DocuDBElasticClusterARN
+          - !GetAtt DocumentDBStack.Outputs.DBClusterARN
+        StartScheduleExpression: !Ref StartScheduleExpression
+        StopScheduleExpression: !Ref StopScheduleExpression
 
 
 ########### Backup Section configure this, AWS Backup now supports DocumentDB

@@ -21,22 +21,63 @@ CICS differs from the apps the generic engine was built for (pesonet, SmartAPI):
 
 ## Flow
 
+```mermaid
+%%{init: {"flowchart": {"htmlLabels": true, "wrappingWidth": 480, "nodeSpacing": 55, "rankSpacing": 60, "useMaxWidth": false}}}%%
+flowchart TD
+    Start(["<b>Start execution</b><br/>payload.json"]) --> UNS["<b>UpdateNetworkStack</b><br/>scale up the DR network stack —<br/>CreateJumpHost = true<br/>CreateMultipleNat = true (NatInstance2 / NatInstance3)<br/>CreateVpcEndpoint = true<br/>S3GatewayVpcEndpoint = true<br/><i>DeployPaidResources left at its previous value</i>"]
+    UNS --> WNS["<b>WaitNetworkStack</b><br/>60 s"]
+    WNS --> CNS["<b>CheckNetworkStack</b><br/>describe-stacks → status"]
+    CNS --> NSD{"<b>NetworkStackDone</b>"}
+    NSD -- "still UPDATE_IN_PROGRESS" --> WNS
+    NSD -- "ROLLBACK" --> FAIL
+    NSD -- "UPDATE_COMPLETE" --> RBM{"<b>RouteByMode</b><br/>use_pitr ?"}
+
+    RBM --> PRM
+    RBM --> PRF
+    RBM -- "false — snapshot path, up to ~24 h RPO" --> DS["<b>DiscoverSnapshots</b><br/>find the latest available cics + cicsfe snapshots<br/>(or use the pinned snapshot_identifier / snapshot_identifier_fe)<br/>and read both master passwords from the DR secrets"]
+
+    subgraph PAR["PITRRestoreParallel — use_pitr = true, ~5 min RPO — both branches run simultaneously"]
+        PRM["<b>branch 1 — cics</b><br/><b>PITRRestoreMain</b><br/>restore-db-instance-to-point-in-time from the<br/>cross-region replicated automated backup<br/>into pitr_target_identifier"] --> WPM["<b>WaitPITRMain</b><br/>90 s"]
+        WPM --> CPM["<b>CheckPITRMain</b><br/>describe-db-instances → status"]
+        CPM --> PMA{"<b>PITRMainAvailable</b>"}
+        PMA -- "not yet" --> WPM
+        PMA -- "available" --> USM["<b>UpdateSecretsMain</b><br/>write the cics endpoint to<br/>DRDBSecret (DB_HOST) + pitr_endpoint_ssm_path"]
+
+        PRF["<b>branch 2 — cicsfe</b><br/><b>PITRRestoreFe</b><br/>restore-db-instance-to-point-in-time from the<br/>cross-region replicated automated backup<br/>into pitr_fe_target_identifier"] --> WPF["<b>WaitPITRFe</b><br/>90 s"]
+        WPF --> CPF["<b>CheckPITRFe</b><br/>describe-db-instances → status"]
+        CPF --> PFA{"<b>PITRFeAvailable</b>"}
+        PFA -- "not yet" --> WPF
+        PFA -- "available" --> USF["<b>UpdateSecretsFe</b><br/>write the cicsfe endpoint to<br/>DRDBFESecret (DB_HOST) + pitr_fe_endpoint_ssm_path"]
+    end
+
+    USM --> UAP["<b>UpdateAppStackPITR</b><br/>update the CICS app stack (cics.yaml) with<br/>DeployPaidResources = true and IsPITRMode = true —<br/>DBStack + DBFEStack are suppressed, so the app servers<br/>read DB_HOST from the DR secrets instead"]
+    USF --> UAP
+    DS --> UAS["<b>UpdateAppStackSnapshot</b><br/>update the CICS app stack (cics.yaml) with<br/>DeployPaidResources = true,<br/>SnapshotIdentifier + SnapshotIdentifierFe —<br/>CFN restores both nested DBs in-stack"]
+
+    UAP --> WAS["<b>WaitAppStack</b><br/>60 s"]
+    UAS --> WAS
+    WAS --> CAS["<b>CheckAppStack</b><br/>describe-stacks → status"]
+    CAS --> ASD{"<b>AppStackDone</b>"}
+    ASD -- "still UPDATE_IN_PROGRESS" --> WAS
+    ASD -- "ROLLBACK" --> FAIL
+    ASD -- "UPDATE_COMPLETE" --> SCI["<b>StartCicsInstances</b><br/>force-start every stopped EC2 instance tagged System = CICS<br/>in the DR region — idempotent, running instances untouched;<br/>InsufficientInstanceCapacity is logged as a warning, not fatal"]
+    SCI --> DNS["<b>DNSCutover</b><br/>Route53 UPSERT of dns_record_name → DR ALB alias<br/>(ALB auto-discovered via dns_alb_name_contains<br/>when the explicit alias target is blank;<br/>skipped entirely if dns_record_name is blank)"]
+    DNS --> NC["<b>NotifyComplete</b><br/>publish the result to SnsTopicArn<br/>(skipped if the topic ARN is blank)"]
+    NC --> OK(["<b>Complete</b>"])
+    NC -. "notify error — non-fatal" .-> OK
+
+    FAIL(["<b>FailoverFailed</b>"])
+
+    classDef fail fill:#fdecea,stroke:#c0392b,color:#c0392b
+    classDef done fill:#eafaf1,stroke:#27ae60,color:#1e8449
+    class FAIL fail
+    class OK,Start done
 ```
-UpdateNetworkStack (scale-up flags) ──► poll until UPDATE_COMPLETE
-  └─ RouteByMode
-       ├─ [use_pitr=true]  PITRRestoreParallel (Parallel — both branches run simultaneously)
-       │                   ├─ branch 1: PITRRestoreMain  (cics)   ─► poll until available ─► UpdateSecretsMain
-       │                   └─ branch 2: PITRRestoreFe    (cicsfe) ─► poll until available ─► UpdateSecretsFe
-       │                   └── both complete ──► UpdateAppStackPITR (IsPITRMode=true)
-       │
-       └─ [use_pitr=false] DiscoverSnapshots (latest cics + cicsfe snapshots)
-                           UpdateAppStackSnapshot (SnapshotIdentifier + SnapshotIdentifierFe)
-       │
-       └──────────────► poll app stack until UPDATE_COMPLETE
-                        StartCicsInstances (start all stopped EC2 tagged System=CICS)
-                        DNSCutover (UPSERT hostname → DR ALB)
-                        NotifyComplete (SNS) ─► Complete / FailoverFailed
-```
+
+Every `Task` state also carries a `States.ALL` catch straight to **FailoverFailed** (inside
+the Parallel, a branch failure hits `MainBranchFailed`/`FeBranchFailed`, which aborts the
+sibling branch and propagates out to `FailoverFailed`). Those catch edges are omitted above
+to keep the happy path readable.
 
 > **StartCicsInstances** force-starts every EC2 instance tagged `System=CICS` in the DR
 > region that is currently `stopped` (e.g. left off by the start/stop schedule), before DNS

@@ -39,6 +39,8 @@ Metadata:
           - SnapshotIdentifier
           - DBMasterUserPassword
           - EnableCrossRegionBackupReplication
+          - DRRegion
+          - EnableCodeDeployReplication
           - SourceDbInstanceArn
           - BackupReplicationRetentionPeriod
           - IsPITRMode
@@ -87,7 +89,9 @@ Metadata:
       BackupReplicationRetentionPeriod:
         default: Backup Retention Period in DR region (days)
       DRRegion:
-        default: DR AWS Region (backup copy destination)
+        default: DR AWS Region (backup copy + CodeDeploy CRR destination)
+      EnableCodeDeployReplication:
+        default: Enable CodeDeploy Artifact Replication to DR region (live stack only — leave false for DR stacks)
       IsPITRMode:
         default: PITR Mode (true = DB restored externally via PITR, DBStack suppressed)
       PITRDBEndpoint:
@@ -225,7 +229,10 @@ Parameters:
     MinValue: 1
     MaxValue: 35
   DRRegion:
-    Description: AWS region of the DR stack — used to construct the DR backup vault ARN for cross-region EFS copy
+    Description: |
+      AWS region of the DR stack — used to construct the DR backup vault ARN for cross-region EFS copy
+      and the DR CodeDeploy bucket ARNs when EnableCodeDeployReplication=true.
+      Must be the region the DR stack is actually deployed in, not the live region.
     Type: String
     Default: 'us-west-2'
     AllowedValues:
@@ -235,6 +242,18 @@ Parameters:
       - us-west-2
       - ap-southeast-1
       - ap-southeast-2
+  EnableCodeDeployReplication:
+    Description: |
+      Set to true on the LIVE stack to enable cross-region replication of CodeDeploy artifacts
+      to the DR region buckets. Must be false on DR stacks — the DR buckets are replication
+      destinations, not sources. Requires the DR stack to be deployed first so the destination
+      buckets exist; S3 rejects a replication rule pointing at a non-existent bucket.
+      Default false — existing deployments are completely unaffected.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
   IsPITRMode:
     Description: |
       Set to true ONLY by the dr-failover Step Functions state machine when performing a PITR restore.
@@ -315,6 +334,7 @@ Conditions:
     - Condition: IsDeployPaidResources
     - !Not [{Condition: IsPITRMode}]
   IsEnableCrossRegionBackupReplication: !Equals [!Ref EnableCrossRegionBackupReplication, 'true']
+  IsEnableCodeDeployReplication: !Equals [!Ref EnableCodeDeployReplication, 'true']
   IsDRAndEnableCrossRegionBackupReplication: !And
     - Condition: IsDR
     - Condition: IsEnableCrossRegionBackupReplication
@@ -417,6 +437,11 @@ Resources:
   # ensuring correct credentials are available before failover is triggered.
   # At failover, database.yaml receives this ARN as ExistingSecretArn and skips creating a
   # new secret — preventing a name conflict and ensuring the app servers get the correct credentials.
+  #
+  # NOTE: !Ref on this resource returns the full ARN, NOT the name. Never pass !Ref DRDBSecret as
+  # SharedSecretId to the *ServerStacks — appserver.yaml builds the IAM resource ARN itself as
+  # 'arn:aws:secretsmanager:<region>:<account>:secret:${SharedSecretId}-*', so an ARN input nests
+  # one ARN inside another and the AccessSecrets policy matches nothing. Pass the name join below.
   DRDBSecret:
     Condition: IsDR
     Type: AWS::SecretsManager::Secret
@@ -573,6 +598,15 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+        # Destination is the same-named bucket in the DR stack — the suffix must match the Name
+        # passed above ('-portal'), since deployment.yaml derives the bucket name from it.
+        ReplicationDestinationBucketArn: !If
+          - IsEnableCodeDeployReplication
+          - !Sub
+            - 'arn:aws:s3:::${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-portal-code-deploy'
+            - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+              DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+          - ''
 
   PortalServerStack:
     DependsOn:
@@ -619,15 +653,29 @@ Resources:
         InstanceSubnet: Private
         InstanceType: t3.large
         LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', ddp]
+        # DR only: serve the live domain AND a DR alias on nginx (server_name).
+        # EnvShort is dynamic (TestDR->tdr, ProductionDR->pdr), so it works for any DR env.
+        # Live\other envs: AWS::NoValue -> param stays '' -> unchanged single-domain behavior.
+        ServerNameOverride: !If
+          - IsDR
+          - !Sub
+            - '${Host}.${Domain} ${Host}-portal-${EnvShort}.${Domain}'
+            - Host: ddp
+              Domain: !Ref ClientDomainName
+              EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+          - !Ref 'AWS::NoValue'
         LoadBalancerStackName: !If
           - IsDeployPaidResources
           - !Select [ 1, !Split [ '/', !Ref PortalELBStack]]
           - ''
         NetworkStackName: !Ref NetworkStackName
+        # Keyed off the same condition that gates DBStack, so the GetAtt is only reached when the
+        # stack exists. Every other state (PITR failover, DR standby) falls through to the local
+        # name join, which is the same string database.yaml would emit — see DRDBSecret above.
         SharedSecretId: !If
-          - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
-          - ''
+          - IsDeployPaidResourcesAndNotPITR
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda
@@ -689,6 +737,15 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+        # Destination is the same-named bucket in the DR stack — the suffix must match the Name
+        # passed above ('-api'), since deployment.yaml derives the bucket name from it.
+        ReplicationDestinationBucketArn: !If
+          - IsEnableCodeDeployReplication
+          - !Sub
+            - 'arn:aws:s3:::${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-api-code-deploy'
+            - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+              DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+          - ''
 
   APIServerStack:
     DependsOn:
@@ -738,16 +795,30 @@ Resources:
         InstanceSubnet: Private
         InstanceType: t3.large
         LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', api-ddp]
+        # DR only: serve the live domain AND a DR alias on nginx (server_name).
+        # EnvShort is dynamic (TestDR->tdr, ProductionDR->pdr), so it works for any DR env.
+        # Live\other envs: AWS::NoValue -> param stays '' -> unchanged single-domain behavior.
+        ServerNameOverride: !If
+          - IsDR
+          - !Sub
+            - '${Host}.${Domain} ${Host}-${EnvShort}.${Domain}'
+            - Host: api-ddp
+              Domain: !Ref ClientDomainName
+              EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+          - !Ref 'AWS::NoValue'
         LoadBalancerStackName: !If
           - IsDeployPaidResources
           - !Select [ 1, !Split [ '/', !Ref NetworkAPIELBStack]]
           - ''
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
+        # Keyed off the same condition that gates DBStack, so the GetAtt is only reached when the
+        # stack exists. Every other state (PITR failover, DR standby) falls through to the local
+        # name join, which is the same string database.yaml would emit — see DRDBSecret above.
         SharedSecretId: !If
-          - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
-          - ''
+          - IsDeployPaidResourcesAndNotPITR
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda
@@ -822,6 +893,15 @@ Resources:
         OrgName: !Ref OrgName
         NetworkStackName: !Ref NetworkStackName
         SNSStackName: !Ref SNSStackName
+        # Destination is the same-named bucket in the DR stack — the suffix must match the Name
+        # passed above ('-skiq'), since deployment.yaml derives the bucket name from it.
+        ReplicationDestinationBucketArn: !If
+          - IsEnableCodeDeployReplication
+          - !Sub
+            - 'arn:aws:s3:::${OrgName}-${DREnvShort}-${DRRegionShort}-${Name}-skiq-code-deploy'
+            - DREnvShort: !FindInMap [EnvDRShort, !Ref EnvName, Name]
+              DRRegionShort: !FindInMap [RegionShort, !Ref DRRegion, Name]
+          - ''
 
   SidekiqServerStack:
     DependsOn:
@@ -871,16 +951,30 @@ Resources:
         InstanceSubnet: Private
         InstanceType: !If [IsProd, t3.large, t3.medium]
         LoadBalancerHostName: !If [IsDR, !Ref 'AWS::NoValue', ddp-skiq]
+        # DR only: serve the live domain AND a DR alias on nginx (server_name).
+        # EnvShort is dynamic (TestDR->tdr, ProductionDR->pdr), so it works for any DR env.
+        # Live\other envs: AWS::NoValue -> param stays '' -> unchanged single-domain behavior.
+        ServerNameOverride: !If
+          - IsDR
+          - !Sub
+            - '${Host}.${Domain} ${Host}-${EnvShort}.${Domain}'
+            - Host: ddp-skiq
+              Domain: !Ref ClientDomainName
+              EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+          - !Ref 'AWS::NoValue'
         LoadBalancerStackName: !If
           - IsDeployPaidResources
           - !Select [ 1, !Split [ '/', !Ref NetworkSidekiqELBStack]]
           - ''
         LoadBalancerStackType: Network
         NetworkStackName: !Ref NetworkStackName
+        # Keyed off the same condition that gates DBStack, so the GetAtt is only reached when the
+        # stack exists. Every other state (PITR failover, DR standby) falls through to the local
+        # name join, which is the same string database.yaml would emit — see DRDBSecret above.
         SharedSecretId: !If
-          - IsDeployPaidResources
-          - !If [IsPITRMode, !Ref DRDBSecret, Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]]
-          - ''
+          - IsDeployPaidResourcesAndNotPITR
+          - Fn::GetAtt: [DBStack, Outputs.DBSecretManagerKeyId]
+          - !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name]]
         SNSStackName: !Ref SNSStackName
         UseFriendlyNames: FALSE
         VolumeName: /dev/xvda
