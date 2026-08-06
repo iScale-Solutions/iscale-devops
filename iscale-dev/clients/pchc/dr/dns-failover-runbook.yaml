@@ -433,28 +433,24 @@ Resources:
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
+          # An external ELB stack is named directly; a nested one gets a generated
+          # name, so it is reached through its parent app stack and logical id.
           def resolve_alb(cfn, app_name, entry):
-              """Return (dns_name, canonical_hosted_zone_id) from the app's ELB stack.
-
-              An external ELB stack has a stable name and is named directly. A nested
-              ELBStack gets a generated name, so it is reached through its parent app
-              stack and the logical id it is declared under.
-              """
               stack = entry.get('elbStackName')
               if not stack:
                   app_stack = entry.get('appStackName')
                   if not app_stack:
-                      raise Exception(f'{app_name}: config has neither elbStackName nor appStackName')
-                  logical = entry.get('elbLogicalId', 'ELBStack')
+                      raise Exception(f'{app_name}: no elbStackName or appStackName')
                   stack = cfn.describe_stack_resource(
-                      StackName=app_stack, LogicalResourceId=logical
+                      StackName=app_stack,
+                      LogicalResourceId=entry.get('elbLogicalId', 'ELBStack')
                   )['StackResourceDetail']['PhysicalResourceId']
 
               outputs = cfn.describe_stacks(StackName=stack)['Stacks'][0].get('Outputs', [])
               by_key = {o['OutputKey']: o['OutputValue'] for o in outputs}
               missing = [k for k in ('DNSName', 'CanonicalHostedZoneID') if k not in by_key]
               if missing:
-                  raise Exception(f'{app_name}: ELB stack {stack} is missing output(s) {", ".join(missing)}')
+                  raise Exception(f'{app_name}: {stack} missing output(s) {", ".join(missing)}')
               return by_key['DNSName'], by_key['CanonicalHostedZoneID']
 
           def handler(event, context):
@@ -463,14 +459,11 @@ Resources:
               cfn = boto3.client('cloudformation', region_name=region)
               r53 = boto3.client('route53')
 
-              # hosted_zone_map: {app: {hostedZoneId, recordName,
-              #                         elbStackName | appStackName[, elbLogicalId]}}
               hz_resp = ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])
               hosted_zone_map = json.loads(hz_resp['Parameter']['Value'])
 
-              # Resolve every app up front: a cutover that fires for some apps and not
-              # others leaves DNS split across regions, so nothing is submitted unless
-              # all of them resolve.
+              # Resolve every app before submitting anything: a partial cutover would
+              # leave DNS split across regions.
               resolved, failures = {}, []
               for app_name, entry in hosted_zone_map.items():
                   try:
