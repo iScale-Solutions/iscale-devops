@@ -91,11 +91,18 @@ Parameters:
 
   HostedZoneMap:
     Description: |
-      JSON object mapping app names to their Route 53 hosted zone configuration.
-      Update this parameter before running the SSM runbook. Example value:
-      {"pesonet":{"hostedZoneId":"ZXXXX","recordName":"pesonet.pchc.com.ph","albHostedZoneId":"Z14GRHDCWA56QT"}}
-      albHostedZoneId is the canonical hosted zone ID for the ALB (region-specific constant):
-      us-west-2 = Z14GRHDCWA56QT, us-east-2 = ZLMOA37VPKANP
+      JSON object mapping app names to their Route 53 target record and the
+      CloudFormation stack that owns their DR load balancer. The Lambdas resolve
+      the ALB DNS name and its canonical hosted zone ID from that stack's outputs
+      at run time, so neither value is configured by hand.
+      Two forms, depending on how the app declares its load balancer:
+        External ELB stack (stable name, e.g. pesonet20) — give elbStackName:
+        {"pesonet":{"hostedZoneId":"ZXXXX","recordName":"pesonet.pchc.com.ph",
+                    "elbStackName":"pchc-pdr-uw2-pesonet20-elb"}}
+        Nested ELBStack (generated name, e.g. pas6) — give the parent app stack
+        and the logical id the ELB stack is declared under (default ELBStack):
+        {"pas6":{"hostedZoneId":"ZXXXX","recordName":"pas6-app-tdr.pchcdev.com",
+                 "appStackName":"pchc-tdr-ue2-pas6","elbLogicalId":"ELBStack"}}
     Type: String
     Default: '{}'
 
@@ -182,14 +189,25 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: arn:aws:logs:*:*:*
-        - PolicyName: ReadAlbDnsMap
+        - PolicyName: ReadHostedZoneMap
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - Effect: Allow
                 Action:
                   - ssm:GetParameter
-                Resource: !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/alb-dns-map
+                Resource: !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/hosted-zone-map
+        # The ALB DNS name is read from the ELB stack's outputs rather than
+        # configured, so both Lambdas need to describe stacks in the DR region.
+        - PolicyName: DescribeELBStacks
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResource
+                Resource: !Sub arn:aws:cloudformation:${DRRegion}:${AWS::AccountId}:stack/*
 
   ####
   # CloudWatch Logs — Health Check Lambda
@@ -211,8 +229,8 @@ Resources:
     Properties:
       FunctionName: !Sub ${AWS::StackName}
       Description: >
-        DR health check — reads ALB DNS names from SSM Parameter Store and
-        HTTP GETs the health check path on each app in the DR region.
+        DR health check — resolves each app's DR ALB from its ELB stack outputs
+        and HTTP GETs the health check path on it.
         Returns ok if all apps return 200; raises an exception otherwise.
       Handler: index.handler
       Role: !GetAtt LambdaRole.Arn
@@ -220,7 +238,7 @@ Resources:
       Timeout: 120
       Environment:
         Variables:
-          ALB_DNS_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/alb-dns-map
+          HOSTED_ZONE_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/hosted-zone-map
           HEALTH_CHECK_PATH: !Ref HealthCheckPath
           DR_REGION: !Ref DRRegion
       Code:
@@ -232,20 +250,53 @@ Resources:
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
+          def resolve_alb(cfn, app_name, entry):
+              """Return (dns_name, canonical_hosted_zone_id) from the app's ELB stack.
+
+              An external ELB stack has a stable name and is named directly. A nested
+              ELBStack gets a generated name, so it is reached through its parent app
+              stack and the logical id it is declared under.
+              """
+              stack = entry.get('elbStackName')
+              if not stack:
+                  app_stack = entry.get('appStackName')
+                  if not app_stack:
+                      raise Exception(f'{app_name}: config has neither elbStackName nor appStackName')
+                  logical = entry.get('elbLogicalId', 'ELBStack')
+                  stack = cfn.describe_stack_resource(
+                      StackName=app_stack, LogicalResourceId=logical
+                  )['StackResourceDetail']['PhysicalResourceId']
+
+              outputs = cfn.describe_stacks(StackName=stack)['Stacks'][0].get('Outputs', [])
+              by_key = {o['OutputKey']: o['OutputValue'] for o in outputs}
+              missing = [k for k in ('DNSName', 'CanonicalHostedZoneID') if k not in by_key]
+              if missing:
+                  raise Exception(f'{app_name}: ELB stack {stack} is missing output(s) {", ".join(missing)}')
+              return by_key['DNSName'], by_key['CanonicalHostedZoneID']
+
           def handler(event, context):
-              ssm = boto3.client('ssm', region_name=os.environ['DR_REGION'])
-              resp = ssm.get_parameter(Name=os.environ['ALB_DNS_MAP_PARAMETER'])
-              alb_dns_map = json.loads(resp['Parameter']['Value'])
+              region = os.environ['DR_REGION']
+              ssm = boto3.client('ssm', region_name=region)
+              cfn = boto3.client('cloudformation', region_name=region)
+
+              resp = ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])
+              hosted_zone_map = json.loads(resp['Parameter']['Value'])
 
               health_path = os.environ['HEALTH_CHECK_PATH']
               failures = []
 
-              for app_name, alb_dns in alb_dns_map.items():
+              for app_name, entry in hosted_zone_map.items():
+                  try:
+                      alb_dns, _ = resolve_alb(cfn, app_name, entry)
+                  except Exception as e:
+                      failures.append(f'{app_name}: could not resolve ALB — {e}')
+                      continue
+
                   url = f'http://{alb_dns}{health_path}'
                   try:
                       req = urllib.request.urlopen(url, timeout=10)
                       if req.status == 200:
-                          logger.info(f'{app_name}: OK')
+                          logger.info(f'{app_name}: OK ({alb_dns})')
                       else:
                           failures.append(f'{app_name}: HTTP {req.status}')
                   except Exception as e:
@@ -254,8 +305,8 @@ Resources:
               if failures:
                   raise Exception(f"Health check failed: {'; '.join(failures)}")
 
-              logger.info(f'All {len(alb_dns_map)} apps healthy')
-              return {'status': 'ok', 'checked': len(alb_dns_map)}
+              logger.info(f'All {len(hosted_zone_map)} apps healthy')
+              return {'status': 'ok', 'checked': len(hosted_zone_map)}
 
   ####
   # IAM — Route 53 Failover Lambda
@@ -291,8 +342,18 @@ Resources:
                 Action:
                   - ssm:GetParameter
                 Resource:
-                  - !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/alb-dns-map
                   - !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/hosted-zone-map
+        # The ALB DNS name and its canonical hosted zone ID are read from the ELB
+        # stack's outputs rather than configured, so this Lambda describes stacks.
+        - PolicyName: DescribeELBStacks
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResource
+                Resource: !Sub arn:aws:cloudformation:${DRRegion}:${AWS::AccountId}:stack/*
         - PolicyName: Route53Cutover
           PolicyDocument:
             Version: 2012-10-17
@@ -326,8 +387,9 @@ Resources:
     Properties:
       FunctionName: !Sub ${AWS::StackName}-r53
       Description: >
-        DR DNS cutover — reads ALB DNS names and hosted zone config from SSM Parameter
-        Store and UPSERTs Route 53 alias A records to route traffic to DR ALBs.
+        DR DNS cutover — reads hosted zone config from SSM Parameter Store, resolves
+        each app's DR ALB from its ELB stack outputs, and UPSERTs Route 53 alias A
+        records to route traffic to DR ALBs.
         Groups changes by hosted zone and submits a single ChangeBatch per zone.
       Handler: index.handler
       Role: !GetAtt Route53LambdaRole.Arn
@@ -335,7 +397,6 @@ Resources:
       Timeout: 600
       Environment:
         Variables:
-          ALB_DNS_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/alb-dns-map
           HOSTED_ZONE_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/hosted-zone-map
           DR_REGION: !Ref DRRegion
           PROPAGATION_WAIT_SECONDS: !Ref PropagationWaitSeconds
@@ -348,26 +409,57 @@ Resources:
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
+          def resolve_alb(cfn, app_name, entry):
+              """Return (dns_name, canonical_hosted_zone_id) from the app's ELB stack.
+
+              An external ELB stack has a stable name and is named directly. A nested
+              ELBStack gets a generated name, so it is reached through its parent app
+              stack and the logical id it is declared under.
+              """
+              stack = entry.get('elbStackName')
+              if not stack:
+                  app_stack = entry.get('appStackName')
+                  if not app_stack:
+                      raise Exception(f'{app_name}: config has neither elbStackName nor appStackName')
+                  logical = entry.get('elbLogicalId', 'ELBStack')
+                  stack = cfn.describe_stack_resource(
+                      StackName=app_stack, LogicalResourceId=logical
+                  )['StackResourceDetail']['PhysicalResourceId']
+
+              outputs = cfn.describe_stacks(StackName=stack)['Stacks'][0].get('Outputs', [])
+              by_key = {o['OutputKey']: o['OutputValue'] for o in outputs}
+              missing = [k for k in ('DNSName', 'CanonicalHostedZoneID') if k not in by_key]
+              if missing:
+                  raise Exception(f'{app_name}: ELB stack {stack} is missing output(s) {", ".join(missing)}')
+              return by_key['DNSName'], by_key['CanonicalHostedZoneID']
+
           def handler(event, context):
               region = os.environ['DR_REGION']
               ssm = boto3.client('ssm', region_name=region)
+              cfn = boto3.client('cloudformation', region_name=region)
               r53 = boto3.client('route53')
 
-              alb_resp = ssm.get_parameter(Name=os.environ['ALB_DNS_MAP_PARAMETER'])
-              alb_dns_map = json.loads(alb_resp['Parameter']['Value'])
-
-              # hosted_zone_map: {app: {hostedZoneId, recordName, albHostedZoneId}}
-              # albHostedZoneId is the canonical zone ID for the ALB (e.g. Z14GRHDCWA56QT for us-west-2)
+              # hosted_zone_map: {app: {hostedZoneId, recordName,
+              #                         elbStackName | appStackName[, elbLogicalId]}}
               hz_resp = ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])
               hosted_zone_map = json.loads(hz_resp['Parameter']['Value'])
 
-              missing = [app for app in hosted_zone_map if app not in alb_dns_map]
-              if missing:
-                  raise Exception(f"Aborting: ALB DNS missing for apps: {', '.join(missing)}. No Route 53 changes were submitted.")
+              # Resolve every app up front: a cutover that fires for some apps and not
+              # others leaves DNS split across regions, so nothing is submitted unless
+              # all of them resolve.
+              resolved, failures = {}, []
+              for app_name, entry in hosted_zone_map.items():
+                  try:
+                      resolved[app_name] = resolve_alb(cfn, app_name, entry)
+                  except Exception as e:
+                      failures.append(str(e))
+              if failures:
+                  raise Exception(f"Aborting: could not resolve DR ALB for {len(failures)} app(s): "
+                                  f"{'; '.join(failures)}. No Route 53 changes were submitted.")
 
               hz_changes = {}
               for app_name, zone_info in hosted_zone_map.items():
-                  alb_dns = alb_dns_map[app_name]
+                  alb_dns, alb_hosted_zone_id = resolved[app_name]
                   hz_id = zone_info['hostedZoneId']
                   change = {
                       'Action': 'UPSERT',
@@ -375,7 +467,7 @@ Resources:
                           'Name': zone_info['recordName'],
                           'Type': 'A',
                           'AliasTarget': {
-                              'HostedZoneId': zone_info['albHostedZoneId'],
+                              'HostedZoneId': alb_hosted_zone_id,
                               'DNSName': alb_dns,
                               'EvaluateTargetHealth': False
                           }
