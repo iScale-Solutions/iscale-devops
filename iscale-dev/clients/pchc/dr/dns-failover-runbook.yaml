@@ -243,12 +243,23 @@ Resources:
           DR_REGION: !Ref DRRegion
       Code:
         ZipFile: |
-          import json, os, urllib.request
+          import json, os, urllib.error, urllib.request
           import boto3
           import logging
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              """Stop urllib following redirects.
+
+              The probe talks to the ALB directly, so a redirect to the app's real
+              hostname would need a DNS record that does not exist until the cutover
+              this runbook is gating. Returning None leaves the 3xx to surface as an
+              HTTPError, which the caller reads as reachable.
+              """
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
 
           def resolve_alb(cfn, app_name, entry):
               """Return (dns_name, canonical_hosted_zone_id) from the app's ELB stack.
@@ -284,6 +295,7 @@ Resources:
 
               health_path = os.environ['HEALTH_CHECK_PATH']
               failures = []
+              opener = urllib.request.build_opener(NoRedirect)
 
               for app_name, entry in hosted_zone_map.items():
                   try:
@@ -294,13 +306,25 @@ Resources:
 
                   url = f'http://{alb_dns}{health_path}'
                   try:
-                      req = urllib.request.urlopen(url, timeout=10)
-                      if req.status == 200:
-                          logger.info(f'{app_name}: OK ({alb_dns})')
-                      else:
-                          failures.append(f'{app_name}: HTTP {req.status}')
+                      # Reach the ALB directly but present the app's real hostname: the
+                      # ALB's listener rules and nginx's server_name both match on Host,
+                      # and neither knows the ALB's own DNS name.
+                      probe = urllib.request.Request(
+                          url, headers={'Host': entry['recordName']}
+                      )
+                      status = opener.open(probe, timeout=10).status
+                  except urllib.error.HTTPError as e:
+                      status = e.code
                   except Exception as e:
                       failures.append(f'{app_name}: {e}')
+                      continue
+
+                  # A redirect means the listener rule matched and the app answered —
+                  # it is healthy. Only the redirect itself is not followed.
+                  if status == 200 or 300 <= status < 400:
+                      logger.info(f'{app_name}: OK (HTTP {status} via {alb_dns})')
+                  else:
+                      failures.append(f'{app_name}: HTTP {status}')
 
               if failures:
                   raise Exception(f"Health check failed: {'; '.join(failures)}")
