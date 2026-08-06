@@ -422,15 +422,16 @@ Resources:
       Handler: index.handler
       Role: !GetAtt Route53LambdaRole.Arn
       Runtime: python3.12
-      Timeout: 600
+      # aws:invokeLambdaFunction gives up at 5 minutes, so a longer timeout here
+      # would only mean the function runs on after SSM has failed the step.
+      Timeout: 290
       Environment:
         Variables:
           HOSTED_ZONE_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/hosted-zone-map
           DR_REGION: !Ref DRRegion
-          PROPAGATION_WAIT_SECONDS: !Ref PropagationWaitSeconds
       Code:
         ZipFile: |
-          import json, os, time
+          import json, os
           import boto3
           import logging
 
@@ -508,19 +509,17 @@ Resources:
                   change_ids.append(resp['ChangeInfo']['Id'])
                   logger.info(f'Updated {len(change_list)} records in hosted zone {hz_id} (change {resp["ChangeInfo"]["Id"]})')
 
+              # aws:invokeLambdaFunction caps the invocation at 5 minutes regardless of
+              # the function's own Timeout, so this must finish well inside that. The
+              # propagation wait lives in the runbook's aws:sleep step, not here.
               waiter = r53.get_waiter('resource_record_sets_changed')
               for change_id in change_ids:
                   logger.info(f'Waiting for Route 53 change {change_id} to reach INSYNC...')
-                  waiter.wait(Id=change_id, WaiterConfig={'Delay': 10, 'MaxAttempts': 30})
+                  waiter.wait(Id=change_id, WaiterConfig={'Delay': 10, 'MaxAttempts': 24})
                   logger.info(f'Change {change_id} is INSYNC')
 
-              wait_seconds = int(os.environ.get('PROPAGATION_WAIT_SECONDS', '300'))
-              logger.info(f'All changes INSYNC. Waiting {wait_seconds}s for resolver cache TTLs to expire...')
-              time.sleep(wait_seconds)
-              logger.info('Propagation wait complete.')
-
               total = sum(len(v) for v in hz_changes.values())
-              logger.info(f'Route 53 cutover complete: {total} records across {len(hz_changes)} hosted zones — all INSYNC and propagated')
+              logger.info(f'Route 53 cutover complete: {total} records across {len(hz_changes)} hosted zones — all INSYNC')
               return {'status': 'ok', 'updated': total, 'hostedZones': len(hz_changes)}
 
   ####
@@ -639,6 +638,17 @@ Resources:
             inputs:
               FunctionName: '{{ Route53FailoverLambdaArn }}'
               Payload: '{}'
+            nextStep: AwaitPropagation
+            onFailure: Abort
+          - name: AwaitPropagation
+            action: aws:sleep
+            description: >-
+              Wait for recursive resolver caches to expire before declaring the cutover
+              complete. Lives here rather than inside the Lambda because
+              aws:invokeLambdaFunction caps an invocation at 5 minutes, which a
+              propagation wait of any useful length would exceed.
+            inputs:
+              Duration: !Sub PT${PropagationWaitSeconds}S
             nextStep: NotifyAllClear
             onFailure: Abort
           - name: NotifyAllClear
