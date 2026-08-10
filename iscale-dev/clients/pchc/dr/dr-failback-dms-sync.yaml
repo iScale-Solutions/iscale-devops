@@ -22,6 +22,7 @@ Metadata:
         Parameters:
           - NetworkStackName
           - SNSStackName
+          - CreateTaskEventSubscription
       - Label:
           default: Source Configuration (DR region)
         Parameters:
@@ -58,6 +59,8 @@ Metadata:
         default: Live Region Network Stack Name
       SNSStackName:
         default: SNS Stack Name
+      CreateTaskEventSubscription:
+        default: Create DMS Task Event Subscription
       CDCLatencyThreshold:
         default: CDC Latency Alarm Threshold (seconds)
       CdcStartPosition:
@@ -220,6 +223,15 @@ Parameters:
     Type: Number
     MinValue: 1
     Default: 300
+  CreateTaskEventSubscription:
+    Description: Create the DMS event subscription for dead-task detection. Requires the topic's KMS
+      key to grant dms.amazonaws.com - impossible with the AWS-managed alias/aws/sns key, whose policy
+      is not editable, and the create then rolls the stack back. Set true only where the topic is
+      unencrypted or uses a customer-managed key. CDCLatencyAlarm still catches a dead task, but
+      slower and without a cause.
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
 
 # cdc is the only allowed MigrationType, and a blank CdcStartPosition silently starts from task-launch
 # time - dropping the DR-window delta while the task stays green. Reject at deploy. Scoped to cdc so
@@ -243,6 +255,7 @@ Conditions:
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   HasCdcStartPosition: !Not [!Equals [!Ref CdcStartPosition, '']]
+  HasTaskEventSubscription: !Equals [!Ref CreateTaskEventSubscription, 'true']
 
 Resources:
   # Transient resources - torn down after cutover, so no Retain policies (unlike dr-failback-rds-sync.yaml).
@@ -404,10 +417,11 @@ Resources:
   # Dead-task detection: publishes task failure/state-change events to SNS, immediately and with a cause.
   # The alarm above also catches a dead task via breaching, but only after two 5-minute periods and
   # without saying why. Does NOT cover a never-started task - that emits no event, hence breaching above.
-  # Topic policy must allow dms.amazonaws.com sns:Publish - not implicit (unlike CloudWatch->SNS); verify
-  # against the SNS stack.
+  # Off by default - see CreateTaskEventSubscription. Needs dms.amazonaws.com granted in BOTH the
+  # topic policy and the topic's KMS key policy; the topic-policy statement alone is not enough.
   DMSTaskEventSubscription:
     Type: AWS::DMS::EventSubscription
+    Condition: HasTaskEventSubscription
     DependsOn: DMSReplicationTask
     Properties:
       SubscriptionName: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, 'failback-task-events']]
@@ -437,4 +451,5 @@ Outputs:
     Value: !GetAtt CDCLatencyAlarm.Arn
   DMSTaskEventSubscriptionArn:
     Description: ARN of the DMS task event subscription (dead-task notifications)
+    Condition: HasTaskEventSubscription
     Value: !Ref DMSTaskEventSubscription
