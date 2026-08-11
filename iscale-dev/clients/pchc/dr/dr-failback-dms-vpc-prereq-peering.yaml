@@ -28,6 +28,7 @@ Metadata:
           default: Requester - live region (leave defaults if deploying as Accepter)
         Parameters:
           - RequesterNetworkStackName
+          - RequesterInternalRouteTable1
           - AccepterVpcId
           - AccepterCidr
           - AccepterRegion
@@ -52,6 +53,8 @@ Metadata:
 
       RequesterNetworkStackName:
         default: Live-region network stack name (the DMS VPC)
+      RequesterInternalRouteTable1:
+        default: Live internal route table ID (override for pre-2024 network stacks)
       AccepterVpcId:
         default: DR VPC ID
       AccepterCidr:
@@ -110,6 +113,19 @@ Parameters:
       Ignored when deploying as Accepter.
     Type: String
     Default: ''
+  RequesterInternalRouteTable1:
+    Description: Route table serving the live-region internal subnets - the ones the DMS replication
+      instance lands in (dr-failback-dms-sync.yaml builds its subnet group from InternalSubnetId1/2).
+      Leave blank for the normal path, which imports ${RequesterNetworkStackName}-InternalRouteTable1.
+      Supply a literal rtb- ONLY for a live network stack created before that export existed
+      (common/network.yaml, added 2024-02-07) and never updated since. DefaultRouteTable is
+      unconditional so the route table itself is present, only the Output is missing. Read the ID off
+      the subnet association, not the Name tag - confirm internal-subnet-a and -b return the SAME
+      table. Ignored when deploying as Accepter.
+    Type: String
+    AllowedPattern: '(rtb-[0-9a-f]+)?'
+    ConstraintDescription: Must be a route table ID (rtb-...) or empty.
+    Default: ''
   AccepterVpcId:
     Description: VPC ID of the DR VPC. Explicit value - cross-region imports cannot resolve.
       Ignored when deploying as Accepter.
@@ -167,6 +183,7 @@ Conditions:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
   IsRequester: !Equals [!Ref RequesterOrAccepter, 'Requester']
   IsAccepter: !Equals [!Ref RequesterOrAccepter, 'Accepter']
+  HasRequesterInternalRouteTable1: !Not [!Equals [!Ref RequesterInternalRouteTable1, '']]
 
 Resources:
 
@@ -189,8 +206,11 @@ Resources:
           'Fn::Sub': '${RequesterNetworkStackName}-VpcId'
         RequesterCidr: !ImportValue
           'Fn::Sub': '${RequesterNetworkStackName}-VpcCidrBlock'
-        RequesterInternalRouteTable1: !ImportValue
-          'Fn::Sub': '${RequesterNetworkStackName}-InternalRouteTable1'
+        RequesterInternalRouteTable1: !If
+          - HasRequesterInternalRouteTable1
+          - !Ref RequesterInternalRouteTable1
+          - !ImportValue
+              'Fn::Sub': '${RequesterNetworkStackName}-InternalRouteTable1'
 
         TargetVpcId: !Ref AccepterVpcId
         TargetCidr: !Ref AccepterCidr
