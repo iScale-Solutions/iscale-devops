@@ -22,6 +22,7 @@ Metadata:
           - ClientDomainName
           - LoadBalancerCertificateArn
           - LoadBalancerHostName
+          - AdditionalServerNames
       - Label:
           default: Instance Configuration
         Parameters:
@@ -70,6 +71,8 @@ Metadata:
         default: Load Balancer SSL Certificate ARN
       LoadBalancerHostName:
         default: Load Balancer Host Name
+      AdditionalServerNames:
+        default: Additional nginx server_name values (prepended)
       NetworkStackName:
         default: Network Stack Name
       SNSStackName:
@@ -170,6 +173,17 @@ Parameters:
     Type: String
     Default: ''
     MaxLength: 12
+  AdditionalServerNames:
+    Description: |
+      (Optional) Extra fully-qualified nginx server_name values, space-separated,
+      PREPENDED to the names this template derives. The first name in the list becomes
+      PRIMARY_DOMAIN and therefore BASE_URL (common/appserver-basic2.yaml), so a name
+      placed here takes over the app's absolute URLs — prepend deliberately, not for tidiness.
+      Exists because the DR stack derives its names from its own Name/EnvName, which cannot
+      reproduce a hostname belonging to a differently-named live stack. Leave blank for the
+      derived names alone; blank is the default and changes nothing for existing stacks.
+    Type: String
+    Default: ''
   LoadBalancerCertificateArn:
     Description: SSL Certificate for the ELB
     Type: String
@@ -384,6 +398,7 @@ Conditions:
     - Condition: IsProdOrTest
     - Condition: IsDeployPaidResourcesAndNotPITR
   IsBackupEncryptionKeyProvided: !Not [!Equals [!Ref BackupVaultEncryptionKeyArn, '']]
+  HasAdditionalServerNames: !Not [!Equals [!Ref AdditionalServerNames, '']]
 
 Resources:
 
@@ -833,14 +848,33 @@ Resources:
         # DR only: serve the live domain AND a DR alias on nginx (server_name).
         # EnvShort is dynamic (TestDR->tdr, ProductionDR->pdr), so it works for any DR env.
         # Live/other envs: AWS::NoValue -> param stays '' -> unchanged single-domain behavior.
+        #
+        # AdditionalServerNames is PREPENDED, never substituted: the derived pair stays
+        # authoritative for a real DR event, and only the first name changes. That ordering
+        # is load-bearing — appserver-basic2.yaml takes PRIMARY_DOMAIN (and thus BASE_URL)
+        # from the FIRST entry, so appending would leave the app emitting absolute URLs on
+        # the live hostname even while it answers to the extra name.
         ServerNameOverride: !If
           - IsDR
-          - !Sub
-            - '${Host}.${Domain} ${Host}-${EnvShort}.${Domain}'
-            - Host: pddts
-              Domain: !Ref ClientDomainName
-              EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
-          - !Ref 'AWS::NoValue'
+          - !If
+            - HasAdditionalServerNames
+            - !Sub
+              - '${Extra} ${Host}.${Domain} ${Host}-${EnvShort}.${Domain}'
+              - Extra: !Ref AdditionalServerNames
+                Host: pddts
+                Domain: !Ref ClientDomainName
+                EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+            - !Sub
+              - '${Host}.${Domain} ${Host}-${EnvShort}.${Domain}'
+              - Host: pddts
+                Domain: !Ref ClientDomainName
+                EnvShort: !FindInMap [EnvShort, !Ref EnvName, Name]
+          # Non-DR: no derived list to extend, but honour the parameter rather than
+          # discarding it silently — a set value that does nothing is a worse trap than none.
+          - !If
+            - HasAdditionalServerNames
+            - !Ref AdditionalServerNames
+            - !Ref 'AWS::NoValue'
         LoadBalancerPriority: 100
         LoadBalancerStackName: !If
           - IsDeployPaidResources
