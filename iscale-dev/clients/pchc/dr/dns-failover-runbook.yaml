@@ -1,11 +1,18 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: |
-  PCHC DR DNS Failover Runbook. Deploys:
-  (1) Health check Lambda — verifies all PCHC apps are healthy on DR ALBs before cutover.
-  (2) Route 53 failover Lambda — updates Route 53 records to point to DR ALBs at cutover.
+  PCHC DR DNS Cutover Runbook. Deploys:
+  (1) Health check Lambda — verifies all PCHC apps are healthy on the target region's ALBs before cutover.
+  (2) Route 53 cutover Lambda — updates Route 53 records to point at the target region's ALBs.
   (3) SSM Automation Document — 4-step runbook: health check → DR Manager approval → DNS cutover → SNS all-clear.
-  Started manually by the DR Manager from the AWS Console after the dr-failover workflow succeeds
-  and UAT validation is complete.
+  Started manually by the DR Manager from the AWS Console after the failover (or failback) workflow
+  succeeds and validation is complete.
+
+  DIRECTION-AWARE — deploy one stack per region, each promoting its own region:
+    us-west-2      Direction=failover  TargetRegion=us-west-2       (promote Oregon)
+    ap-southeast-1 Direction=failback  TargetRegion=ap-southeast-1  (return to Singapore)
+  Direction is fixed at deploy time, never at execution time: the document an operator
+  starts names what it does and cannot perform the opposite cutover.
+  The two stacks MUST NOT share a stack name — see the note on IAM role names below.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -16,11 +23,13 @@ Metadata:
           - OrgName
           - EnvName
       - Label:
-          default: DR Configuration
+          default: Cutover Configuration
         Parameters:
-          - DRRegion
+          - Direction
+          - TargetRegion
           - HealthCheckPath
           - HostedZoneMap
+          - PropagationWaitSeconds
       - Label:
           default: Notifications & Approval
         Parameters:
@@ -37,12 +46,16 @@ Metadata:
         default: Organization Name
       EnvName:
         default: Environment Name
-      DRRegion:
-        default: DR Region
+      Direction:
+        default: Cutover Direction
+      TargetRegion:
+        default: Target Region (the region being promoted)
       HealthCheckPath:
         default: Health Check Path
       HostedZoneMap:
         default: Hosted Zone Map (JSON)
+      PropagationWaitSeconds:
+        default: DNS Propagation Wait (seconds)
       SNSStackName:
         default: SNS Topic Stack Name
       ApproverIamArns:
@@ -76,11 +89,32 @@ Parameters:
       - DevelopmentDR
       - TestDR
 
-  DRRegion:
-    Description: AWS region where DR failover stacks are deployed.
+  Direction:
+    Description: >
+      Which way this stack cuts DNS. Fixed at DEPLOY time, deliberately not at execution
+      time — an operator choosing direction mid-incident can send production traffic to
+      the wrong region, so the document they start must be incapable of the opposite cutover.
+      Drives the SSM document name and the operator-facing messages ONLY. What this stack
+      actually writes is decided by TargetRegion.
+        failover — promote the DR region (deploy this stack in the DR region)
+        failback — return to the live region (deploy this stack in the live region)
+    Type: String
+    Default: failover
+    AllowedValues:
+      - failover
+      - failback
+
+  TargetRegion:
+    Description: >
+      The region whose application stacks this runbook resolves ALBs from — the region
+      being promoted. Deploy each stack IN the region it promotes: a dead region then
+      cannot be promoted, because the runbook that would do it lives in it.
+      Used for the CloudFormation lookup only. This stack's own configuration is read
+      locally — see the ReadHostedZoneMap policy.
     Type: String
     Default: us-west-2
     AllowedValues:
+      - ap-southeast-1
       - us-east-2
       - us-west-2
 
@@ -153,24 +187,37 @@ Parameters:
       - 180
       - 365
 
+Conditions:
+
+  # Direction never selects a target — only the wording of the audit trail. Keeping the
+  # two concerns apart is what stops an execution-time direction switch reappearing by
+  # the back door.
+  IsFailback: !Equals [!Ref Direction, failback]
+
 Resources:
 
   ####
   # SSM Parameter — Hosted Zone Map
   ####
 
+  # Created in THIS stack's region — AWS::SSM::Parameter has no region property. The
+  # readers below are scoped to AWS::Region to match, so config location follows the
+  # stack while TargetRegion governs only what the stack points at. Each direction's
+  # stack therefore holds its own copy of the map, differing solely in appStackName.
   HostedZoneMapParameter:
     Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub /${OrgName}/dr/${EnvName}/hosted-zone-map
       Type: String
       Value: !Ref HostedZoneMap
-      Description: Route 53 hosted zone config per app — update before running the DNS failover runbook
+      Description: Route 53 hosted zone config per app — update before running the DNS cutover runbook
 
   ####
   # IAM — Health Check Lambda
   ####
 
+  # NOTE: IAM role names are account-global, not regional. The failover and failback
+  # stacks must not share a stack name, or the second one fails on a duplicate role.
   LambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -193,6 +240,9 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: arn:aws:logs:*:*:*
+        # AWS::Region, not TargetRegion: the parameter is created by this stack, so it
+        # lives where this stack lives. Scoping it to the target region is what gave the
+        # template its hidden deploy-region constraint and made it un-reversible.
         - PolicyName: ReadHostedZoneMap
           PolicyDocument:
             Version: 2012-10-17
@@ -200,9 +250,10 @@ Resources:
               - Effect: Allow
                 Action:
                   - ssm:GetParameter
-                Resource: !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/hosted-zone-map
-        # The ALB DNS name is read from the ELB stack's outputs rather than
-        # configured, so both Lambdas need to describe stacks in the DR region.
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/hosted-zone-map
+        # The ALB DNS name is read from the ELB stack's outputs rather than configured,
+        # so both Lambdas describe stacks in the target region. This one is genuinely
+        # remote — contrast the local scope above.
         - PolicyName: DescribeELBStacks
           PolicyDocument:
             Version: 2012-10-17
@@ -211,7 +262,7 @@ Resources:
                 Action:
                   - cloudformation:DescribeStacks
                   - cloudformation:DescribeStackResource
-                Resource: !Sub arn:aws:cloudformation:${DRRegion}:${AWS::AccountId}:stack/*
+                Resource: !Sub arn:aws:cloudformation:${TargetRegion}:${AWS::AccountId}:stack/*
 
   ####
   # CloudWatch Logs — Health Check Lambda
@@ -233,8 +284,8 @@ Resources:
     Properties:
       FunctionName: !Sub ${AWS::StackName}
       Description: >
-        DR health check — resolves each app's DR ALB from its ELB stack outputs
-        and HTTP GETs the health check path on it.
+        Cutover health check — resolves each app's ALB in the target region from its
+        ELB stack outputs and HTTP GETs the health check path on it.
         Returns ok if all apps return 200; raises an exception otherwise.
       Handler: index.handler
       Role: !GetAtt LambdaRole.Arn
@@ -244,7 +295,7 @@ Resources:
         Variables:
           HOSTED_ZONE_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/hosted-zone-map
           HEALTH_CHECK_PATH: !Ref HealthCheckPath
-          DR_REGION: !Ref DRRegion
+          TARGET_REGION: !Ref TargetRegion
       Code:
         ZipFile: |
           import json, os, urllib.error, urllib.request
@@ -290,9 +341,11 @@ Resources:
               return by_key['DNSName'], by_key['CanonicalHostedZoneID']
 
           def handler(event, context):
-              region = os.environ['DR_REGION']
-              ssm = boto3.client('ssm', region_name=region)
-              cfn = boto3.client('cloudformation', region_name=region)
+              # Config is local to this function; only the app stack lookup is remote.
+              # No region_name on the SSM client: boto3 defaults to the function's own
+              # region, which is where this stack created the parameter.
+              ssm = boto3.client('ssm')
+              cfn = boto3.client('cloudformation', region_name=os.environ['TARGET_REGION'])
 
               resp = ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])
               hosted_zone_map = json.loads(resp['Parameter']['Value'])
@@ -362,6 +415,7 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: arn:aws:logs:*:*:*
+        # Local — see the equivalent note on LambdaRole.
         - PolicyName: ReadSSMParameters
           PolicyDocument:
             Version: 2012-10-17
@@ -370,9 +424,10 @@ Resources:
                 Action:
                   - ssm:GetParameter
                 Resource:
-                  - !Sub arn:aws:ssm:${DRRegion}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/hosted-zone-map
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/hosted-zone-map
         # The ALB DNS name and its canonical hosted zone ID are read from the ELB
-        # stack's outputs rather than configured, so this Lambda describes stacks.
+        # stack's outputs rather than configured, so this Lambda describes stacks
+        # in the target region.
         - PolicyName: DescribeELBStacks
           PolicyDocument:
             Version: 2012-10-17
@@ -381,7 +436,7 @@ Resources:
                 Action:
                   - cloudformation:DescribeStacks
                   - cloudformation:DescribeStackResource
-                Resource: !Sub arn:aws:cloudformation:${DRRegion}:${AWS::AccountId}:stack/*
+                Resource: !Sub arn:aws:cloudformation:${TargetRegion}:${AWS::AccountId}:stack/*
         - PolicyName: Route53Cutover
           PolicyDocument:
             Version: 2012-10-17
@@ -416,9 +471,9 @@ Resources:
       FunctionName: !Sub ${AWS::StackName}-r53
       # Lambda Description is capped at 256 characters.
       Description: >
-        DR DNS cutover — resolves each app's DR ALB from its ELB stack outputs and
-        UPSERTs Route 53 alias A records to route traffic to it, one ChangeBatch
-        per hosted zone.
+        DNS cutover — resolves each app's ALB in the target region from its ELB stack
+        outputs and UPSERTs Route 53 alias A records to route traffic to it, one
+        ChangeBatch per hosted zone.
       Handler: index.handler
       Role: !GetAtt Route53LambdaRole.Arn
       Runtime: python3.12
@@ -428,7 +483,9 @@ Resources:
       Environment:
         Variables:
           HOSTED_ZONE_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/hosted-zone-map
-          DR_REGION: !Ref DRRegion
+          TARGET_REGION: !Ref TargetRegion
+          # Wording only — lands in the Route 53 change history, which is an audit surface.
+          DIRECTION: !Ref Direction
       Code:
         ZipFile: |
           import json, os
@@ -459,10 +516,14 @@ Resources:
               return by_key['DNSName'], by_key['CanonicalHostedZoneID']
 
           def handler(event, context):
-              region = os.environ['DR_REGION']
-              ssm = boto3.client('ssm', region_name=region)
-              cfn = boto3.client('cloudformation', region_name=region)
+              # Three tiers of region here, and they are not the same thing:
+              #   local  — the config this stack created, in this function's own region
+              #   remote — the app stacks being promoted, in TargetRegion
+              #   global — Route 53, which has no region at all
+              ssm = boto3.client('ssm')
+              cfn = boto3.client('cloudformation', region_name=os.environ['TARGET_REGION'])
               r53 = boto3.client('route53')
+              direction = os.environ['DIRECTION']
 
               hz_resp = ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])
               hosted_zone_map = json.loads(hz_resp['Parameter']['Value'])
@@ -476,7 +537,7 @@ Resources:
                   except Exception as e:
                       failures.append(str(e))
               if failures:
-                  raise Exception(f"Aborting: could not resolve DR ALB for {len(failures)} app(s): "
+                  raise Exception(f"Aborting: could not resolve target ALB for {len(failures)} app(s): "
                                   f"{'; '.join(failures)}. No Route 53 changes were submitted.")
 
               hz_changes = {}
@@ -502,7 +563,7 @@ Resources:
                   resp = r53.change_resource_record_sets(
                       HostedZoneId=hz_id,
                       ChangeBatch={
-                          'Comment': f'DR failover DNS cutover — {len(change_list)} records',
+                          'Comment': f'DR {direction} DNS cutover — {len(change_list)} records',
                           'Changes': change_list
                       }
                   )
@@ -569,21 +630,23 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       DocumentType: Automation
-      Name: !Sub ${OrgName}-${EnvName}-dr-dns-failover-runbook
+      # Direction is in the name so the operator picks the runbook by what it does. The
+      # failback stack therefore publishes a distinct document, not a variant of this one.
+      Name: !Sub ${OrgName}-${EnvName}-dr-dns-${Direction}-runbook
       # Default is Replace, which deletes and recreates the document. The document is
       # explicitly named, so a replacement cannot happen without renaming it and the
       # update fails outright. NewVersion publishes a new default version in place.
       UpdateMethod: NewVersion
       Content:
         schemaVersion: '0.3'
-        description: >-
-          PCHC DR DNS Failover Runbook. Four steps:
-          (1) Health check all PCHC apps on DR ALBs.
+        description: !Sub >-
+          PCHC DR DNS ${Direction} runbook — cuts traffic over to ${TargetRegion}. Four steps:
+          (1) Health check all PCHC apps on the ${TargetRegion} ALBs.
           (2) DR Manager approval gate — identity and timestamp recorded for BSP audit.
-          (3) Route 53 DNS cutover to DR ALBs.
+          (3) Route 53 DNS cutover to the ${TargetRegion} ALBs.
           (4) SNS all-clear notification.
-          Start manually from the AWS Console after the dr-failover workflow succeeds
-          and UAT validation on DR is complete.
+          Start manually from the AWS Console after the corresponding workflow succeeds
+          and validation is complete.
         assumeRole: !GetAtt SSMAutomationRole.Arn
         parameters:
           HealthCheckLambdaArn:
@@ -612,7 +675,7 @@ Resources:
         mainSteps:
           - name: HealthCheck
             action: aws:invokeLambdaFunction
-            description: Verify all PCHC apps are healthy on DR ALBs.
+            description: !Sub Verify all PCHC apps are healthy on the ${TargetRegion} ALBs.
             inputs:
               FunctionName: '{{ HealthCheckLambdaArn }}'
               Payload: '{}'
@@ -628,17 +691,26 @@ Resources:
               NotificationArn: '{{ SNSTopicArn }}'
               # >- not >: SSM validates Message against .{1,4096}, and `.` does not
               # match the newline a plain folded scalar leaves on the end.
-              Message: >-
-                PCHC DR health check passed for all applications. Approve to proceed
-                with Route 53 DNS cutover to the DR region. This action routes all
-                production traffic to DR ALBs — only approve after completing UAT validation.
+              # Two full literals rather than one templated string: this prompt is the
+              # last human checkpoint, and it has to state the specific consequence.
+              Message: !If
+                - IsFailback
+                - !Sub >-
+                    PCHC health check passed for all applications on ${TargetRegion}. Approve to
+                    proceed with Route 53 DNS cutover BACK to the live region. This action returns
+                    all production traffic from the DR region to ${TargetRegion} — only approve
+                    once the data resync cutover point has been agreed and confirmed.
+                - !Sub >-
+                    PCHC DR health check passed for all applications on ${TargetRegion}. Approve to
+                    proceed with Route 53 DNS cutover to the DR region. This action routes all
+                    production traffic to DR ALBs — only approve after completing UAT validation.
               MinRequiredApprovals: 1
               Approvers: '{{ Approvers }}'
             nextStep: Route53Cutover
             onFailure: Abort
           - name: Route53Cutover
             action: aws:invokeLambdaFunction
-            description: Update Route 53 alias A records to point to DR ALBs.
+            description: !Sub Update Route 53 alias A records to point to the ${TargetRegion} ALBs.
             inputs:
               FunctionName: '{{ Route53FailoverLambdaArn }}'
               Payload: '{}'
@@ -663,11 +735,21 @@ Resources:
               Service: sns
               Api: Publish
               TopicArn: '{{ SNSTopicArn }}'
-              Subject: PCHC DR DNS Cutover Complete
-              Message: >-
-                Route 53 DNS failover cutover to DR region completed successfully.
-                All PCHC application traffic is now routed to DR ALBs. Proceed with
-                post-cutover verification per the DR runbook checklist.
+              Subject: !If
+                - IsFailback
+                - PCHC DNS Failback Cutover Complete
+                - PCHC DR DNS Cutover Complete
+              Message: !If
+                - IsFailback
+                - !Sub >-
+                    Route 53 DNS failback cutover to ${TargetRegion} completed successfully.
+                    All PCHC application traffic has returned to the live region. Proceed with
+                    post-cutover verification per the failback runbook checklist, then tear
+                    down the DR region's paid resources.
+                - !Sub >-
+                    Route 53 DNS failover cutover to ${TargetRegion} completed successfully.
+                    All PCHC application traffic is now routed to DR ALBs. Proceed with
+                    post-cutover verification per the DR runbook checklist.
 
 Outputs:
 
@@ -698,7 +780,7 @@ Outputs:
   SSMDocumentName:
     Description: >
       Name of the SSM Automation Document — start this manually from the AWS Console
-      after the dr-failover workflow succeeds and UAT validation is complete.
+      after the corresponding workflow succeeds and validation is complete.
     Value: !Ref DNSFailoverRunbook
     Export:
       Name: !Sub ${AWS::StackName}-SSMDocumentName
