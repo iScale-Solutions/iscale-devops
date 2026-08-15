@@ -1,0 +1,371 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: PESONet20 Treasury scaling - scheduled scale-out/in of the CodeDeploy-managed ASG
+
+# Deployed as a standalone stack, NOT as a nested stack of the application
+# template. The application stack cannot currently be updated by CloudFormation:
+# CodeDeploy blue/green deleted the ASGs that common/appserver-basic2.yaml
+# declares, and that shared template has since drifted in a way that forces an
+# ASG update (commit 60dacdf changes the UserData text unconditionally, which
+# bumps the launch template version). Any parent update therefore either fails
+# on the missing ASG or triggers AutoScalingReplacingUpdate and replaces all
+# three tiers with bare instances. Keeping this separate avoids touching it.
+#
+# The ASG name appears nowhere in this template on purpose. Blue/green destroys
+# and recreates the ASG on every deployment, so the name is only valid for the
+# life of one deployment. The function resolves it from CodeDeploy at run time.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+          - ComponentSuffix
+      - Label:
+          default: Stack Configuration
+        Parameters:
+          - AppStackName
+          - SNSStackName
+      - Label:
+          default: Peak Scaling Configuration
+        Parameters:
+          - PeakDesiredCapacity
+          - BaselineDesiredCapacity
+          - ScaleOutScheduleExpression
+          - ScaleInScheduleExpression
+
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      ComponentSuffix:
+        default: Application Tier Suffix
+      AppStackName:
+        default: Application Stack Name
+      SNSStackName:
+        default: SNS Topic Stack Name
+      PeakDesiredCapacity:
+        default: Peak Desired Capacity
+      BaselineDesiredCapacity:
+        default: Baseline Desired Capacity
+      ScaleOutScheduleExpression:
+        default: Scale Out CRON Expression
+      ScaleInScheduleExpression:
+        default: Scale In CRON Expression
+
+Parameters:
+  Name:
+    Description: >-
+      The Name parameter of the application stack. Combined with ComponentSuffix this
+      composes the CodeDeploy application name, so it MUST match the deployed value -
+      verify against the CodeDeploy console before deploying. The composed name is
+      published as the CodeDeployApplicationName output.
+    Type: String
+    Default: pesonet20
+    MinLength: 3
+    MaxLength: 16
+  OrgName:
+    Description: Organization name
+    Type: String
+    Default: pchc
+    MinLength: 3
+    MaxLength: 8
+  EnvName:
+    Description: Environment name
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  ComponentSuffix:
+    Description: >-
+      The application tier this stack scales, as passed to common/deployment.yaml by
+      the application template - 'tre' for Treasury, 'api' for API, 'kiq' for Sidekiq.
+      Constrained because a typo here composes a CodeDeploy application name that does
+      not exist, and that only surfaces when the schedule fires.
+    Type: String
+    Default: tre
+    AllowedValues:
+      - tre
+      - api
+      - kiq
+  AppStackName:
+    Description: >-
+      Name of the application CloudFormation stack. Used only to scope the IAM policy
+      to that stack's Auto Scaling groups - nothing is read from the stack itself.
+    Type: String
+    Default: pchc-prd-ase1-pesonet20
+    MinLength: 1
+  SNSStackName:
+    Description: The name of the CloudFormation SNS stack, for failure alerting
+    Type: String
+    Default: pchc-prd-ase1-sns
+    MinLength: 1
+  PeakDesiredCapacity:
+    Description: ASG desired capacity during the Monday peak window.
+    Type: Number
+    Default: 6
+    MinValue: 1
+  BaselineDesiredCapacity:
+    Description: ASG desired capacity outside the peak window.
+    Type: Number
+    Default: 3
+    MinValue: 1
+  ScaleOutScheduleExpression:
+    Description: >-
+      Scale out to peak capacity. UTC - Asia/Manila is UTC+8 with no DST, so
+      00:00 UTC Mon is 08:00 PHT Mon. Blank disables peak scaling entirely.
+    Type: String
+    Default: cron(0 0 ? * MON *)
+  ScaleInScheduleExpression:
+    Description: >-
+      Scale back to baseline capacity. 09:00 UTC Mon is 17:00 PHT Mon.
+      Blank disables peak scaling entirely.
+    Type: String
+    Default: cron(0 9 ? * MON *)
+
+Mappings:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: s3://iscale-dev-cloudformation/include/mappings.yaml
+
+Conditions:
+  HasPeakSchedule: !And
+    - !Not [!Equals [!Ref ScaleOutScheduleExpression, '']]
+    - !Not [!Equals [!Ref ScaleInScheduleExpression, '']]
+
+Resources:
+
+  PeakScalingRole:
+    Condition: HasPeakSchedule
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: PeakScalingPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              # common/deployment.yaml:127 names the application explicitly, so it
+              # is deterministic. It does not name the deployment group, so that
+              # one has a CloudFormation-generated name and has to be discovered.
+              - Effect: Allow
+                Action:
+                  - codedeploy:ListDeploymentGroups
+                Resource: !Sub
+                  - 'arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:application:${AppName}'
+                  - AppName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, application]]
+              - Effect: Allow
+                Action:
+                  - codedeploy:GetDeploymentGroup
+                Resource: !Sub
+                  - 'arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${AppName}/*'
+                  - AppName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, application]]
+              # The ASG name is not knowable at deploy time. Blue/green names it
+              # CodeDeploy_<deployment-group>_<deployment-id>; an in-place ASG would
+              # carry the plain CloudFormation-generated name. Both are scoped to
+              # the application stack so this cannot resize any other ASG.
+              - Effect: Allow
+                Action:
+                  - autoscaling:SetDesiredCapacity
+                  - autoscaling:UpdateAutoScalingGroup
+                Resource:
+                  - !Sub 'arn:aws:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/CodeDeploy_${AppStackName}-*'
+                  - !Sub 'arn:aws:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${AppStackName}-*'
+              - Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                Resource: "*"  # Describe* has no resource-level permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  PeakScalingFunction:
+    Condition: HasPeakSchedule
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Set the CodeDeploy-managed ASG to a scheduled desired capacity
+      FunctionName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, peakscale]]
+      Handler: index.lambda_handler
+      Role: !GetAtt PeakScalingRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          CODEDEPLOY_APP: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, application]]
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+
+          # Deliberately no try/except. Failures must reach the Lambda Errors
+          # metric so PeakScalingErrorAlarm fires - a swallowed exception here
+          # means no capacity on a Monday morning and no one finds out.
+          def lambda_handler(event, context):
+            region  = os.environ['REGION']
+            appName = os.environ['CODEDEPLOY_APP']
+            desired = int(event['DesiredCapacity'])
+
+            codedeploy  = boto3.client('codedeploy', region_name=region)
+            autoscaling = boto3.client('autoscaling', region_name=region)
+
+            # common/deployment.yaml creates exactly one deployment group per
+            # application and leaves it unnamed, so CloudFormation generates a
+            # random name. Discover it rather than carry a copy that goes stale.
+            groups = codedeploy.list_deployment_groups(
+                applicationName=appName)['deploymentGroups']
+            if len(groups) != 1:
+              raise RuntimeError(
+                  'Expected exactly 1 deployment group under %s, found %d: %s'
+                  % (appName, len(groups), groups))
+            groupName = groups[0]
+
+            # CodeDeploy blue/green replaces the ASG on every deployment, so this
+            # name is only valid right now. Never cache it.
+            info = codedeploy.get_deployment_group(
+                applicationName=appName,
+                deploymentGroupName=groupName)['deploymentGroupInfo']
+
+            asgs = info.get('autoScalingGroups', [])
+            if len(asgs) != 1:
+              raise RuntimeError(
+                  'Expected exactly 1 Auto Scaling group on %s/%s, found %d: %s'
+                  % (appName, groupName, len(asgs),
+                     [a['name'] for a in asgs]))
+
+            asgName = asgs[0]['name']
+            logger.info('Resolved %s -> %s, target desired %d',
+                        groupName, asgName, desired)
+
+            described = autoscaling.describe_auto_scaling_groups(
+                AutoScalingGroupNames=[asgName])['AutoScalingGroups']
+            if not described:
+              raise RuntimeError('Resolved ASG %s does not exist' % asgName)
+
+            # set_desired_capacity fails outright if desired > MaxSize. Raising it
+            # here also self-heals: a blue/green copy or a future CloudFormation
+            # update that resets MaxSize is corrected on the next run.
+            if desired > described[0]['MaxSize']:
+              logger.info('Raising MaxSize %d -> %d',
+                          described[0]['MaxSize'], desired)
+              autoscaling.update_auto_scaling_group(
+                  AutoScalingGroupName=asgName, MaxSize=desired)
+
+            autoscaling.set_desired_capacity(
+                AutoScalingGroupName=asgName,
+                DesiredCapacity=desired,
+                HonorCooldown=False)
+
+            logger.info('Set %s desired capacity to %d', asgName, desired)
+
+  PeakScaleOutRule:
+    Condition: HasPeakSchedule
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, scaleout]]
+      Description: !Join [' ',[Scale, !Ref Name, !Ref ComponentSuffix, out to peak capacity at, !Ref ScaleOutScheduleExpression]]
+      ScheduleExpression: !Ref ScaleOutScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt PeakScalingFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, scaleout]]
+          Input: !Sub '{"DesiredCapacity": ${PeakDesiredCapacity}}'
+
+  PeakScaleInRule:
+    Condition: HasPeakSchedule
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, scalein]]
+      Description: !Join [' ',[Scale, !Ref Name, !Ref ComponentSuffix, back to baseline capacity at, !Ref ScaleInScheduleExpression]]
+      ScheduleExpression: !Ref ScaleInScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt PeakScalingFunction.Arn
+          Id: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, scalein]]
+          Input: !Sub '{"DesiredCapacity": ${BaselineDesiredCapacity}}'
+
+  PeakScaleOutPermission:
+    Condition: HasPeakSchedule
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PeakScalingFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PeakScaleOutRule.Arn
+
+  PeakScaleInPermission:
+    Condition: HasPeakSchedule
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PeakScalingFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PeakScaleInRule.Arn
+
+  PeakScalingErrorAlarm:
+    Condition: HasPeakSchedule
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, peakscale, errors]]
+      AlarmDescription: >-
+        Peak scaling function failed to set desired capacity. The scheduled
+        scale-out or scale-in did not happen - check the function log group.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PeakScalingFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue:
+            !Sub '${SNSStackName}-TopicArn'
+
+Outputs:
+
+  CodeDeployApplicationName:
+    Description: >-
+      The composed CodeDeploy application name the function will query. Verify this
+      matches the real application in the CodeDeploy console before the first run.
+    Value: !Join ['-',[!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionShort, !Ref 'AWS::Region', Name], !Ref Name, !Ref ComponentSuffix, application]]
+
+  PeakScalingFunctionName:
+    Condition: HasPeakSchedule
+    Description: 'Invoke manually with {"DesiredCapacity": N} to test resolution'
+    Value: !Ref PeakScalingFunction
+
+  PeakScalingFunctionArn:
+    Condition: HasPeakSchedule
+    Description: ARN of the peak scaling function
+    Value: !GetAtt PeakScalingFunction.Arn
