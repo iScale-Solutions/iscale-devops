@@ -334,8 +334,11 @@ Resources:
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
-          # An ALB allows at most 5 values in one host-header condition.
-          MAX_HOST_HEADER_VALUES = 5
+          # ALB quotas are scoped to the whole rule, not to one condition — a rule that
+          # gained a path-pattern would spend part of the budget before the host values
+          # are counted. Erring low costs a clean pre-flight abort; erring high costs a
+          # rejection in the middle of the write loop.
+          MAX_MATCH_EVALUATIONS = 5
 
           # describe_rules reports every condition twice: the legacy flat Values list and
           # the typed *Config block. modify_rule rejects a condition carrying both, so each
@@ -348,6 +351,11 @@ Resources:
               'http-request-method': 'HttpRequestMethodConfig',
               'source-ip': 'SourceIpConfig',
           }
+
+          def condition_values(c):
+              """Values on a condition, from the typed config or the legacy flat list."""
+              key = CONDITION_CONFIG_KEY.get(c['Field'])
+              return (c.get(key) or {}).get('Values') or c.get('Values', [])
 
           def resolve_listener(cfn, app_name, entry):
               """Return the HTTPS listener ARN, or None when the app has no listener rules.
@@ -403,16 +411,18 @@ Resources:
                   raise Exception(f'{app_name}: rule at priority {rule["Priority"]} has more '
                                   'than one host-header condition; refusing to guess')
 
-              existing = (host_conditions[0].get('HostHeaderConfig', {}).get('Values')
-                          or host_conditions[0].get('Values', []))
+              existing = condition_values(host_conditions[0])
               if hostname in existing:
                   return None
 
               values = list(existing) + [hostname]
-              if len(values) > MAX_HOST_HEADER_VALUES:
-                  raise Exception(f'{app_name}: adding {hostname} would give the rule '
-                                  f'{len(values)} host-header values, above the ALB limit of '
-                                  f'{MAX_HOST_HEADER_VALUES}: {values}')
+              # +1 for the name being added; the no-op case returned above already.
+              total = sum(len(condition_values(c)) for c in conditions) + 1
+              if total > MAX_MATCH_EVALUATIONS:
+                  raise Exception(f'{app_name}: adding {hostname} would put the rule at '
+                                  f'{total} match evaluations across {len(conditions)} '
+                                  f'condition(s), above the ALB limit of '
+                                  f'{MAX_MATCH_EVALUATIONS}: {values}')
 
               rewritten = []
               for c in conditions:
@@ -426,7 +436,7 @@ Resources:
                       # Everything else rides through untouched — modify_rule replaces the
                       # whole condition list, so anything omitted here would be deleted.
                       rewritten.append({'Field': field,
-                                        key: c.get(key) or {'Values': c.get('Values', [])}})
+                                        key: c.get(key) or {'Values': condition_values(c)}})
               return rewritten
 
           def handler(event, context):
@@ -457,7 +467,7 @@ Resources:
                                   f"{len(failures)} app(s): {'; '.join(failures)}. "
                                   'No listener rules were modified.')
 
-              updated, unchanged = [], []
+              updated, unchanged, failed = [], [], []
               for app_name, (rule, conditions) in planned.items():
                   record_name = hosted_zone_map[app_name]['recordName']
                   if conditions is None:
@@ -466,7 +476,13 @@ Resources:
                       logger.info(f'{app_name}: {record_name} already on the rule')
                       unchanged.append(app_name)
                       continue
-                  elbv2.modify_rule(RuleArn=rule['RuleArn'], Conditions=conditions)
+                  try:
+                      elbv2.modify_rule(RuleArn=rule['RuleArn'], Conditions=conditions)
+                  except Exception as e:
+                      # Planning cannot catch a rule deleted since, a throttle, or a policy
+                      # gap on one balancer. Keep going so the report covers every app.
+                      failed.append(f'{app_name}: {e}')
+                      continue
                   logger.info(f'{app_name}: added {record_name} to rule {rule["RuleArn"]}')
                   updated.append(app_name)
 
@@ -476,7 +492,17 @@ Resources:
                               'rules to prepare')
 
               logger.info(f'Listener rules: {len(updated)} updated, {len(unchanged)} already '
-                          f'correct, {len(skipped)} skipped')
+                          f'correct, {len(skipped)} skipped, {len(failed)} failed')
+
+              # Raised after the summary so the log holds the full picture either way. The
+              # step is idempotent, so re-running is the fix once the causes are cleared.
+              if failed:
+                  raise Exception('Listener rules PARTIALLY applied. Updated: '
+                                  f"{updated or 'none'}. Failed: {'; '.join(failed)}. "
+                                  'The updated apps now accept their live hostname and the '
+                                  'failed ones do not. Re-run this step once the failures '
+                                  'are resolved; do not approve the cutover before it passes.')
+
               return {'status': 'ok', 'updated': updated, 'unchanged': unchanged,
                       'skipped': skipped}
 
