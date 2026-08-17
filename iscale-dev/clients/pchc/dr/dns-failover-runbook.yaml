@@ -1,9 +1,12 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: |
   PCHC DR DNS Cutover Runbook. Deploys:
-  (1) Health check Lambda — verifies all PCHC apps are healthy on the target region's ALBs before cutover.
-  (2) Route 53 cutover Lambda — updates Route 53 records to point at the target region's ALBs.
-  (3) SSM Automation Document — 4-step runbook: health check → DR Manager approval → DNS cutover → SNS all-clear.
+  (1) Listener rule Lambda — adds each app's live hostname to the host-header condition of its ALB
+      listener rule in the target region, so the ALB accepts the traffic DNS is about to send it.
+  (2) Health check Lambda — verifies all PCHC apps are healthy on the target region's ALBs before cutover.
+  (3) Route 53 cutover Lambda — updates Route 53 records to point at the target region's ALBs.
+  (4) SSM Automation Document — 5-step runbook: listener rules → health check → DR Manager approval
+      → DNS cutover → SNS all-clear.
   Started manually by the DR Manager from the AWS Console after the failover (or failback) workflow
   succeeds and validation is complete.
 
@@ -137,6 +140,20 @@ Parameters:
         and the logical id the ELB stack is declared under (default ELBStack):
         {"pas6":{"hostedZoneId":"ZXXXX","recordName":"pas6-app-tdr.pchcdev.com",
                  "appStackName":"pchc-tdr-ue2-pas6","elbLogicalId":"ELBStack"}}
+      Optional listenerRulePriority selects WHICH rule on that listener gets the
+      hostname. One app's server stacks share a listener at different priorities —
+      for pddts the web app is 100 and sidekiq is 105 — so the wrong priority would
+      teach a background worker to answer on the app's public hostname. Defaults to
+      100, the web-facing rule for every PCHC app except philpass (50):
+        {"philpass":{"hostedZoneId":"ZXXXX","recordName":"philpass.pchc.com.ph",
+                     "elbStackName":"pchc-pdr-uw2-philpass-elb","listenerRulePriority":50}}
+      Apps behind a NETWORK load balancer (pesonet20's API and sidekiq) are skipped by
+      the listener step automatically — NLBs have no listener rules. Nothing to configure.
+      Optional port (default 443) and verifyCertificate (default true) tune the health
+      check probe. Leave verification on: it is what catches a DR certificate never
+      issued for the live hostname. Turn it off only for a private CA:
+        {"cics":{"hostedZoneId":"ZXXXX","recordName":"cics.pchc.com.ph",
+                 "elbStackName":"pchc-pdr-uw2-cics-elb","port":8443}}
     Type: String
     Default: '{}'
 
@@ -200,10 +217,8 @@ Resources:
   # SSM Parameter — Hosted Zone Map
   ####
 
-  # Created in THIS stack's region — AWS::SSM::Parameter has no region property. The
-  # readers below are scoped to AWS::Region to match, so config location follows the
-  # stack while TargetRegion governs only what the stack points at. Each direction's
-  # stack therefore holds its own copy of the map, differing solely in appStackName.
+  # Lives in THIS stack's region — AWS::SSM::Parameter has no region property, and the
+  # readers are scoped to AWS::Region to match. Each direction holds its own copy.
   HostedZoneMapParameter:
     Type: AWS::SSM::Parameter
     Properties:
@@ -211,6 +226,259 @@ Resources:
       Type: String
       Value: !Ref HostedZoneMap
       Description: Route 53 hosted zone config per app — update before running the DNS cutover runbook
+
+  ####
+  # IAM — Listener Rule Lambda
+  ####
+
+  ListenerRuleLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-listener-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+        # Local — see the equivalent note on LambdaRole.
+        - PolicyName: ReadHostedZoneMap
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${OrgName}/dr/${EnvName}/hosted-zone-map
+        - PolicyName: DescribeELBStacks
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResource
+                Resource: !Sub arn:aws:cloudformation:${TargetRegion}:${AWS::AccountId}:stack/*
+        - PolicyName: ModifyListenerRules
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              # DescribeRules takes no resource-level permissions, so it cannot be
+              # narrowed below '*'. It is read-only.
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeRules
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:ModifyRule
+                Resource: !Sub arn:aws:elasticloadbalancing:${TargetRegion}:${AWS::AccountId}:listener-rule/app/*
+
+  ####
+  # CloudWatch Logs — Listener Rule Lambda
+  ####
+
+  ListenerRuleLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-listener
+      RetentionInDays: !Ref LogRetentionDays
+
+  ####
+  # Lambda — Listener Rule Host Headers
+  ####
+
+  # DR listener rules match a DR-derived name (pddts-pdr.<domain>), never the live one.
+  # nginx answers to both via ServerNameOverride; the ALB was never taught. Without this
+  # the cutover matches no rule and returns 503 from the default action's empty TG.
+  #
+  # Writes outside CloudFormation, so an app stack update reverts it. Re-added every run.
+  # Permanent fix is an AdditionalHostHeaders parameter on the app templates.
+  ListenerRuleLambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ListenerRuleLambdaLogGroup
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-listener
+      # Lambda Description is capped at 256 characters.
+      Description: >
+        Pre-cutover listener prep — adds each app's live hostname to the host-header
+        condition of its ALB listener rule in the target region, so the ALB routes the
+        traffic the DNS cutover is about to send it. Idempotent.
+      Handler: index.handler
+      Role: !GetAtt ListenerRuleLambdaRole.Arn
+      Runtime: python3.12
+      # aws:invokeLambdaFunction gives up at 5 minutes regardless of this value.
+      Timeout: 290
+      Environment:
+        Variables:
+          HOSTED_ZONE_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/hosted-zone-map
+          TARGET_REGION: !Ref TargetRegion
+      Code:
+        ZipFile: |
+          import json, os
+          import boto3
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # An ALB allows at most 5 values in one host-header condition.
+          MAX_HOST_HEADER_VALUES = 5
+
+          # describe_rules reports every condition twice: the legacy flat Values list and
+          # the typed *Config block. modify_rule rejects a condition carrying both, so each
+          # one is rebuilt in typed form before being written back.
+          CONDITION_CONFIG_KEY = {
+              'host-header': 'HostHeaderConfig',
+              'path-pattern': 'PathPatternConfig',
+              'http-header': 'HttpHeaderConfig',
+              'query-string': 'QueryStringConfig',
+              'http-request-method': 'HttpRequestMethodConfig',
+              'source-ip': 'SourceIpConfig',
+          }
+
+          def resolve_listener(cfn, app_name, entry):
+              """Return the HTTPS listener ARN, or None when the app has no listener rules.
+
+              Same two config forms as the other Lambdas: an external ELB stack is named
+              directly, a nested one is reached through its parent app stack.
+              """
+              stack = entry.get('elbStackName')
+              if not stack:
+                  app_stack = entry.get('appStackName')
+                  if not app_stack:
+                      raise Exception(f'{app_name}: no elbStackName or appStackName')
+                  stack = cfn.describe_stack_resource(
+                      StackName=app_stack,
+                      LogicalResourceId=entry.get('elbLogicalId', 'ELBStack')
+                  )['StackResourceDetail']['PhysicalResourceId']
+
+              outputs = cfn.describe_stacks(StackName=stack)['Stacks'][0].get('Outputs', [])
+              by_key = {o['OutputKey']: o['OutputValue'] for o in outputs}
+              if 'ApplicationListenerArn' in by_key:
+                  return by_key['ApplicationListenerArn']
+              if 'NetworkListenerArn' in by_key:
+                  # NLBs have no listener rules; nginx matches the host instead. Skip
+                  # rather than fail — pesonet20's API and sidekiq are NLBs, and an
+                  # error here would abort the cutover for every other app.
+                  return None
+              # Tested positively on both sides so a broken ALB stack still surfaces.
+              raise Exception(f'{app_name}: ELB stack {stack} exports neither '
+                              'ApplicationListenerArn nor NetworkListenerArn — not a load '
+                              'balancer stack this runbook knows how to prepare')
+
+          def find_rule(elbv2, app_name, listener_arn, priority):
+              paginator = elbv2.get_paginator('describe_rules')
+              for page in paginator.paginate(ListenerArn=listener_arn):
+                  for rule in page['Rules']:
+                      if rule['Priority'] == str(priority):
+                          return rule
+              raise Exception(f'{app_name}: no rule at priority {priority} on {listener_arn}')
+
+          def plan_conditions(app_name, rule, hostname):
+              """Rewritten condition list, or None if the hostname is already present."""
+              conditions = rule['Conditions']
+              host_conditions = [c for c in conditions if c['Field'] == 'host-header']
+
+              if not host_conditions:
+                  # A rule with no host condition matches EVERY hostname. Adding one would
+                  # narrow it to this name alone and take the app's other names off the
+                  # air — the exact opposite of the intent, so refuse instead.
+                  raise Exception(f'{app_name}: rule at priority {rule["Priority"]} has no '
+                                  'host-header condition; it matches all hosts today and '
+                                  'adding one would narrow it')
+              if len(host_conditions) > 1:
+                  raise Exception(f'{app_name}: rule at priority {rule["Priority"]} has more '
+                                  'than one host-header condition; refusing to guess')
+
+              existing = (host_conditions[0].get('HostHeaderConfig', {}).get('Values')
+                          or host_conditions[0].get('Values', []))
+              if hostname in existing:
+                  return None
+
+              values = list(existing) + [hostname]
+              if len(values) > MAX_HOST_HEADER_VALUES:
+                  raise Exception(f'{app_name}: adding {hostname} would give the rule '
+                                  f'{len(values)} host-header values, above the ALB limit of '
+                                  f'{MAX_HOST_HEADER_VALUES}: {values}')
+
+              rewritten = []
+              for c in conditions:
+                  field = c['Field']
+                  key = CONDITION_CONFIG_KEY.get(field)
+                  if not key:
+                      raise Exception(f'{app_name}: unsupported condition field {field}')
+                  if field == 'host-header':
+                      rewritten.append({'Field': field, key: {'Values': values}})
+                  else:
+                      # Everything else rides through untouched — modify_rule replaces the
+                      # whole condition list, so anything omitted here would be deleted.
+                      rewritten.append({'Field': field,
+                                        key: c.get(key) or {'Values': c.get('Values', [])}})
+              return rewritten
+
+          def handler(event, context):
+              ssm = boto3.client('ssm')
+              cfn = boto3.client('cloudformation', region_name=os.environ['TARGET_REGION'])
+              elbv2 = boto3.client('elbv2', region_name=os.environ['TARGET_REGION'])
+
+              resp = ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])
+              hosted_zone_map = json.loads(resp['Parameter']['Value'])
+
+              # Resolve and validate every app before writing anything. A half-applied pass
+              # leaves some apps reachable on the live hostname and others not, which is
+              # harder to diagnose mid-incident than a clean abort.
+              planned, skipped, failures = {}, [], []
+              for app_name, entry in hosted_zone_map.items():
+                  try:
+                      listener_arn = resolve_listener(cfn, app_name, entry)
+                      if listener_arn is None:
+                          skipped.append(app_name)
+                          continue
+                      rule = find_rule(elbv2, app_name, listener_arn,
+                                       entry.get('listenerRulePriority', 100))
+                      planned[app_name] = (rule, plan_conditions(app_name, rule, entry['recordName']))
+                  except Exception as e:
+                      failures.append(str(e))
+              if failures:
+                  raise Exception(f'Aborting: could not prepare listener rules for '
+                                  f"{len(failures)} app(s): {'; '.join(failures)}. "
+                                  'No listener rules were modified.')
+
+              updated, unchanged = [], []
+              for app_name, (rule, conditions) in planned.items():
+                  record_name = hosted_zone_map[app_name]['recordName']
+                  if conditions is None:
+                      # Already correct — the normal case for the failback direction, where
+                      # the live ALB has always matched its own hostname.
+                      logger.info(f'{app_name}: {record_name} already on the rule')
+                      unchanged.append(app_name)
+                      continue
+                  elbv2.modify_rule(RuleArn=rule['RuleArn'], Conditions=conditions)
+                  logger.info(f'{app_name}: added {record_name} to rule {rule["RuleArn"]}')
+                  updated.append(app_name)
+
+              # Named individually — a silent skip reads like a successful insert.
+              for app_name in skipped:
+                  logger.info(f'{app_name}: behind a network load balancer, no listener '
+                              'rules to prepare')
+
+              logger.info(f'Listener rules: {len(updated)} updated, {len(unchanged)} already '
+                          f'correct, {len(skipped)} skipped')
+              return {'status': 'ok', 'updated': updated, 'unchanged': unchanged,
+                      'skipped': skipped}
 
   ####
   # IAM — Health Check Lambda
@@ -283,14 +551,17 @@ Resources:
     DependsOn: LambdaLogGroup
     Properties:
       FunctionName: !Sub ${AWS::StackName}
+      # Lambda Description is capped at 256 characters.
       Description: >
-        Cutover health check — resolves each app's ALB in the target region from its
-        ELB stack outputs and HTTP GETs the health check path on it.
-        Returns ok if all apps return 200; raises an exception otherwise.
+        Cutover health check — GETs the health check path over HTTPS on each app's
+        target-region load balancer, presenting the app's live hostname in SNI and Host
+        so the real certificate and listener rule are exercised. Raises unless all pass.
       Handler: index.handler
       Role: !GetAtt LambdaRole.Arn
       Runtime: python3.12
-      Timeout: 120
+      # Sequential 10s probes, and TLS costs more round trips than plaintext — the full
+      # map ran past the old 120s. aws:invokeLambdaFunction caps at 5 minutes anyway.
+      Timeout: 290
       Environment:
         Variables:
           HOSTED_ZONE_MAP_PARAMETER: !Sub /${OrgName}/dr/${EnvName}/hosted-zone-map
@@ -298,23 +569,36 @@ Resources:
           TARGET_REGION: !Ref TargetRegion
       Code:
         ZipFile: |
-          import json, os, urllib.error, urllib.request
+          import http.client, json, os, socket, ssl
           import boto3
           import logging
 
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
-          class NoRedirect(urllib.request.HTTPRedirectHandler):
-              """Stop urllib following redirects.
+          def probe(alb_dns, server_name, path, port, verify):
+              """GET path over HTTPS, presenting server_name in both SNI and Host.
 
-              The probe talks to the ALB directly, so a redirect to the app's real
-              hostname would need a DNS record that does not exist until the cutover
-              this runbook is gating. Returning None leaves the 3xx to surface as an
-              HTTPError, which the caller reads as reachable.
+              SNI picks the certificate, Host picks the listener rule. Setting only Host
+              leaves SNI naming the balancer and tests neither.
+
+              HTTPS, not HTTP: port 80 is a blanket 301 issued before rule evaluation and
+              without touching a target, so an HTTP probe passes for a dead app.
               """
-              def redirect_request(self, req, fp, code, msg, headers, newurl):
-                  return None
+              ctx = ssl.create_default_context()
+              if not verify:
+                  ctx.check_hostname = False
+                  ctx.verify_mode = ssl.CERT_NONE
+              conn = http.client.HTTPSConnection(server_name, port, context=ctx, timeout=10)
+              # connect() dials _create_connection((self.host, self.port)) and takes SNI
+              # from self.host — replacing it splits the address from the name.
+              conn._create_connection = lambda addr, t, sa: socket.create_connection(
+                  (alb_dns, port), t, sa)
+              try:
+                  conn.request('GET', path, headers={'Host': server_name})
+                  return conn.getresponse().status
+              finally:
+                  conn.close()
 
           def resolve_alb(cfn, app_name, entry):
               """Return (dns_name, canonical_hosted_zone_id) from the app's ELB stack.
@@ -352,36 +636,43 @@ Resources:
 
               health_path = os.environ['HEALTH_CHECK_PATH']
               failures = []
-              opener = urllib.request.build_opener(NoRedirect)
 
               for app_name, entry in hosted_zone_map.items():
                   try:
                       alb_dns, _ = resolve_alb(cfn, app_name, entry)
                   except Exception as e:
-                      failures.append(f'{app_name}: could not resolve ALB — {e}')
+                      failures.append(f'{app_name}: could not resolve load balancer — {e}')
                       continue
 
-                  url = f'http://{alb_dns}{health_path}'
+                  record_name = entry['recordName']
                   try:
-                      # Reach the ALB directly but present the app's real hostname: the
-                      # ALB's listener rules and nginx's server_name both match on Host,
-                      # and neither knows the ALB's own DNS name.
-                      probe = urllib.request.Request(
-                          url, headers={'Host': entry['recordName']}
-                      )
-                      status = opener.open(probe, timeout=10).status
-                  except urllib.error.HTTPError as e:
-                      status = e.code
+                      status = probe(alb_dns, record_name, health_path,
+                                     int(entry.get('port', 443)),
+                                     entry.get('verifyCertificate', True))
+                  except ssl.SSLCertVerificationError as e:
+                      # The ALB path: unmatched SNI falls back to the listener's default
+                      # cert, which we reject by name. Likeliest failure on a first run.
+                      failures.append(f'{app_name}: the certificate on {alb_dns} does not '
+                                      f'cover {record_name} ({e.verify_message or e}) — the '
+                                      'cutover would fail at TLS, before any rule is read')
+                      continue
+                  except ssl.SSLError as e:
+                      # Same problem, other shape: some servers refuse unknown SNI
+                      # outright instead of offering a default cert.
+                      failures.append(f'{app_name}: TLS handshake with {alb_dns} failed for '
+                                      f'{record_name} ({e}) — the listener may have no '
+                                      'certificate configured for this name')
+                      continue
                   except Exception as e:
                       failures.append(f'{app_name}: {e}')
                       continue
 
-                  # A redirect means the listener rule matched and the app answered —
-                  # it is healthy. Only the redirect itself is not followed.
+                  # A redirect means the rule matched and the app answered. On 443 that is
+                  # the app's own redirect, not the port 80 listener's blanket 301.
                   if status == 200 or 300 <= status < 400:
-                      logger.info(f'{app_name}: OK (HTTP {status} via {alb_dns})')
+                      logger.info(f'{app_name}: OK (HTTP {status} for {record_name} via {alb_dns})')
                   else:
-                      failures.append(f'{app_name}: HTTP {status}')
+                      failures.append(f'{app_name}: HTTP {status} for {record_name}')
 
               if failures:
                   raise Exception(f"Health check failed: {'; '.join(failures)}")
@@ -609,6 +900,7 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource:
+                  - !GetAtt ListenerRuleLambdaFunction.Arn
                   - !GetAtt LambdaFunction.Arn
                   - !GetAtt Route53LambdaFunction.Arn
         - PolicyName: PublishSNS
@@ -640,15 +932,20 @@ Resources:
       Content:
         schemaVersion: '0.3'
         description: !Sub >-
-          PCHC DR DNS ${Direction} runbook — cuts traffic over to ${TargetRegion}. Four steps:
-          (1) Health check all PCHC apps on the ${TargetRegion} ALBs.
-          (2) DR Manager approval gate — identity and timestamp recorded for BSP audit.
-          (3) Route 53 DNS cutover to the ${TargetRegion} ALBs.
-          (4) SNS all-clear notification.
+          PCHC DR DNS ${Direction} runbook — cuts traffic over to ${TargetRegion}. Five steps:
+          (1) Add each app's live hostname to its ${TargetRegion} ALB listener rule.
+          (2) Health check all PCHC apps on the ${TargetRegion} ALBs.
+          (3) DR Manager approval gate — identity and timestamp recorded for BSP audit.
+          (4) Route 53 DNS cutover to the ${TargetRegion} ALBs.
+          (5) SNS all-clear notification.
           Start manually from the AWS Console after the corresponding workflow succeeds
           and validation is complete.
         assumeRole: !GetAtt SSMAutomationRole.Arn
         parameters:
+          ListenerRuleLambdaArn:
+            type: String
+            default: !GetAtt ListenerRuleLambdaFunction.Arn
+            description: ARN of the listener rule Lambda.
           HealthCheckLambdaArn:
             type: String
             default: !GetAtt LambdaFunction.Arn
@@ -673,6 +970,19 @@ Resources:
               Defaults to ApproverIamArns supplied at deploy time.
               Example: ["arn:aws:iam::123456789012:user/dr-manager"]
         mainSteps:
+          # Before the gate on purpose: nothing resolves here yet, so this moves no
+          # traffic, and it lets the health check exercise the rule before approval.
+          - name: AddListenerHostHeaders
+            action: aws:invokeLambdaFunction
+            description: !Sub >-
+              Add each app's live hostname to the host-header condition of its ALB
+              listener rule in ${TargetRegion}, so the ALB routes the traffic the
+              cutover is about to send it. Idempotent — a no-op when already correct.
+            inputs:
+              FunctionName: '{{ ListenerRuleLambdaArn }}'
+              Payload: '{}'
+            nextStep: HealthCheck
+            onFailure: Abort
           - name: HealthCheck
             action: aws:invokeLambdaFunction
             description: !Sub Verify all PCHC apps are healthy on the ${TargetRegion} ALBs.
@@ -689,10 +999,9 @@ Resources:
             timeoutSeconds: !Ref ApprovalTimeoutSeconds
             inputs:
               NotificationArn: '{{ SNSTopicArn }}'
-              # >- not >: SSM validates Message against .{1,4096}, and `.` does not
-              # match the newline a plain folded scalar leaves on the end.
-              # Two full literals rather than one templated string: this prompt is the
-              # last human checkpoint, and it has to state the specific consequence.
+              # >- not >: SSM validates Message against .{1,4096} and `.` will not match
+              # the trailing newline. Two literals, not one template: this is the last
+              # human checkpoint and has to state the specific consequence.
               Message: !If
                 - IsFailback
                 - !Sub >-
@@ -752,6 +1061,18 @@ Resources:
                     post-cutover verification per the DR runbook checklist.
 
 Outputs:
+
+  ListenerRuleLambdaArn:
+    Description: ARN of the listener rule Lambda — pass this to the SSM runbook.
+    Value: !GetAtt ListenerRuleLambdaFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ListenerRuleLambdaArn
+
+  ListenerRuleLambdaName:
+    Description: Name of the listener rule Lambda — use this to invoke manually for testing.
+    Value: !Ref ListenerRuleLambdaFunction
+    Export:
+      Name: !Sub ${AWS::StackName}-ListenerRuleLambdaName
 
   LambdaFunctionArn:
     Description: ARN of the health check Lambda — pass this to the SSM runbook.
