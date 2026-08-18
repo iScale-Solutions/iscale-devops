@@ -29,7 +29,7 @@ The output must be:
 ```bash
 aws cloudformation deploy \
   --region ap-southeast-1 \
-  --stack-name canon-github-actions-bootstrap \
+  --stack-name canon-prd-ase1-github-actions-bootstrap \
   --template-file clients/canon/bootstrap/github-actions-role.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
@@ -43,7 +43,15 @@ aws cloudformation deploy \
 
 If the account does not already have the GitHub OIDC provider, set `CreateGitHubOIDCProvider=yes`.
 
-After deployment, copy the `RoleArn` output into the GitHub repository variable `CANON_AWS_ROLE_TO_ASSUME`.
+After deployment, copy the `RoleArn` output into the GitHub repository variable `CANON_AWS_ROLE_TO_ASSUME`:
+
+```bash
+aws cloudformation describe-stacks \
+  --region ap-southeast-1 \
+  --stack-name canon-prd-ase1-github-actions-bootstrap \
+  --query 'Stacks[0].Outputs[?OutputKey==`RoleArn`].OutputValue' \
+  --output text
+```
 
 ## Safety Model
 
