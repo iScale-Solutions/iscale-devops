@@ -329,183 +329,98 @@ Resources:
         ZipFile: |
           import json, os
           import boto3
-          import logging
 
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
+          MAX_EVALS = 5  # ALB rule quota.
 
-          # ALB quotas are scoped to the whole rule, not to one condition — a rule that
-          # gained a path-pattern would spend part of the budget before the host values
-          # are counted. Erring low costs a clean pre-flight abort; erring high costs a
-          # rejection in the middle of the write loop.
-          MAX_MATCH_EVALUATIONS = 5
+          def ckey(field):
+              # describe_rules gives flat+typed; modify_rule wants only typed.
+              return ''.join(w.title() for w in field.split('-')) + 'Config'
 
-          # describe_rules reports every condition twice: the legacy flat Values list and
-          # the typed *Config block. modify_rule rejects a condition carrying both, so each
-          # one is rebuilt in typed form before being written back.
-          CONDITION_CONFIG_KEY = {
-              'host-header': 'HostHeaderConfig',
-              'path-pattern': 'PathPatternConfig',
-              'http-header': 'HttpHeaderConfig',
-              'query-string': 'QueryStringConfig',
-              'http-request-method': 'HttpRequestMethodConfig',
-              'source-ip': 'SourceIpConfig',
-          }
+          def values_of(c):
+              return (c.get(ckey(c['Field'])) or {}).get('Values') or c.get('Values', [])
 
-          def condition_values(c):
-              """Values on a condition, from the typed config or the legacy flat list."""
-              key = CONDITION_CONFIG_KEY.get(c['Field'])
-              return (c.get(key) or {}).get('Values') or c.get('Values', [])
-
-          def resolve_listener(cfn, app_name, entry):
-              """Return the HTTPS listener ARN, or None when the app has no listener rules.
-
-              Same two config forms as the other Lambdas: an external ELB stack is named
-              directly, a nested one is reached through its parent app stack.
-              """
+          def resolve(cfn, app, entry):
               stack = entry.get('elbStackName')
               if not stack:
-                  app_stack = entry.get('appStackName')
-                  if not app_stack:
-                      raise Exception(f'{app_name}: no elbStackName or appStackName')
+                  parent = entry.get('appStackName')
+                  if not parent:
+                      raise Exception(f'{app}: no elbStackName or appStackName')
                   stack = cfn.describe_stack_resource(
-                      StackName=app_stack,
-                      LogicalResourceId=entry.get('elbLogicalId', 'ELBStack')
+                      StackName=parent, LogicalResourceId=entry.get('elbLogicalId', 'ELBStack')
                   )['StackResourceDetail']['PhysicalResourceId']
-
               outputs = cfn.describe_stacks(StackName=stack)['Stacks'][0].get('Outputs', [])
               by_key = {o['OutputKey']: o['OutputValue'] for o in outputs}
               if 'ApplicationListenerArn' in by_key:
                   return by_key['ApplicationListenerArn']
               if 'NetworkListenerArn' in by_key:
-                  # NLBs have no listener rules; nginx matches the host instead. Skip
-                  # rather than fail — pesonet20's API and sidekiq are NLBs, and an
-                  # error here would abort the cutover for every other app.
-                  return None
-              # Tested positively on both sides so a broken ALB stack still surfaces.
-              raise Exception(f'{app_name}: ELB stack {stack} exports neither '
-                              'ApplicationListenerArn nor NetworkListenerArn — not a load '
-                              'balancer stack this runbook knows how to prepare')
+                  return None  # NLB: skip, don't fail run.
+              raise Exception(f'{app}: {stack} has no listener ARN')
 
-          def find_rule(elbv2, app_name, listener_arn, priority):
-              paginator = elbv2.get_paginator('describe_rules')
-              for page in paginator.paginate(ListenerArn=listener_arn):
+          def find_rule(elbv2, app, arn, priority):
+              for page in elbv2.get_paginator('describe_rules').paginate(ListenerArn=arn):
                   for rule in page['Rules']:
                       if rule['Priority'] == str(priority):
                           return rule
-              raise Exception(f'{app_name}: no rule at priority {priority} on {listener_arn}')
+              raise Exception(f'{app}: no rule at priority {priority}')
 
-          def plan_conditions(app_name, rule, hostname):
-              """Rewritten condition list, or None if the hostname is already present."""
-              conditions = rule['Conditions']
-              host_conditions = [c for c in conditions if c['Field'] == 'host-header']
-
-              if not host_conditions:
-                  # A rule with no host condition matches EVERY hostname. Adding one would
-                  # narrow it to this name alone and take the app's other names off the
-                  # air — the exact opposite of the intent, so refuse instead.
-                  raise Exception(f'{app_name}: rule at priority {rule["Priority"]} has no '
-                                  'host-header condition; it matches all hosts today and '
-                                  'adding one would narrow it')
-              if len(host_conditions) > 1:
-                  raise Exception(f'{app_name}: rule at priority {rule["Priority"]} has more '
-                                  'than one host-header condition; refusing to guess')
-
-              existing = condition_values(host_conditions[0])
-              if hostname in existing:
+          def plan_conds(app, rule, host):
+              conds = rule['Conditions']
+              hosts = [c for c in conds if c['Field'] == 'host-header']
+              if len(hosts) != 1:
+                  # 0 matches all; 2+ is ambiguous. Refuse either way.
+                  raise Exception(f'{app}: rule {rule["Priority"]} has {len(hosts)} host-header conditions, want 1')
+              existing = values_of(hosts[0])
+              if host in existing:
                   return None
-
-              values = list(existing) + [hostname]
-              # +1 for the name being added; the no-op case returned above already.
-              total = sum(len(condition_values(c)) for c in conditions) + 1
-              if total > MAX_MATCH_EVALUATIONS:
-                  raise Exception(f'{app_name}: adding {hostname} would put the rule at '
-                                  f'{total} match evaluations across {len(conditions)} '
-                                  f'condition(s), above the ALB limit of '
-                                  f'{MAX_MATCH_EVALUATIONS}: {values}')
-
-              rewritten = []
-              for c in conditions:
-                  field = c['Field']
-                  key = CONDITION_CONFIG_KEY.get(field)
-                  if not key:
-                      raise Exception(f'{app_name}: unsupported condition field {field}')
-                  if field == 'host-header':
-                      rewritten.append({'Field': field, key: {'Values': values}})
-                  else:
-                      # Everything else rides through untouched — modify_rule replaces the
-                      # whole condition list, so anything omitted here would be deleted.
-                      rewritten.append({'Field': field,
-                                        key: c.get(key) or {'Values': condition_values(c)}})
-              return rewritten
+              total = sum(len(values_of(c)) for c in conds) + 1
+              if total > MAX_EVALS:
+                  raise Exception(f'{app}: {total} evals over ALB limit {MAX_EVALS}')
+              out = []
+              for c in conds:
+                  # modify_rule replaces whole list; rebuild untouched conditions too.
+                  vals = (existing + [host]) if c['Field'] == 'host-header' else values_of(c)
+                  out.append({'Field': c['Field'], ckey(c['Field']): {'Values': vals}})
+              return out
 
           def handler(event, context):
+              region = os.environ['TARGET_REGION']
               ssm = boto3.client('ssm')
-              cfn = boto3.client('cloudformation', region_name=os.environ['TARGET_REGION'])
-              elbv2 = boto3.client('elbv2', region_name=os.environ['TARGET_REGION'])
+              cfn = boto3.client('cloudformation', region_name=region)
+              elbv2 = boto3.client('elbv2', region_name=region)
+              hzmap = json.loads(ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])['Parameter']['Value'])
 
-              resp = ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])
-              hosted_zone_map = json.loads(resp['Parameter']['Value'])
-
-              # Resolve and validate every app before writing anything. A half-applied pass
-              # leaves some apps reachable on the live hostname and others not, which is
-              # harder to diagnose mid-incident than a clean abort.
+              # Plan first: half-applied leaves some apps live, others not.
               planned, skipped, failures = {}, [], []
-              for app_name, entry in hosted_zone_map.items():
+              for app, entry in hzmap.items():
                   try:
-                      listener_arn = resolve_listener(cfn, app_name, entry)
-                      if listener_arn is None:
-                          skipped.append(app_name)
+                      arn = resolve(cfn, app, entry)
+                      if arn is None:
+                          skipped.append(app)
                           continue
-                      rule = find_rule(elbv2, app_name, listener_arn,
-                                       entry.get('listenerRulePriority', 100))
-                      planned[app_name] = (rule, plan_conditions(app_name, rule, entry['recordName']))
+                      rule = find_rule(elbv2, app, arn, entry.get('listenerRulePriority', 100))
+                      planned[app] = (rule, plan_conds(app, rule, entry['recordName']))
                   except Exception as e:
                       failures.append(str(e))
               if failures:
-                  raise Exception(f'Aborting: could not prepare listener rules for '
-                                  f"{len(failures)} app(s): {'; '.join(failures)}. "
-                                  'No listener rules were modified.')
+                  raise Exception(f"Aborting, {len(failures)} app(s) failed: {'; '.join(failures)}. None modified.")
 
               updated, unchanged, failed = [], [], []
-              for app_name, (rule, conditions) in planned.items():
-                  record_name = hosted_zone_map[app_name]['recordName']
-                  if conditions is None:
-                      # Already correct — the normal case for the failback direction, where
-                      # the live ALB has always matched its own hostname.
-                      logger.info(f'{app_name}: {record_name} already on the rule')
-                      unchanged.append(app_name)
+              for app, (rule, conds) in planned.items():
+                  if conds is None:
+                      unchanged.append(app)
                       continue
                   try:
-                      elbv2.modify_rule(RuleArn=rule['RuleArn'], Conditions=conditions)
+                      elbv2.modify_rule(RuleArn=rule['RuleArn'], Conditions=conds)
                   except Exception as e:
-                      # Planning cannot catch a rule deleted since, a throttle, or a policy
-                      # gap on one balancer. Keep going so the report covers every app.
-                      failed.append(f'{app_name}: {e}')
+                      failed.append(f'{app}: {e}')  # rule gone or throttled; keep going
                       continue
-                  logger.info(f'{app_name}: added {record_name} to rule {rule["RuleArn"]}')
-                  updated.append(app_name)
+                  updated.append(app)
 
-              # Named individually — a silent skip reads like a successful insert.
-              for app_name in skipped:
-                  logger.info(f'{app_name}: behind a network load balancer, no listener '
-                              'rules to prepare')
-
-              logger.info(f'Listener rules: {len(updated)} updated, {len(unchanged)} already '
-                          f'correct, {len(skipped)} skipped, {len(failed)} failed')
-
-              # Raised after the summary so the log holds the full picture either way. The
-              # step is idempotent, so re-running is the fix once the causes are cleared.
-              if failed:
-                  raise Exception('Listener rules PARTIALLY applied. Updated: '
-                                  f"{updated or 'none'}. Failed: {'; '.join(failed)}. "
-                                  'The updated apps now accept their live hostname and the '
-                                  'failed ones do not. Re-run this step once the failures '
-                                  'are resolved; do not approve the cutover before it passes.')
-
-              return {'status': 'ok', 'updated': updated, 'unchanged': unchanged,
-                      'skipped': skipped}
-
+              summary = f'{len(updated)} updated, {len(unchanged)} ok, {len(skipped)} skipped, {len(failed)} failed'
+              print(summary)
+              if failed:  # idempotent: re-running is the fix once causes clear
+                  raise Exception(f"PARTIALLY applied. Updated: {updated or 'none'}. Failed: {'; '.join(failed)}. Re-run first.")
+              return {'status': 'ok', 'updated': updated, 'unchanged': unchanged, 'skipped': skipped}
   ####
   # IAM — Health Check Lambda
   ####
@@ -605,19 +520,17 @@ Resources:
           def probe(alb_dns, server_name, path, port, verify):
               """GET path over HTTPS, presenting server_name in both SNI and Host.
 
-              SNI picks the certificate, Host picks the listener rule. Setting only Host
-              leaves SNI naming the balancer and tests neither.
-
-              HTTPS, not HTTP: port 80 is a blanket 301 issued before rule evaluation and
-              without touching a target, so an HTTP probe passes for a dead app.
+              SNI picks the certificate, Host picks the listener rule. HTTPS, not HTTP:
+              port 80 is a blanket 301 issued before any rule is read and without
+              touching a target, so an HTTP probe passes for a dead app.
               """
               ctx = ssl.create_default_context()
               if not verify:
                   ctx.check_hostname = False
                   ctx.verify_mode = ssl.CERT_NONE
               conn = http.client.HTTPSConnection(server_name, port, context=ctx, timeout=10)
-              # connect() dials _create_connection((self.host, self.port)) and takes SNI
-              # from self.host — replacing it splits the address from the name.
+              # connect() takes SNI from self.host, so the address is overridden here
+              # rather than by building the connection against alb_dns.
               conn._create_connection = lambda addr, t, sa: socket.create_connection(
                   (alb_dns, port), t, sa)
               try:
@@ -626,86 +539,74 @@ Resources:
               finally:
                   conn.close()
 
-          def resolve_alb(cfn, app_name, entry):
-              """Return (dns_name, canonical_hosted_zone_id) from the app's ELB stack.
+          def resolve_alb(cfn, app, entry):
+              """Load balancer DNS name from the app's ELB stack outputs.
 
-              An external ELB stack has a stable name and is named directly. A nested
-              ELBStack gets a generated name, so it is reached through its parent app
-              stack and the logical id it is declared under.
+              A nested ELBStack gets a generated name, so it is reached through its
+              parent app stack and the logical id it is declared under.
               """
               stack = entry.get('elbStackName')
               if not stack:
-                  app_stack = entry.get('appStackName')
-                  if not app_stack:
-                      raise Exception(f'{app_name}: config has neither elbStackName nor appStackName')
-                  logical = entry.get('elbLogicalId', 'ELBStack')
+                  parent = entry.get('appStackName')
+                  if not parent:
+                      raise Exception(f'{app}: no elbStackName or appStackName')
                   stack = cfn.describe_stack_resource(
-                      StackName=app_stack, LogicalResourceId=logical
+                      StackName=parent,
+                      LogicalResourceId=entry.get('elbLogicalId', 'ELBStack')
                   )['StackResourceDetail']['PhysicalResourceId']
 
               outputs = cfn.describe_stacks(StackName=stack)['Stacks'][0].get('Outputs', [])
               by_key = {o['OutputKey']: o['OutputValue'] for o in outputs}
+              # CanonicalHostedZoneID is unused here, but checking it now fails the gate
+              # rather than the cutover step, which runs after the approval is spent.
               missing = [k for k in ('DNSName', 'CanonicalHostedZoneID') if k not in by_key]
               if missing:
-                  raise Exception(f'{app_name}: ELB stack {stack} is missing output(s) {", ".join(missing)}')
-              return by_key['DNSName'], by_key['CanonicalHostedZoneID']
+                  raise Exception(f'{app}: {stack} missing output(s) {", ".join(missing)}')
+              return by_key['DNSName']
 
           def handler(event, context):
-              # Config is local to this function; only the app stack lookup is remote.
-              # No region_name on the SSM client: boto3 defaults to the function's own
-              # region, which is where this stack created the parameter.
               ssm = boto3.client('ssm')
               cfn = boto3.client('cloudformation', region_name=os.environ['TARGET_REGION'])
 
               resp = ssm.get_parameter(Name=os.environ['HOSTED_ZONE_MAP_PARAMETER'])
-              hosted_zone_map = json.loads(resp['Parameter']['Value'])
-
-              health_path = os.environ['HEALTH_CHECK_PATH']
+              hzmap = json.loads(resp['Parameter']['Value'])
+              path = os.environ['HEALTH_CHECK_PATH']
               failures = []
 
-              for app_name, entry in hosted_zone_map.items():
+              for app, entry in hzmap.items():
+                  host = entry['recordName']
                   try:
-                      alb_dns, _ = resolve_alb(cfn, app_name, entry)
+                      alb_dns = resolve_alb(cfn, app, entry)
                   except Exception as e:
-                      failures.append(f'{app_name}: could not resolve load balancer — {e}')
+                      failures.append(f'{app}: could not resolve load balancer, {e}')
                       continue
 
-                  record_name = entry['recordName']
                   try:
-                      status = probe(alb_dns, record_name, health_path,
-                                     int(entry.get('port', 443)),
+                      status = probe(alb_dns, host, path, int(entry.get('port', 443)),
                                      entry.get('verifyCertificate', True))
-                  except ssl.SSLCertVerificationError as e:
-                      # The ALB path: unmatched SNI falls back to the listener's default
-                      # cert, which we reject by name. Likeliest failure on a first run.
-                      failures.append(f'{app_name}: the certificate on {alb_dns} does not '
-                                      f'cover {record_name} ({e.verify_message or e}) — the '
-                                      'cutover would fail at TLS, before any rule is read')
-                      continue
                   except ssl.SSLError as e:
-                      # Same problem, other shape: some servers refuse unknown SNI
-                      # outright instead of offering a default cert.
-                      failures.append(f'{app_name}: TLS handshake with {alb_dns} failed for '
-                                      f'{record_name} ({e}) — the listener may have no '
-                                      'certificate configured for this name')
+                      # Unmatched SNI falls back to the listener's default certificate,
+                      # which then fails verification by name. Likeliest first-run
+                      # failure, and it would break the cutover at TLS before any rule
+                      # is read. SSLCertVerificationError subclasses this.
+                      failures.append(f'{app}: TLS failed for {host} on {alb_dns} ({e}); the '
+                                      'certificate there likely does not cover this name')
                       continue
                   except Exception as e:
-                      failures.append(f'{app_name}: {e}')
+                      failures.append(f'{app}: {e}')
                       continue
 
-                  # A redirect means the rule matched and the app answered. On 443 that is
-                  # the app's own redirect, not the port 80 listener's blanket 301.
+                  # A redirect on 443 is the app's own, not the port 80 blanket 301.
                   if status == 200 or 300 <= status < 400:
-                      logger.info(f'{app_name}: OK (HTTP {status} for {record_name} via {alb_dns})')
+                      logger.info(f'{app}: OK (HTTP {status} for {host} via {alb_dns})')
                   else:
-                      failures.append(f'{app_name}: HTTP {status} for {record_name}')
+                      failures.append(f'{app}: HTTP {status} for {host}')
 
               if failures:
                   raise Exception(f"Health check failed: {'; '.join(failures)}")
 
-              logger.info(f'All {len(hosted_zone_map)} apps healthy')
-              return {'status': 'ok', 'checked': len(hosted_zone_map)}
-
+              logger.info(f'All {len(hzmap)} apps healthy')
+              return {'status': 'ok', 'checked': len(hzmap)}
   ####
   # IAM — Route 53 Failover Lambda
   ####
@@ -812,14 +713,17 @@ Resources:
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
-          # An external ELB stack is named directly; a nested one gets a generated
-          # name, so it is reached through its parent app stack and logical id.
-          def resolve_alb(cfn, app_name, entry):
+          def resolve_alb(cfn, app, entry):
+              """(dns_name, canonical_hosted_zone_id) from the app's ELB stack.
+
+              A nested ELBStack gets a generated name, so it is reached through its
+              parent app stack and the logical id it is declared under.
+              """
               stack = entry.get('elbStackName')
               if not stack:
                   app_stack = entry.get('appStackName')
                   if not app_stack:
-                      raise Exception(f'{app_name}: no elbStackName or appStackName')
+                      raise Exception(f'{app}: no elbStackName or appStackName')
                   stack = cfn.describe_stack_resource(
                       StackName=app_stack,
                       LogicalResourceId=entry.get('elbLogicalId', 'ELBStack')
@@ -829,14 +733,12 @@ Resources:
               by_key = {o['OutputKey']: o['OutputValue'] for o in outputs}
               missing = [k for k in ('DNSName', 'CanonicalHostedZoneID') if k not in by_key]
               if missing:
-                  raise Exception(f'{app_name}: {stack} missing output(s) {", ".join(missing)}')
+                  raise Exception(f'{app}: {stack} missing output(s) {", ".join(missing)}')
               return by_key['DNSName'], by_key['CanonicalHostedZoneID']
 
           def handler(event, context):
-              # Three tiers of region here, and they are not the same thing:
-              #   local  — the config this stack created, in this function's own region
-              #   remote — the app stacks being promoted, in TargetRegion
-              #   global — Route 53, which has no region at all
+              # Three regions in play: this stack's own, holding the config; TARGET_REGION,
+              # holding the app stacks; and Route 53, which has no region.
               ssm = boto3.client('ssm')
               cfn = boto3.client('cloudformation', region_name=os.environ['TARGET_REGION'])
               r53 = boto3.client('route53')
@@ -848,58 +750,53 @@ Resources:
               # Resolve every app before submitting anything: a partial cutover would
               # leave DNS split across regions.
               resolved, failures = {}, []
-              for app_name, entry in hosted_zone_map.items():
+              for app, entry in hosted_zone_map.items():
                   try:
-                      resolved[app_name] = resolve_alb(cfn, app_name, entry)
+                      resolved[app] = resolve_alb(cfn, app, entry)
                   except Exception as e:
                       failures.append(str(e))
               if failures:
-                  raise Exception(f"Aborting: could not resolve target ALB for {len(failures)} app(s): "
-                                  f"{'; '.join(failures)}. No Route 53 changes were submitted.")
+                  raise Exception(f"Aborting, could not resolve target ALB for {len(failures)} "
+                                  f"app(s): {'; '.join(failures)}. Nothing was submitted.")
 
               hz_changes = {}
-              for app_name, zone_info in hosted_zone_map.items():
-                  alb_dns, alb_hosted_zone_id = resolved[app_name]
-                  hz_id = zone_info['hostedZoneId']
-                  change = {
+              for app, zone_info in hosted_zone_map.items():
+                  alb_dns, alb_hz_id = resolved[app]
+                  hz_changes.setdefault(zone_info['hostedZoneId'], []).append({
                       'Action': 'UPSERT',
                       'ResourceRecordSet': {
                           'Name': zone_info['recordName'],
                           'Type': 'A',
                           'AliasTarget': {
-                              'HostedZoneId': alb_hosted_zone_id,
+                              'HostedZoneId': alb_hz_id,
                               'DNSName': alb_dns,
                               'EvaluateTargetHealth': False
                           }
                       }
-                  }
-                  hz_changes.setdefault(hz_id, []).append(change)
+                  })
 
               change_ids = []
               for hz_id, change_list in hz_changes.items():
                   resp = r53.change_resource_record_sets(
                       HostedZoneId=hz_id,
                       ChangeBatch={
-                          'Comment': f'DR {direction} DNS cutover — {len(change_list)} records',
+                          'Comment': f'DR {direction} DNS cutover, {len(change_list)} records',
                           'Changes': change_list
                       }
                   )
                   change_ids.append(resp['ChangeInfo']['Id'])
-                  logger.info(f'Updated {len(change_list)} records in hosted zone {hz_id} (change {resp["ChangeInfo"]["Id"]})')
+                  logger.info(f'Updated {len(change_list)} records in zone {hz_id}')
 
-              # aws:invokeLambdaFunction caps the invocation at 5 minutes regardless of
-              # the function's own Timeout, so this must finish well inside that. The
-              # propagation wait lives in the runbook's aws:sleep step, not here.
+              # The propagation wait is the runbook's aws:sleep step, not here:
+              # aws:invokeLambdaFunction caps an invocation at 5 minutes.
               waiter = r53.get_waiter('resource_record_sets_changed')
               for change_id in change_ids:
-                  logger.info(f'Waiting for Route 53 change {change_id} to reach INSYNC...')
                   waiter.wait(Id=change_id, WaiterConfig={'Delay': 10, 'MaxAttempts': 24})
                   logger.info(f'Change {change_id} is INSYNC')
 
               total = sum(len(v) for v in hz_changes.values())
-              logger.info(f'Route 53 cutover complete: {total} records across {len(hz_changes)} hosted zones — all INSYNC')
+              logger.info(f'Cutover complete: {total} records in {len(hz_changes)} zones')
               return {'status': 'ok', 'updated': total, 'hostedZones': len(hz_changes)}
-
   ####
   # IAM — SSM Automation Role
   ####
