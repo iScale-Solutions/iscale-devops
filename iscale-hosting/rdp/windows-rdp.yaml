@@ -1,0 +1,475 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Windows Remote Desktop EC2 instance, without VPN resources. Designed for Paris and Singapore deployments.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Resource Configuration
+        Parameters:
+          - Name
+          - OrgName
+          - EnvName
+      - Label:
+          default: Remote Desktop Configuration
+        Parameters:
+          - KeyName
+          - RDPUserName
+          - RDPSourceCidr
+          - RDPPort
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - WindowsAmiId
+          - InstanceType
+          - RootVolumeSize
+          - ComputerNameOverride
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - CreateVpc
+          - VpcId
+          - PublicSubnetId
+          - VpcCidrBlock
+          - PublicSubnet1CidrBlock
+          - PublicSubnet2CidrBlock
+    ParameterLabels:
+      Name:
+        default: Resource Name
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment Name
+      KeyName:
+        default: EC2 Key Pair
+      RDPUserName:
+        default: RDP User Name
+      RDPSourceCidr:
+        default: RDP Source CIDR
+      RDPPort:
+        default: RDP Port
+      WindowsAmiId:
+        default: Windows AMI ID
+      InstanceType:
+        default: Instance Type
+      RootVolumeSize:
+        default: Root Volume Size
+      ComputerNameOverride:
+        default: Windows Computer Name Override
+      CreateVpc:
+        default: Create VPC
+      VpcId:
+        default: VPC ID
+      PublicSubnetId:
+        default: Public Subnet ID
+      VpcCidrBlock:
+        default: VPC CIDR Block
+      PublicSubnet1CidrBlock:
+        default: Public Subnet 1 CIDR Block
+      PublicSubnet2CidrBlock:
+        default: Public Subnet 2 CIDR Block
+
+Parameters:
+  Name:
+    Description: Unique name/identifier for the Windows desktop instance.
+    Type: String
+    Default: rdp
+    MinLength: 3
+    MaxLength: 24
+    AllowedPattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+    ConstraintDescription: Use lowercase letters, numbers, and hyphens only.
+  OrgName:
+    Description: The name of the organization.
+    Type: String
+    Default: iscale
+    AllowedPattern: "^[a-z]+(-[a-z]+)*$"
+    ConstraintDescription: Organization must only contain lowercase letters and hyphen.
+    MaxLength: 24
+  EnvName:
+    Description: The name of the environment.
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Production
+      - Staging
+      - Development
+      - Test
+  KeyName:
+    Description: EC2 key pair used to decrypt the initial Windows Administrator password.
+    Type: AWS::EC2::KeyPair::KeyName
+  RDPUserName:
+    Description: Local Windows user to create for Remote Desktop access.
+    Type: String
+    Default: iscale
+    MinLength: 1
+    MaxLength: 20
+    AllowedPattern: "^[A-Za-z][A-Za-z0-9._-]*$"
+    ConstraintDescription: Start with a letter and use letters, numbers, dot, underscore, or hyphen.
+  RDPSourceCidr:
+    Description: CIDR allowed to reach RDP. Use your current public IP with /32 whenever possible.
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(3[0-2]|[12]?[0-9])$"
+    ConstraintDescription: Must be a valid IPv4 CIDR, for example 203.0.113.10/32.
+  RDPPort:
+    Description: TCP port for Remote Desktop.
+    Type: Number
+    Default: 3389
+    MinValue: 1
+    MaxValue: 65535
+  WindowsAmiId:
+    Description: Latest Microsoft Windows Server 2022 Full Base AMI from the selected AWS Region.
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base
+  InstanceType:
+    Description: EC2 instance type for the Windows desktop.
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - m6i.large
+      - m6i.xlarge
+  RootVolumeSize:
+    Description: Root EBS volume size in GiB.
+    Type: Number
+    Default: 80
+    MinValue: 50
+    MaxValue: 1024
+  ComputerNameOverride:
+    Description: Optional Windows computer name. Leave blank to use ISCALE-FR or ISCALE-SG based on the deployment region.
+    Type: String
+    Default: ''
+    MaxLength: 15
+    AllowedPattern: "^$|^[A-Za-z0-9-]+$"
+    ConstraintDescription: Leave blank or use letters, numbers, and hyphens only.
+  CreateVpc:
+    Description: Select yes to create a VPC with two public subnets. Select no to use the existing VpcId and PublicSubnetId parameters.
+    Type: String
+    Default: 'no'
+    AllowedValues:
+      - 'yes'
+      - 'no'
+  VpcId:
+    Description: Existing VPC ID in the deployment region. Required when CreateVpc is no.
+    Type: String
+    Default: ''
+    AllowedPattern: "^$|^vpc-[a-f0-9]+$"
+    ConstraintDescription: Leave blank when CreateVpc is yes, or provide a valid VPC ID.
+  PublicSubnetId:
+    Description: Existing public subnet ID in the deployment region. Required when CreateVpc is no.
+    Type: String
+    Default: ''
+    AllowedPattern: "^$|^subnet-[a-f0-9]+$"
+    ConstraintDescription: Leave blank when CreateVpc is yes, or provide a valid subnet ID.
+  VpcCidrBlock:
+    Description: CIDR block to use when CreateVpc is yes.
+    Type: String
+    Default: 10.73.0.0/24
+    AllowedPattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(3[0-2]|[12]?[0-9])$"
+    ConstraintDescription: Must be a valid IPv4 CIDR.
+  PublicSubnet1CidrBlock:
+    Description: First public subnet CIDR block to use when CreateVpc is yes.
+    Type: String
+    Default: 10.73.0.0/25
+    AllowedPattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(3[0-2]|[12]?[0-9])$"
+    ConstraintDescription: Must be a valid IPv4 CIDR inside the VPC CIDR block.
+  PublicSubnet2CidrBlock:
+    Description: Second public subnet CIDR block to use when CreateVpc is yes.
+    Type: String
+    Default: 10.73.0.128/25
+    AllowedPattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])/(3[0-2]|[12]?[0-9])$"
+    ConstraintDescription: Must be a valid IPv4 CIDR inside the VPC CIDR block.
+
+Mappings:
+  EnvShort:
+    Production:
+      Name: prd
+    Staging:
+      Name: stg
+    Development:
+      Name: dev
+    Test:
+      Name: test
+  RegionConfig:
+    eu-west-3:
+      Short: ew3
+      LocationName: Paris
+      ComputerName: ISCALE-FR
+      TimeZone: Romance Standard Time
+    ap-southeast-1:
+      Short: ase1
+      LocationName: Singapore
+      ComputerName: ISCALE-SG
+      TimeZone: Singapore Standard Time
+
+Conditions:
+  IsCreateVpc: !Equals [!Ref CreateVpc, 'yes']
+  HasComputerNameOverride: !Not [!Equals [!Ref ComputerNameOverride, '']]
+
+Resources:
+  VPC:
+    Condition: IsCreateVpc
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidrBlock
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionConfig, !Ref 'AWS::Region', Short], !Ref Name, vpc]]
+
+  InternetGateway:
+    Condition: IsCreateVpc
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionConfig, !Ref 'AWS::Region', Short], !Ref Name, igw]]
+
+  VPCGatewayAttachment:
+    Condition: IsCreateVpc
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Condition: IsCreateVpc
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet1CidrBlock
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionConfig, !Ref 'AWS::Region', Short], !Ref Name, public, subnet, 1]]
+
+  PublicSubnet2:
+    Condition: IsCreateVpc
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet2CidrBlock
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionConfig, !Ref 'AWS::Region', Short], !Ref Name, public, subnet, 2]]
+
+  PublicRouteTable:
+    Condition: IsCreateVpc
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionConfig, !Ref 'AWS::Region', Short], !Ref Name, public, rt]]
+
+  PublicRoute:
+    Condition: IsCreateVpc
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet1RouteTableAssociation:
+    Condition: IsCreateVpc
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Condition: IsCreateVpc
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  RDPUserSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub Local Windows Remote Desktop credentials for ${AWS::StackName}.
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${RDPUserName}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+        RequireEachIncludedType: true
+      Name: !Sub '${AWS::StackName}-${Name}-rdp-user'
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionConfig, !Ref 'AWS::Region', Short], !Ref Name, rdp, user]]
+
+  WindowsDesktopSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub
+        - Allow Remote Desktop to the ${LocationName} Windows desktop.
+        - LocationName: !FindInMap [RegionConfig, !Ref 'AWS::Region', LocationName]
+      VpcId: !If [IsCreateVpc, !Ref VPC, !Ref VpcId]
+      SecurityGroupIngress:
+        - Description: Remote Desktop
+          IpProtocol: tcp
+          FromPort: !Ref RDPPort
+          ToPort: !Ref RDPPort
+          CidrIp: !Ref RDPSourceCidr
+      SecurityGroupEgress:
+        - Description: Allow outbound internet access
+          IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionConfig, !Ref 'AWS::Region', Short], !Ref Name, sg]]
+
+  WindowsDesktopRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ReadRDPUserSecret
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref RDPUserSecret
+      Path: /
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionConfig, !Ref 'AWS::Region', Short], !Ref Name, role]]
+
+  WindowsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WindowsDesktopRole
+
+  WindowsDesktopInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WindowsAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref WindowsInstanceProfile
+      KeyName: !Ref KeyName
+      DisableApiTermination: false
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: !Ref RootVolumeSize
+            VolumeType: gp3
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref WindowsDesktopSecurityGroup
+          SubnetId: !If [IsCreateVpc, !Ref PublicSubnet1, !Ref PublicSubnetId]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            <powershell>
+            Rename-Computer -NewName "${ComputerName}" -Force
+            Set-TimeZone -Id "${TimeZone}"
+            $secretId = "${RDPUserSecretArn}"
+            $secretJson = $null
+            if (Get-Command aws -ErrorAction SilentlyContinue) {
+              $secretJson = & aws secretsmanager get-secret-value --secret-id $secretId --query SecretString --output text --region "${AWS::Region}"
+            }
+            if (-not $secretJson) {
+              Import-Module AWSPowerShell -ErrorAction SilentlyContinue
+              Import-Module AWSPowerShell.NetCore -ErrorAction SilentlyContinue
+              if (Get-Command Get-SECSecretValue -ErrorAction SilentlyContinue) {
+                $secretJson = (Get-SECSecretValue -SecretId $secretId -Region "${AWS::Region}").SecretString
+              }
+            }
+            if (-not $secretJson) {
+              throw "Unable to retrieve RDP user secret from Secrets Manager."
+            }
+            $rdpSecret = $secretJson | ConvertFrom-Json
+            $rdpPassword = ConvertTo-SecureString $rdpSecret.password -AsPlainText -Force
+            New-LocalUser -Name $rdpSecret.username -Password $rdpPassword -FullName $rdpSecret.username -PasswordNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member $rdpSecret.username
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $rdpSecret.username
+            Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "PortNumber" -Value ${RDPPort}
+            Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+            Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+            New-NetFirewallRule -DisplayName "Remote Desktop Custom Port ${RDPPort}" -Direction Inbound -Protocol TCP -LocalPort ${RDPPort} -Action Allow
+            Restart-Computer -Force
+            </powershell>
+          - ComputerName: !If
+              - HasComputerNameOverride
+              - !Ref ComputerNameOverride
+              - !FindInMap [RegionConfig, !Ref 'AWS::Region', ComputerName]
+            RDPUserSecretArn: !Ref RDPUserSecret
+            TimeZone: !FindInMap [RegionConfig, !Ref 'AWS::Region', TimeZone]
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref OrgName, !FindInMap [EnvShort, !Ref EnvName, Name], !FindInMap [RegionConfig, !Ref 'AWS::Region', Short], !Ref Name]]
+        - Key: RegionIntent
+          Value: !Sub
+            - ${LocationName} ${AWS::Region}
+            - LocationName: !FindInMap [RegionConfig, !Ref 'AWS::Region', LocationName]
+        - Key: NoVPN
+          Value: 'true'
+
+Outputs:
+  InstanceId:
+    Description: Windows desktop EC2 instance ID.
+    Value: !Ref WindowsDesktopInstance
+  AvailabilityZone:
+    Description: Availability Zone used by the Windows desktop instance.
+    Value: !GetAtt WindowsDesktopInstance.AvailabilityZone
+  PublicIp:
+    Description: Public IPv4 address for Remote Desktop.
+    Value: !GetAtt WindowsDesktopInstance.PublicIp
+  RDPConnectionAddress:
+    Description: Address to use in a Remote Desktop client.
+    Value: !Sub
+      - '${PublicIp}:${RDPPort}'
+      - PublicIp: !GetAtt WindowsDesktopInstance.PublicIp
+  RDPUserName:
+    Description: Local Windows user created for Remote Desktop access.
+    Value: !Ref RDPUserName
+  RDPUserSecretArn:
+    Description: Secrets Manager secret ARN containing the RDP username and password.
+    Value: !Ref RDPUserSecret
+  Region:
+    Description: AWS Region where the stack is deployed.
+    Value: !Ref 'AWS::Region'
+  LocationName:
+    Description: Location inferred from the deployment region.
+    Value: !FindInMap [RegionConfig, !Ref 'AWS::Region', LocationName]
+  VpcId:
+    Description: VPC ID used by the Windows desktop instance.
+    Value: !If [IsCreateVpc, !Ref VPC, !Ref VpcId]
+  PublicSubnetId:
+    Description: Public subnet ID used by the Windows desktop instance.
+    Value: !If [IsCreateVpc, !Ref PublicSubnet1, !Ref PublicSubnetId]
+  PublicSubnetId2:
+    Condition: IsCreateVpc
+    Description: Second public subnet ID created with the optional VPC.
+    Value: !Ref PublicSubnet2
+  SecurityGroupId:
+    Description: Security group controlling RDP access.
+    Value: !Ref WindowsDesktopSecurityGroup
