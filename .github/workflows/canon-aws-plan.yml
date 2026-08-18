@@ -1,0 +1,150 @@
+name: Canon AWS Plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: AWS region
+        required: true
+        default: ap-southeast-1
+      stack_name:
+        description: Canon CloudFormation stack name
+        required: true
+        default: canon-prd-ase1-iam
+      template_path:
+        description: Template path in this repository
+        required: true
+        default: clients/canon/canon-iam.yaml
+      create_change_set:
+        description: Create a non-executed CloudFormation change set
+        required: true
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - clients/canon/**
+      - .github/workflows/canon-aws-plan.yml
+  push:
+    branches:
+      - master
+    paths:
+      - clients/canon/**
+      - .github/workflows/canon-aws-plan.yml
+
+permissions:
+  contents: read
+  # Required for GitHub OIDC. Do not add static AWS access keys to this workflow.
+  id-token: write
+
+env:
+  CANON_AWS_ACCOUNT_ID: "780347486043"
+  DEFAULT_CANON_AWS_REGION: ap-southeast-1
+
+jobs:
+  validate:
+    name: Validate Canon templates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: ${{ vars.CANON_AWS_ROLE_TO_ASSUME != '' && github.event_name != 'pull_request' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CANON_AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ github.event.inputs.aws_region || env.DEFAULT_CANON_AWS_REGION }}
+
+      - name: Confirm Canon AWS account
+        if: ${{ vars.CANON_AWS_ROLE_TO_ASSUME != '' && github.event_name != 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "${actual_account_id}" != "${CANON_AWS_ACCOUNT_ID}" ]]; then
+            echo "Expected Canon AWS account ${CANON_AWS_ACCOUNT_ID}, got ${actual_account_id}."
+            exit 1
+          fi
+
+      - name: Validate Canon CloudFormation templates
+        if: ${{ vars.CANON_AWS_ROLE_TO_ASSUME != '' && github.event_name != 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r template; do
+            echo "Validating ${template}"
+            aws cloudformation validate-template --template-body "file://${template}" >/dev/null
+          done < <(find clients/canon -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
+
+      - name: Skip AWS validation when role is not configured
+        if: ${{ vars.CANON_AWS_ROLE_TO_ASSUME == '' || github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          echo "AWS validation is skipped until this run is allowed to assume the Canon role."
+
+  change-set:
+    name: Prepare change set
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.create_change_set == 'true' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CANON_AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      - name: Confirm Canon AWS account
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "${actual_account_id}" != "${CANON_AWS_ACCOUNT_ID}" ]]; then
+            echo "Expected Canon AWS account ${CANON_AWS_ACCOUNT_ID}, got ${actual_account_id}."
+            exit 1
+          fi
+
+      - name: Create non-executed change set
+        id: change-set
+        shell: bash
+        env:
+          STACK_NAME: ${{ github.event.inputs.stack_name }}
+          TEMPLATE_PATH: ${{ github.event.inputs.template_path }}
+        run: |
+          set -euo pipefail
+          change_set_name="canon-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          aws cloudformation create-change-set \
+            --stack-name "${STACK_NAME}" \
+            --change-set-name "${change_set_name}" \
+            --change-set-type UPDATE \
+            --template-body "file://${TEMPLATE_PATH}" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --description "Prepared by GitHub Actions run ${GITHUB_RUN_ID}; not executed by this workflow."
+
+          echo "Waiting for change set creation..."
+          if ! aws cloudformation wait change-set-create-complete \
+            --stack-name "${STACK_NAME}" \
+            --change-set-name "${change_set_name}"; then
+            status_reason="$(aws cloudformation describe-change-set \
+              --stack-name "${STACK_NAME}" \
+              --change-set-name "${change_set_name}" \
+              --query 'StatusReason' \
+              --output text)"
+            echo "${status_reason}"
+            if [[ "${status_reason}" == *"The submitted information didn't contain changes"* ]]; then
+              exit 0
+            fi
+            exit 1
+          fi
+
+          aws cloudformation describe-change-set \
+            --stack-name "${STACK_NAME}" \
+            --change-set-name "${change_set_name}" \
+            --query 'Changes[].ResourceChange.{Action:Action,LogicalResourceId:LogicalResourceId,ResourceType:ResourceType,Replacement:Replacement}' \
+            --output table
+
+          echo "Created change set ${change_set_name}. Review it in CloudFormation; this workflow does not execute it."

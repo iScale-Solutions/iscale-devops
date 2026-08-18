@@ -1,0 +1,282 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Bootstrap GitHub Actions access for Canon operations in this repository.
+  Defaults to plan-only permissions so CI can inspect AWS state and prepare
+  CloudFormation change sets without executing changes.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: GitHub Repository
+        Parameters:
+          - GitHubOrg
+          - GitHubRepo
+          - GitHubBranch
+      - Label:
+          default: AWS Access
+        Parameters:
+          - RoleName
+          - CreateGitHubOIDCProvider
+          - PermissionMode
+          - CanonStackNamePrefix
+          - SharedIncludeBucketName
+          - ArtifactBucketName
+    ParameterLabels:
+      GitHubOrg:
+        default: GitHub organization or user
+      GitHubRepo:
+        default: GitHub repository
+      GitHubBranch:
+        default: GitHub branch
+      RoleName:
+        default: IAM role name
+      CreateGitHubOIDCProvider:
+        default: Create GitHub OIDC provider
+      PermissionMode:
+        default: Permission mode
+      CanonStackNamePrefix:
+        default: Canon stack name prefix
+      SharedIncludeBucketName:
+        default: Shared include bucket name
+      ArtifactBucketName:
+        default: Existing artifact bucket name
+
+Parameters:
+  GitHubOrg:
+    Description: GitHub owner for this repository.
+    Type: String
+    Default: iScale-Solutions
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  GitHubRepo:
+    Description: GitHub repository allowed to assume the role.
+    Type: String
+    Default: iscale-devops
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  GitHubBranch:
+    Description: Branch allowed to assume the role.
+    Type: String
+    Default: master
+    AllowedPattern: "^[A-Za-z0-9_./-]+$"
+  RoleName:
+    Description: Name for the GitHub Actions IAM role.
+    Type: String
+    Default: canon-github-actions
+    AllowedPattern: "^[A-Za-z0-9+=,.@_-]+$"
+    MaxLength: 64
+  CreateGitHubOIDCProvider:
+    Description: Set to no if token.actions.githubusercontent.com already exists in this AWS account.
+    Type: String
+    Default: "no"
+    AllowedValues:
+      - "yes"
+      - "no"
+  PermissionMode:
+    Description: PlanOnly cannot execute change sets. Deploy can execute CloudFormation changes and should be enabled only after drift is understood.
+    Type: String
+    Default: PlanOnly
+    AllowedValues:
+      - PlanOnly
+      - Deploy
+  CanonStackNamePrefix:
+    Description: Prefix for Canon CloudFormation stack names this role may plan or deploy.
+    Type: String
+    Default: canon-
+    AllowedPattern: "^[A-Za-z0-9-]+$"
+  SharedIncludeBucketName:
+    Description: Existing S3 bucket containing shared CloudFormation AWS::Include files.
+    Type: String
+    Default: iscale-dev-cloudformation
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+  ArtifactBucketName:
+    Description: Optional existing S3 bucket for packaged CloudFormation artifacts. Leave blank to skip S3 permissions.
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+
+Conditions:
+  ShouldCreateGitHubOIDCProvider: !Equals [!Ref CreateGitHubOIDCProvider, "yes"]
+  IsDeployMode: !Equals [!Ref PermissionMode, Deploy]
+  HasArtifactBucket: !Not [!Equals [!Ref ArtifactBucketName, ""]]
+
+Resources:
+  GitHubOIDCProvider:
+    Condition: ShouldCreateGitHubOIDCProvider
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  CanonGitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: !Sub GitHub Actions role for Canon workflows in ${GitHubOrg}/${GitHubRepo}.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateGitHubOIDCProvider
+                - !Ref GitHubOIDCProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${GitHubBranch}
+      Policies:
+        - PolicyName: CanonPlanCloudFormation
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: ValidateTemplates
+                Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+              - Sid: ReadCloudFormation
+                Effect: Allow
+                Action:
+                  - cloudformation:Describe*
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:Get*
+                  - cloudformation:List*
+                Resource: "*"
+              - Sid: PrepareCanonChangeSets
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                Resource:
+                  - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/${CanonStackNamePrefix}*
+                  - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:changeSet/${CanonStackNamePrefix}*/*
+              - Sid: ReadSharedCloudFormationIncludes
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::${SharedIncludeBucketName}/include/*
+        - PolicyName: CanonReadCurrentState
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: ReadIAMState
+                Effect: Allow
+                Action:
+                  - iam:Get*
+                  - iam:List*
+                  - iam:GenerateServiceLastAccessedDetails
+                  - iam:GetServiceLastAccessedDetails
+                Resource: "*"
+              - Sid: ReadCommonStackState
+                Effect: Allow
+                Action:
+                  - acm:Describe*
+                  - acm:List*
+                  - application-autoscaling:Describe*
+                  - autoscaling:Describe*
+                  - cloudwatch:Describe*
+                  - cloudwatch:Get*
+                  - cloudwatch:List*
+                  - ec2:Describe*
+                  - elasticbeanstalk:Describe*
+                  - elasticbeanstalk:List*
+                  - elasticloadbalancing:Describe*
+                  - events:Describe*
+                  - events:List*
+                  - lambda:Get*
+                  - lambda:List*
+                  - logs:Describe*
+                  - logs:Get*
+                  - logs:List*
+                  - rds:Describe*
+                  - rds:List*
+                  - route53:Get*
+                  - route53:List*
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:GetBucketTagging
+                  - s3:ListAllMyBuckets
+                  - s3:ListBucket
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ListSecrets
+                  - sns:Get*
+                  - sns:List*
+                  - sqs:Get*
+                  - sqs:List*
+                  - ssm:Describe*
+                  - ssm:Get*
+                  - ssm:List*
+                Resource: "*"
+        - !If
+          - HasArtifactBucket
+          - PolicyName: CanonArtifactBucketAccess
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Sid: UseArtifactBucket
+                  Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:PutObject
+                    - s3:DeleteObject
+                  Resource: !Sub arn:aws:s3:::${ArtifactBucketName}/canon/*
+                - Sid: ListArtifactBucket
+                  Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                  Resource: !Sub arn:aws:s3:::${ArtifactBucketName}
+                  Condition:
+                    StringLike:
+                      s3:prefix:
+                        - canon/*
+          - !Ref AWS::NoValue
+        - !If
+          - IsDeployMode
+          - PolicyName: CanonDeployCloudFormation
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Sid: ExecuteCanonChangeSets
+                  Effect: Allow
+                  Action:
+                    - cloudformation:ExecuteChangeSet
+                  Resource:
+                    - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/${CanonStackNamePrefix}*
+                    - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:changeSet/${CanonStackNamePrefix}*/*
+                - Sid: PassCanonCloudFormationRoles
+                  Effect: Allow
+                  Action:
+                    - iam:PassRole
+                  Resource:
+                    - !Sub arn:aws:iam::${AWS::AccountId}:role/${CanonStackNamePrefix}*
+                  Condition:
+                    StringEquals:
+                      iam:PassedToService: cloudformation.amazonaws.com
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Client
+          Value: Canon
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Repository
+          Value: !Sub ${GitHubOrg}/${GitHubRepo}
+
+Outputs:
+  RoleArn:
+    Description: Store this value as GitHub repository variable CANON_AWS_ROLE_TO_ASSUME.
+    Value: !GetAtt CanonGitHubActionsRole.Arn
+  PermissionMode:
+    Description: Current role permission mode.
+    Value: !Ref PermissionMode
+  AllowedSubject:
+    Description: GitHub OIDC subject allowed to assume this role.
+    Value: !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${GitHubBranch}
