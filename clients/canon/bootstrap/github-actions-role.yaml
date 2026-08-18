@@ -20,6 +20,7 @@ Metadata:
           - CreateGitHubOIDCProvider
           - PermissionMode
           - CanonStackNamePrefix
+          - BootstrapStackName
           - SharedIncludeBucketName
           - ArtifactBucketName
     ParameterLabels:
@@ -37,6 +38,8 @@ Metadata:
         default: Permission mode
       CanonStackNamePrefix:
         default: Canon stack name prefix
+      BootstrapStackName:
+        default: Bootstrap stack name
       SharedIncludeBucketName:
         default: Shared include bucket name
       ArtifactBucketName:
@@ -82,6 +85,11 @@ Parameters:
     Description: Prefix for Canon CloudFormation stack names this role may plan or deploy.
     Type: String
     Default: canon-
+    AllowedPattern: "^[A-Za-z0-9-]+$"
+  BootstrapStackName:
+    Description: Name of this bootstrap stack. The GitHub role may execute changes only for this stack while PermissionMode remains PlanOnly.
+    Type: String
+    Default: canon-prd-ase1-github-actions-bootstrap
     AllowedPattern: "^[A-Za-z0-9-]+$"
   SharedIncludeBucketName:
     Description: Existing S3 bucket containing shared CloudFormation AWS::Include files.
@@ -216,6 +224,47 @@ Resources:
                   - ssm:Get*
                   - ssm:List*
                 Resource: "*"
+        - PolicyName: CanonManageBootstrapStack
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: ManageOnlyThisBootstrapStack
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                Resource:
+                  - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/${BootstrapStackName}/*
+                  - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:changeSet/${BootstrapStackName}*/*
+              - Sid: UpdateThisGitHubActionsRole
+                Effect: Allow
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:PutRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${RoleName}
+              - Sid: UpdateGitHubOIDCProviderWhenManagedByThisStack
+                Effect: Allow
+                Action:
+                  - iam:AddClientIDToOpenIDConnectProvider
+                  - iam:GetOpenIDConnectProvider
+                  - iam:RemoveClientIDFromOpenIDConnectProvider
+                  - iam:TagOpenIDConnectProvider
+                  - iam:UntagOpenIDConnectProvider
+                  - iam:UpdateOpenIDConnectProviderThumbprint
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
         - !If
           - HasArtifactBucket
           - PolicyName: CanonArtifactBucketAccess

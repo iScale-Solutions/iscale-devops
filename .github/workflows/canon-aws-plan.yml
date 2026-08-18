@@ -16,7 +16,12 @@ on:
         required: true
         default: clients/canon/canon-iam.yaml
       create_change_set:
-        description: Create a non-executed CloudFormation change set
+        description: Create a CloudFormation change set without executing it
+        required: true
+        type: boolean
+        default: false
+      execute_change_set:
+        description: Execute the change set. Only allowed for the bootstrap stack.
         required: true
         type: boolean
         default: false
@@ -39,6 +44,8 @@ permissions:
 env:
   CANON_AWS_ACCOUNT_ID: "780347486043"
   DEFAULT_CANON_AWS_REGION: ap-southeast-1
+  CANON_BOOTSTRAP_STACK_NAME: canon-prd-ase1-github-actions-bootstrap
+  CANON_BOOTSTRAP_TEMPLATE_PATH: clients/canon/bootstrap/github-actions-role.yaml
 
 jobs:
   validate:
@@ -86,7 +93,7 @@ jobs:
     name: Prepare change set
     runs-on: ubuntu-latest
     needs: validate
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.create_change_set == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true') }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -147,4 +154,18 @@ jobs:
             --query 'Changes[].ResourceChange.{Action:Action,LogicalResourceId:LogicalResourceId,ResourceType:ResourceType,Replacement:Replacement}' \
             --output table
 
-          echo "Created change set ${change_set_name}. Review it in CloudFormation; this workflow does not execute it."
+          if [[ "${{ github.event.inputs.execute_change_set }}" == "true" ]]; then
+            if [[ "${STACK_NAME}" != "${CANON_BOOTSTRAP_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_BOOTSTRAP_TEMPLATE_PATH}" ]]; then
+              echo "Refusing to execute change set. Execution is only allowed for ${CANON_BOOTSTRAP_STACK_NAME} using ${CANON_BOOTSTRAP_TEMPLATE_PATH}."
+              exit 1
+            fi
+
+            echo "Executing bootstrap change set ${change_set_name}."
+            aws cloudformation execute-change-set \
+              --stack-name "${STACK_NAME}" \
+              --change-set-name "${change_set_name}"
+            aws cloudformation wait stack-update-complete --stack-name "${STACK_NAME}"
+            echo "Bootstrap stack update completed."
+          else
+            echo "Created change set ${change_set_name}. Review it in CloudFormation; this workflow did not execute it."
+          fi

@@ -38,6 +38,7 @@ aws cloudformation deploy \
     GitHubBranch=master \
     CreateGitHubOIDCProvider=no \
     PermissionMode=PlanOnly \
+    BootstrapStackName=canon-prd-ase1-github-actions-bootstrap \
     SharedIncludeBucketName=iscale-dev-cloudformation
 ```
 
@@ -56,6 +57,20 @@ aws cloudformation describe-stacks \
 ## Safety Model
 
 - `PlanOnly` can validate templates, inspect IAM and stack state, detect drift, and create or delete change sets.
-- `PlanOnly` cannot execute change sets.
+- `PlanOnly` can execute change sets only for `canon-prd-ase1-github-actions-bootstrap`, so the GitHub Actions role can update its own bootstrap permissions after the first manual deploy.
+- `PlanOnly` cannot execute change sets for other Canon stacks.
 - Keep existing Canon IAM stacks out of automatic deployment until the repo has been reconciled against the live AWS account.
 - Change `PermissionMode` to `Deploy` only after manual drift has been reviewed and the stack ownership model is clear.
+
+## Updating The Bootstrap From GitHub
+
+After this self-management permission has been deployed once, use the `Canon AWS Plan` workflow manually with:
+
+```text
+stack_name=canon-prd-ase1-github-actions-bootstrap
+template_path=clients/canon/bootstrap/github-actions-role.yaml
+create_change_set=true
+execute_change_set=true
+```
+
+The workflow refuses to execute change sets for any other stack while the role remains in `PlanOnly`.
