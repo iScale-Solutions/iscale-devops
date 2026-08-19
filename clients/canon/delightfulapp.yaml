@@ -38,6 +38,14 @@ Parameters:
     Default: app-260818_103022276502
     Description: Existing Elastic Beanstalk application version to preserve during infrastructure updates
 
+  EnableStagingRdsSchedule:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enable scheduled start and stop automation for the staging RDS instance
+
   NotificationEmail:
     Type: String
     Default: iannis@iscale-solutions.com
@@ -45,6 +53,9 @@ Parameters:
 
 Conditions:
   IsStaging: !Equals [ !Ref DeploymentMode, staging ]
+  EnableStagingRdsScheduleCondition: !And
+    - !Condition IsStaging
+    - !Equals [ !Ref EnableStagingRdsSchedule, "true" ]
 
 Resources:
 
@@ -545,7 +556,7 @@ Resources:
   #########################################
 
   RDSStartStopRole:
-    Condition: IsStaging
+    Condition: EnableStagingRdsScheduleCondition
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -569,7 +580,7 @@ Resources:
                 Resource: !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:cmp-delightful-db-staging
 
   RDSStartStopFunction:
-    Condition: IsStaging
+    Condition: EnableStagingRdsScheduleCondition
     Type: AWS::Lambda::Function
     Properties:
       Runtime: python3.12
@@ -595,7 +606,7 @@ Resources:
               return {"status": action}
 
   StopRDSRule:
-    Condition: IsStaging
+    Condition: EnableStagingRdsScheduleCondition
     Type: AWS::Events::Rule
     Properties:
       ScheduleExpression: cron(0 14 * * ? *)   # 22:00 PH ~ 14:00 UTC
@@ -605,7 +616,7 @@ Resources:
           Input: '{"action":"stop"}'
 
   StartRDSRule:
-    Condition: IsStaging
+    Condition: EnableStagingRdsScheduleCondition
     Type: AWS::Events::Rule
     Properties:
       ScheduleExpression: cron(0 0 * * ? *)    # 08:00 PH ~ 00:00 UTC
@@ -615,7 +626,7 @@ Resources:
           Input: '{"action":"start"}'
 
   AllowEventsInvokeLambda1:
-    Condition: IsStaging
+    Condition: EnableStagingRdsScheduleCondition
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref RDSStartStopFunction
@@ -624,7 +635,7 @@ Resources:
       SourceArn: !GetAtt StopRDSRule.Arn
 
   AllowEventsInvokeLambda2:
-    Condition: IsStaging
+    Condition: EnableStagingRdsScheduleCondition
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref RDSStartStopFunction
