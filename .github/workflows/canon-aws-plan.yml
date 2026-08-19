@@ -242,13 +242,30 @@ jobs:
             exit 1
           fi
 
-          aws cloudformation create-change-set \
+          parameter_args=()
+          stack_parameters_file="$(mktemp)"
+          aws cloudformation describe-stacks \
             --stack-name "${STACK_NAME}" \
-            --change-set-name "${change_set_name}" \
-            --change-set-type UPDATE \
-            --template-body "file://${TEMPLATE_PATH}" \
-            --capabilities CAPABILITY_NAMED_IAM \
+            --query 'Stacks[0].Parameters[].ParameterKey' \
+            --output json > "${stack_parameters_file}"
+          while IFS= read -r parameter_key; do
+            parameter_args+=("ParameterKey=${parameter_key},UsePreviousValue=true")
+          done < <(jq -r '.[]?' "${stack_parameters_file}")
+
+          create_change_set_args=(
+            --stack-name "${STACK_NAME}"
+            --change-set-name "${change_set_name}"
+            --change-set-type UPDATE
+            --template-body "file://${TEMPLATE_PATH}"
+            --capabilities CAPABILITY_NAMED_IAM
             --description "Prepared by GitHub Actions run ${GITHUB_RUN_ID}; not executed by this workflow."
+          )
+          if [[ "${#parameter_args[@]}" -gt 0 ]]; then
+            create_change_set_args+=(--parameters "${parameter_args[@]}")
+          fi
+
+          aws cloudformation create-change-set \
+            "${create_change_set_args[@]}"
 
           echo "Waiting for change set creation..."
           if ! aws cloudformation wait change-set-create-complete \
