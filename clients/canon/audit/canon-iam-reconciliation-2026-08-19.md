@@ -149,6 +149,10 @@ These groups are referenced or used live but are not created by `canon-iam.yaml`
 - `Billing`
 - `CloudWatchGroup`
 
+Ownership note:
+
+- `MFA`, `Administrators`, scheduler groups, and some app/service policies are owned by other stacks and are out of scope for `canon-iam.yaml` reconciliation.
+
 The repo-defined Canon staff users still rely on existing external groups:
 
 - `Administrators`
@@ -158,7 +162,8 @@ The live `MFA` group contains an inline policy named `canon-mfa-user-policy`. `c
 
 Recommendation:
 
-- Keep treating these as existing shared/account foundation groups unless we explicitly decide to import them into a Canon account-foundation template.
+- Keep treating these as externally owned shared/account foundation groups.
+- Do not import them into `canon-iam.yaml`.
 
 ## Scheduler Groups
 
@@ -171,6 +176,10 @@ Several live groups are generated-looking scheduler groups, for example:
 - `canon-prd-ase1-scheduler-RedRe-UserPermissionsGroup-r0m0YZsvohmf`
 
 These should not be folded into `canon-iam.yaml` without checking the scheduler stack/template ownership.
+
+Ownership note:
+
+- These scheduler groups are owned by another stack and are out of scope for this IAM reconciliation.
 
 ## Customer-Managed Policies Not In Repo
 
@@ -188,13 +197,14 @@ Recommendation:
 - Classify each policy as account-foundation, app-specific, or legacy/manual.
 - Bring app-specific policies into the appropriate app templates before deploying those stacks.
 - Keep service-role generated policies out of hand-authored templates unless they are intentionally managed.
+- Do not move externally owned app/service policies into `canon-iam.yaml`.
 
 ## Suggested Next Steps
 
-1. Run CloudFormation inventory for Singapore with `include_cloudformation=true` and `include_drift=false` to determine which stack owns `canon-iam.yaml` resources.
-2. Create a draft `canon-iam.yaml` update that preserves live ThinkBit permissions and the `SSM` `Events` statement.
-3. Decide what to do with the three repo users missing live:
+1. Create a draft `canon-iam.yaml` update that preserves live ThinkBit permissions and the `SSM` `Events` statement.
+2. Decide what to do with the three repo users missing live:
    - restore them,
    - remove them from the template,
    - or leave them pending until Canon confirms.
+3. Keep `MFA`, `Administrators`, scheduler groups, and externally owned app/service policies out of `canon-iam.yaml`.
 4. Do not execute an IAM change set until the change set shows no unintended deletes or permission removals.
