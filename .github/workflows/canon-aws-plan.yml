@@ -43,6 +43,11 @@ on:
         required: true
         type: boolean
         default: false
+      delete_delightful_cloudwatch_companion_stack:
+        description: Delete the obsolete Delightful staging CloudWatch Agent companion stack after the app stack owns the policy
+        required: true
+        type: boolean
+        default: false
       cleanup_delightful_rds_schedule:
         description: Delete orphaned Delightful staging RDS schedule resources after CloudFormation cleanup permission recovery
         required: true
@@ -190,7 +195,7 @@ jobs:
     name: Prepare change set
     runs-on: ubuntu-latest
     needs: validate
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true' || github.event.inputs.continue_rollback == 'true' || github.event.inputs.existing_change_set_name != '' || github.event.inputs.inspect_stack_only == 'true' || github.event.inputs.cleanup_delightful_rds_schedule == 'true' || github.event.inputs.repair_delightful_app_zip_uploader == 'true') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true' || github.event.inputs.continue_rollback == 'true' || github.event.inputs.existing_change_set_name != '' || github.event.inputs.inspect_stack_only == 'true' || github.event.inputs.delete_delightful_cloudwatch_companion_stack == 'true' || github.event.inputs.cleanup_delightful_rds_schedule == 'true' || github.event.inputs.repair_delightful_app_zip_uploader == 'true') }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -233,6 +238,28 @@ jobs:
               --stack-name "${STACK_NAME}" \
               --query 'StackEvents[0:20].{Time:Timestamp,LogicalResourceId:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
               --output table
+            exit 0
+          fi
+
+          if [[ "${{ github.event.inputs.delete_delightful_cloudwatch_companion_stack }}" == "true" ]]; then
+            if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_CLOUDWATCH_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_CLOUDWATCH_TEMPLATE_PATH}" ]]; then
+              echo "Refusing delete. This mode is only allowed for ${CANON_DELIGHTFUL_CLOUDWATCH_STACK_NAME} using ${CANON_DELIGHTFUL_CLOUDWATCH_TEMPLATE_PATH}."
+              exit 1
+            fi
+
+            stack_status="$(aws cloudformation describe-stacks \
+              --stack-name "${STACK_NAME}" \
+              --query 'Stacks[0].StackStatus' \
+              --output text 2>/dev/null || true)"
+            if [[ -z "${stack_status}" ]]; then
+              echo "${STACK_NAME} does not exist."
+              exit 0
+            fi
+
+            echo "Deleting obsolete companion stack ${STACK_NAME}."
+            aws cloudformation delete-stack --stack-name "${STACK_NAME}"
+            aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}"
+            echo "Deleted ${STACK_NAME}."
             exit 0
           fi
 
