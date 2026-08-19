@@ -48,6 +48,15 @@ on:
         required: true
         type: boolean
         default: false
+      enable_delightful_staging_rds_schedule:
+        description: Override Delightful staging RDS schedule parameter for this deployment
+        required: true
+        type: choice
+        options:
+          - previous
+          - "true"
+          - "false"
+        default: previous
   pull_request:
     paths:
       - clients/canon/**
@@ -203,6 +212,7 @@ jobs:
           TEMPLATE_PATH: ${{ github.event.inputs.template_path }}
           ROLLBACK_RESOURCES_TO_SKIP: ${{ github.event.inputs.rollback_resources_to_skip }}
           EXISTING_CHANGE_SET_NAME: ${{ github.event.inputs.existing_change_set_name }}
+          ENABLE_DELIGHTFUL_STAGING_RDS_SCHEDULE: ${{ github.event.inputs.enable_delightful_staging_rds_schedule }}
         run: |
           set -euo pipefail
           change_set_name="canon-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -352,7 +362,15 @@ jobs:
               --query 'Stacks[0].Parameters[].ParameterKey' \
               --output json > "${stack_parameters_file}"; then
               while IFS= read -r parameter_key; do
-                parameter_args+=("ParameterKey=${parameter_key},UsePreviousValue=true")
+                if [[ "${parameter_key}" == "EnableStagingRdsSchedule" && "${ENABLE_DELIGHTFUL_STAGING_RDS_SCHEDULE}" != "previous" ]]; then
+                  if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ]]; then
+                    echo "Refusing EnableStagingRdsSchedule override outside ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}."
+                    exit 1
+                  fi
+                  parameter_args+=("ParameterKey=${parameter_key},ParameterValue=${ENABLE_DELIGHTFUL_STAGING_RDS_SCHEDULE}")
+                else
+                  parameter_args+=("ParameterKey=${parameter_key},UsePreviousValue=true")
+                fi
               done < <(jq -r '.[]?' "${stack_parameters_file}")
             else
               change_set_type="CREATE"
