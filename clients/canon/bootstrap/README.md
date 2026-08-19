@@ -54,6 +54,39 @@ aws cloudformation describe-stacks \
   --output text
 ```
 
+## OIDC Provider Check
+
+If GitHub Actions fails with `Could not assume role with OIDC: The web identity token provided could not be validated`, check the existing IAM OIDC provider in account `780347486043`:
+
+```bash
+aws iam get-open-id-connect-provider \
+  --open-id-connect-provider-arn arn:aws:iam::780347486043:oidc-provider/token.actions.githubusercontent.com
+```
+
+The provider must include:
+
+```text
+Url: token.actions.githubusercontent.com
+ClientIDList: sts.amazonaws.com
+ThumbprintList: 6938fd4d98bab03faadb97b34396831e3780aea1, 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+```
+
+If `sts.amazonaws.com` is missing, add it:
+
+```bash
+aws iam add-client-id-to-open-id-connect-provider \
+  --open-id-connect-provider-arn arn:aws:iam::780347486043:oidc-provider/token.actions.githubusercontent.com \
+  --client-id sts.amazonaws.com
+```
+
+If the thumbprints differ, update them:
+
+```bash
+aws iam update-open-id-connect-provider-thumbprint \
+  --open-id-connect-provider-arn arn:aws:iam::780347486043:oidc-provider/token.actions.githubusercontent.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+```
+
 ## Safety Model
 
 - `PlanOnly` can validate templates, inspect IAM and stack state, detect drift, and create or delete change sets.
