@@ -201,10 +201,26 @@ Recommendation:
 
 ## Suggested Next Steps
 
-1. Create a draft `canon-iam.yaml` update that preserves live ThinkBit permissions and the `SSM` `Events` statement.
-2. Decide what to do with the three repo users missing live:
+1. Review the `canon-iam.yaml` update that preserves live ThinkBit permissions and the `SSM` `Events` statement.
+2. Review the removal of the three repo users missing live:
    - restore them,
    - remove them from the template,
    - or leave them pending until Canon confirms.
 3. Keep `MFA`, `Administrators`, scheduler groups, and externally owned app/service policies out of `canon-iam.yaml`.
 4. Do not execute an IAM change set until the change set shows no unintended deletes or permission removals.
+
+## Applied In Repo Draft
+
+The `canon-iam.yaml` draft was updated after this report to:
+
+- remove the three CI Tech users missing from live AWS,
+- add ThinkBit direct user policy attachments and inline `ImportCreateEC2KeyPair`,
+- add live ThinkBit group managed policy `AmazonSESFullAccess`,
+- add live ThinkBit group inline policies:
+  - `AutoScalingAccess`,
+  - `cmp-delightful-app-s3-access`,
+  - `Lambda`,
+  - `SecretsAccess`,
+  - `SES`,
+  - `SSMAccessOnEC2`,
+- add the live `Events` statement to the existing ThinkBit `SSM` inline policy.
