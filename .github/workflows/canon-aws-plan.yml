@@ -34,6 +34,10 @@ on:
         description: Optional comma-separated logical resource IDs to skip while continuing rollback
         required: false
         default: ""
+      existing_change_set_name:
+        description: Optional existing change set name to execute after manual review
+        required: false
+        default: ""
   pull_request:
     paths:
       - clients/canon/**
@@ -160,7 +164,7 @@ jobs:
     name: Prepare change set
     runs-on: ubuntu-latest
     needs: validate
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true' || github.event.inputs.continue_rollback == 'true') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true' || github.event.inputs.continue_rollback == 'true' || github.event.inputs.existing_change_set_name != '') }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -188,6 +192,7 @@ jobs:
           STACK_NAME: ${{ github.event.inputs.stack_name }}
           TEMPLATE_PATH: ${{ github.event.inputs.template_path }}
           ROLLBACK_RESOURCES_TO_SKIP: ${{ github.event.inputs.rollback_resources_to_skip }}
+          EXISTING_CHANGE_SET_NAME: ${{ github.event.inputs.existing_change_set_name }}
         run: |
           set -euo pipefail
           change_set_name="canon-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -244,49 +249,58 @@ jobs:
             exit 1
           fi
 
-          change_set_type="UPDATE"
-          parameter_args=()
-          stack_parameters_file="$(mktemp)"
-          if aws cloudformation describe-stacks \
-            --stack-name "${STACK_NAME}" \
-            --query 'Stacks[0].Parameters[].ParameterKey' \
-            --output json > "${stack_parameters_file}"; then
-            while IFS= read -r parameter_key; do
-              parameter_args+=("ParameterKey=${parameter_key},UsePreviousValue=true")
-            done < <(jq -r '.[]?' "${stack_parameters_file}")
-          else
-            change_set_type="CREATE"
-          fi
-
-          create_change_set_args=(
-            --stack-name "${STACK_NAME}"
-            --change-set-name "${change_set_name}"
-            --change-set-type "${change_set_type}"
-            --template-body "file://${TEMPLATE_PATH}"
-            --capabilities CAPABILITY_NAMED_IAM
-            --description "Prepared by GitHub Actions run ${GITHUB_RUN_ID}; not executed by this workflow."
-          )
-          if [[ "${#parameter_args[@]}" -gt 0 ]]; then
-            create_change_set_args+=(--parameters "${parameter_args[@]}")
-          fi
-
-          aws cloudformation create-change-set \
-            "${create_change_set_args[@]}"
-
-          echo "Waiting for change set creation..."
-          if ! aws cloudformation wait change-set-create-complete \
-            --stack-name "${STACK_NAME}" \
-            --change-set-name "${change_set_name}"; then
-            status_reason="$(aws cloudformation describe-change-set \
+          if [[ -n "${EXISTING_CHANGE_SET_NAME}" ]]; then
+            change_set_name="${EXISTING_CHANGE_SET_NAME}"
+            change_set_type="$(aws cloudformation describe-change-set \
               --stack-name "${STACK_NAME}" \
               --change-set-name "${change_set_name}" \
-              --query 'StatusReason' \
+              --query 'ChangeSetType' \
               --output text)"
-            echo "${status_reason}"
-            if [[ "${status_reason}" == *"The submitted information didn't contain changes"* || "${status_reason}" == *"No updates are to be performed"* ]]; then
-              exit 0
+          else
+            change_set_type="UPDATE"
+            parameter_args=()
+            stack_parameters_file="$(mktemp)"
+            if aws cloudformation describe-stacks \
+              --stack-name "${STACK_NAME}" \
+              --query 'Stacks[0].Parameters[].ParameterKey' \
+              --output json > "${stack_parameters_file}"; then
+              while IFS= read -r parameter_key; do
+                parameter_args+=("ParameterKey=${parameter_key},UsePreviousValue=true")
+              done < <(jq -r '.[]?' "${stack_parameters_file}")
+            else
+              change_set_type="CREATE"
             fi
-            exit 1
+
+            create_change_set_args=(
+              --stack-name "${STACK_NAME}"
+              --change-set-name "${change_set_name}"
+              --change-set-type "${change_set_type}"
+              --template-body "file://${TEMPLATE_PATH}"
+              --capabilities CAPABILITY_NAMED_IAM
+              --description "Prepared by GitHub Actions run ${GITHUB_RUN_ID}; not executed by this workflow."
+            )
+            if [[ "${#parameter_args[@]}" -gt 0 ]]; then
+              create_change_set_args+=(--parameters "${parameter_args[@]}")
+            fi
+
+            aws cloudformation create-change-set \
+              "${create_change_set_args[@]}"
+
+            echo "Waiting for change set creation..."
+            if ! aws cloudformation wait change-set-create-complete \
+              --stack-name "${STACK_NAME}" \
+              --change-set-name "${change_set_name}"; then
+              status_reason="$(aws cloudformation describe-change-set \
+                --stack-name "${STACK_NAME}" \
+                --change-set-name "${change_set_name}" \
+                --query 'StatusReason' \
+                --output text)"
+              echo "${status_reason}"
+              if [[ "${status_reason}" == *"The submitted information didn't contain changes"* || "${status_reason}" == *"No updates are to be performed"* ]]; then
+                exit 0
+              fi
+              exit 1
+            fi
           fi
 
           change_set_file="$(mktemp)"
