@@ -1,0 +1,56 @@
+name: Canon AWS Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      regions:
+        description: Comma-separated AWS regions to inventory for regional services
+        required: true
+        default: ap-southeast-1
+
+permissions:
+  contents: read
+  # Required for GitHub OIDC. Do not add static AWS access keys to this workflow.
+  id-token: write
+
+env:
+  CANON_AWS_ACCOUNT_ID: "780347486043"
+  DEFAULT_CANON_AWS_REGION: ap-southeast-1
+
+jobs:
+  audit:
+    name: Export Canon AWS inventory
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.CANON_AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.DEFAULT_CANON_AWS_REGION }}
+
+      - name: Confirm Canon AWS account
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "${actual_account_id}" != "${CANON_AWS_ACCOUNT_ID}" ]]; then
+            echo "Expected Canon AWS account ${CANON_AWS_ACCOUNT_ID}, got ${actual_account_id}."
+            exit 1
+          fi
+
+      - name: Export inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x clients/canon/audit/export-canon-aws-inventory.sh
+          clients/canon/audit/export-canon-aws-inventory.sh canon-audit "${{ github.event.inputs.regions }}"
+
+      - name: Upload inventory artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: canon-aws-audit-${{ github.run_id }}
+          path: canon-audit
+          retention-days: 14

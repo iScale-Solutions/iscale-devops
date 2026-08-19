@@ -1,0 +1,18 @@
+# Canon AWS Audit
+
+This audit captures live Canon AWS inventory without making changes. It is the first reconciliation step before letting CloudFormation manage IAM again.
+
+The GitHub workflow `Canon AWS Audit` assumes the Canon OIDC role, confirms account `780347486043`, exports inventory, and uploads it as a workflow artifact.
+
+The audit includes:
+
+- IAM users, groups, roles, customer-managed policies, inline policies, attached policies, access-key metadata, MFA devices, and login-profile presence.
+- CloudFormation stacks, resources, templates, and drift status for the selected regions.
+
+It does not call `secretsmanager:GetSecretValue`, does not read secret values, and does not create, update, or delete AWS resources.
+
+Run locally with AWS credentials pointed at the Canon account:
+
+```bash
+clients/canon/audit/export-canon-aws-inventory.sh canon-audit ap-southeast-1
+```
