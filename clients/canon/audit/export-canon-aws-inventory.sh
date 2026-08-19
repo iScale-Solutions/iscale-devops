@@ -4,6 +4,7 @@ export LC_ALL=C
 
 out_dir="${1:-canon-audit}"
 regions_csv="${2:-ap-southeast-1}"
+include_drift="${3:-false}"
 
 mkdir -p "${out_dir}/meta" "${out_dir}/iam" "${out_dir}/cloudformation"
 
@@ -52,7 +53,8 @@ timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 jq -n \
   --arg generatedAt "${timestamp}" \
   --arg regions "${regions_csv}" \
-  '{generatedAt: $generatedAt, regions: ($regions | split(",") | map(gsub("^\\s+|\\s+$"; "")))}' \
+  --arg includeDrift "${include_drift}" \
+  '{generatedAt: $generatedAt, regions: ($regions | split(",") | map(gsub("^\\s+|\\s+$"; ""))), includeDrift: ($includeDrift == "true")}' \
   > "${out_dir}/meta/audit-run.json"
 
 run_json "${out_dir}/meta/caller-identity.json" aws sts get-caller-identity --output json
@@ -178,9 +180,11 @@ for raw_region in "${regions[@]}"; do
     run_json "${stack_dir}/description.json" aws cloudformation describe-stacks --region "${region}" --stack-name "${stack_name}" --output json
     run_json "${stack_dir}/resources.json" aws cloudformation describe-stack-resources --region "${region}" --stack-name "${stack_name}" --output json
     run_json "${stack_dir}/template.json" aws cloudformation get-template --region "${region}" --stack-name "${stack_name}" --output json
-    run_json "${stack_dir}/drift.json" aws cloudformation describe-stack-drift-detection-status --region "${region}" --stack-drift-detection-id \
-      "$(aws cloudformation detect-stack-drift --region "${region}" --stack-name "${stack_name}" --query StackDriftDetectionId --output text)" \
-      --output json
+    if [[ "${include_drift}" == "true" ]]; then
+      run_json "${stack_dir}/drift.json" aws cloudformation describe-stack-drift-detection-status --region "${region}" --stack-drift-detection-id \
+        "$(aws cloudformation detect-stack-drift --region "${region}" --stack-name "${stack_name}" --query StackDriftDetectionId --output text)" \
+        --output json
+    fi
   done
 done
 
