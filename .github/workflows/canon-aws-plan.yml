@@ -38,6 +38,11 @@ on:
         description: Optional existing change set name to execute after manual review
         required: false
         default: ""
+      inspect_stack_only:
+        description: Print stack status/events without creating or executing a change set
+        required: true
+        type: boolean
+        default: false
   pull_request:
     paths:
       - clients/canon/**
@@ -164,7 +169,7 @@ jobs:
     name: Prepare change set
     runs-on: ubuntu-latest
     needs: validate
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true' || github.event.inputs.continue_rollback == 'true' || github.event.inputs.existing_change_set_name != '') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true' || github.event.inputs.continue_rollback == 'true' || github.event.inputs.existing_change_set_name != '' || github.event.inputs.inspect_stack_only == 'true') }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -196,6 +201,18 @@ jobs:
         run: |
           set -euo pipefail
           change_set_name="canon-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          if [[ "${{ github.event.inputs.inspect_stack_only }}" == "true" ]]; then
+            aws cloudformation describe-stacks \
+              --stack-name "${STACK_NAME}" \
+              --query 'Stacks[0].{StackName:StackName,StackStatus:StackStatus,StackStatusReason:StackStatusReason}' \
+              --output table
+            aws cloudformation describe-stack-events \
+              --stack-name "${STACK_NAME}" \
+              --query 'StackEvents[0:20].{Time:Timestamp,LogicalResourceId:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+              --output table
+            exit 0
+          fi
 
           if [[ "${{ github.event.inputs.continue_rollback }}" == "true" ]]; then
             if [[ "${STACK_NAME}" != "${CANON_IAM_STACK_NAME}" && "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" ]]; then
