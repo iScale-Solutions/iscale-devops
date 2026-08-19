@@ -266,11 +266,30 @@ jobs:
             exit 1
           fi
 
+          change_set_file="$(mktemp)"
           aws cloudformation describe-change-set \
             --stack-name "${STACK_NAME}" \
             --change-set-name "${change_set_name}" \
             --query 'Changes[].ResourceChange.{Action:Action,LogicalResourceId:LogicalResourceId,ResourceType:ResourceType,Replacement:Replacement}' \
             --output table
+          aws cloudformation describe-change-set \
+            --stack-name "${STACK_NAME}" \
+            --change-set-name "${change_set_name}" \
+            --output json > "${change_set_file}"
+          jq -r '
+            .Changes[].ResourceChange
+            | [
+                .Action,
+                .LogicalResourceId,
+                .ResourceType,
+                (.Replacement // "N/A"),
+                (
+                  [.Details[]? | "\(.Target.Attribute):\(.Target.Name // "N/A"):\(.Evaluation)"]
+                  | if length == 0 then "No detail entries" else join("; ") end
+                )
+              ]
+            | @tsv
+          ' "${change_set_file}" | column -t -s $'\t'
 
           if [[ "${{ github.event.inputs.execute_change_set }}" == "true" ]]; then
             if [[ ! ( "${STACK_NAME}" == "${CANON_BOOTSTRAP_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_BOOTSTRAP_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_IAM_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_IAM_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ) ]]; then
