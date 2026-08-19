@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 out_dir="${1:-canon-audit}"
 regions_csv="${2:-ap-southeast-1}"
@@ -8,9 +9,11 @@ mkdir -p "${out_dir}/meta" "${out_dir}/iam" "${out_dir}/cloudformation"
 
 run_json() {
   local output_file="$1"
+  local error_file="${output_file}.stderr"
   shift
 
-  if "$@" > "${output_file}"; then
+  if "$@" > "${output_file}" 2> "${error_file}"; then
+    rm -f "${error_file}"
     return 0
   fi
 
@@ -18,9 +21,15 @@ run_json() {
   jq -n \
     --arg status "${status}" \
     --arg command "$*" \
-    '{error: true, exitStatus: ($status | tonumber), command: $command}' \
+    --rawfile stderr "${error_file}" \
+    '{error: true, exitStatus: ($status | tonumber), command: $command, stderr: $stderr}' \
     > "${output_file}"
+  rm -f "${error_file}"
   return 0
+}
+
+safe_name() {
+  printf '%s' "$1" | tr -c '[:alnum:]_.+=,@-' '_'
 }
 
 write_lines_json() {
@@ -71,7 +80,7 @@ write_lines_json "${out_dir}/iam/customer-managed-policy-arns.json" "${policies[
 mkdir -p "${out_dir}/iam/users" "${out_dir}/iam/groups" "${out_dir}/iam/roles" "${out_dir}/iam/policies"
 
 for user in "${users[@]}"; do
-  safe_user="$(printf '%s' "${user}" | tr -c 'A-Za-z0-9._@=-' '_')"
+  safe_user="$(safe_name "${user}")"
   user_dir="${out_dir}/iam/users/${safe_user}"
   mkdir -p "${user_dir}"
 
@@ -86,14 +95,14 @@ for user in "${users[@]}"; do
   while IFS= read -r line; do inline_user_policies+=("${line}"); done < <(json_lines '.PolicyNames[]?' "${user_dir}/inline-policy-names.json")
   mkdir -p "${user_dir}/inline-policies"
   for policy_name in "${inline_user_policies[@]}"; do
-    safe_policy="$(printf '%s' "${policy_name}" | tr -c 'A-Za-z0-9._+=,@- ' '_')"
+    safe_policy="$(safe_name "${policy_name}")"
     run_json "${user_dir}/inline-policies/${safe_policy}.json" \
       aws iam get-user-policy --user-name "${user}" --policy-name "${policy_name}" --output json
   done
 done
 
 for group in "${groups[@]}"; do
-  safe_group="$(printf '%s' "${group}" | tr -c 'A-Za-z0-9._+=,@- ' '_')"
+  safe_group="$(safe_name "${group}")"
   group_dir="${out_dir}/iam/groups/${safe_group}"
   mkdir -p "${group_dir}"
 
@@ -105,14 +114,14 @@ for group in "${groups[@]}"; do
   while IFS= read -r line; do inline_group_policies+=("${line}"); done < <(json_lines '.PolicyNames[]?' "${group_dir}/inline-policy-names.json")
   mkdir -p "${group_dir}/inline-policies"
   for policy_name in "${inline_group_policies[@]}"; do
-    safe_policy="$(printf '%s' "${policy_name}" | tr -c 'A-Za-z0-9._+=,@- ' '_')"
+    safe_policy="$(safe_name "${policy_name}")"
     run_json "${group_dir}/inline-policies/${safe_policy}.json" \
       aws iam get-group-policy --group-name "${group}" --policy-name "${policy_name}" --output json
   done
 done
 
 for role in "${roles[@]}"; do
-  safe_role="$(printf '%s' "${role}" | tr -c 'A-Za-z0-9._+=,@- ' '_')"
+  safe_role="$(safe_name "${role}")"
   role_dir="${out_dir}/iam/roles/${safe_role}"
   mkdir -p "${role_dir}"
 
@@ -125,14 +134,14 @@ for role in "${roles[@]}"; do
   while IFS= read -r line; do inline_role_policies+=("${line}"); done < <(json_lines '.PolicyNames[]?' "${role_dir}/inline-policy-names.json")
   mkdir -p "${role_dir}/inline-policies"
   for policy_name in "${inline_role_policies[@]}"; do
-    safe_policy="$(printf '%s' "${policy_name}" | tr -c 'A-Za-z0-9._+=,@- ' '_')"
+    safe_policy="$(safe_name "${policy_name}")"
     run_json "${role_dir}/inline-policies/${safe_policy}.json" \
       aws iam get-role-policy --role-name "${role}" --policy-name "${policy_name}" --output json
   done
 done
 
 for policy_arn in "${policies[@]}"; do
-  safe_policy_arn="$(printf '%s' "${policy_arn}" | tr -c 'A-Za-z0-9._+=,@- ' '_')"
+  safe_policy_arn="$(safe_name "${policy_arn}")"
   policy_dir="${out_dir}/iam/policies/${safe_policy_arn}"
   mkdir -p "${policy_dir}"
 
@@ -162,7 +171,7 @@ for raw_region in "${regions[@]}"; do
   write_lines_json "${region_dir}/stack-names.json" "${stack_names[@]}"
 
   for stack_name in "${stack_names[@]}"; do
-    safe_stack="$(printf '%s' "${stack_name}" | tr -c 'A-Za-z0-9._+=,@- ' '_')"
+    safe_stack="$(safe_name "${stack_name}")"
     stack_dir="${region_dir}/stacks/${safe_stack}"
     mkdir -p "${stack_dir}"
 
