@@ -25,6 +25,11 @@ on:
         required: true
         type: boolean
         default: false
+      continue_rollback:
+        description: Continue rollback for the Canon IAM stack after a failed update
+        required: true
+        type: boolean
+        default: false
   pull_request:
     paths:
       - clients/canon/**
@@ -95,7 +100,7 @@ jobs:
     name: Prepare change set
     runs-on: ubuntu-latest
     needs: validate
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true' || github.event.inputs.continue_rollback == 'true') }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -125,6 +130,19 @@ jobs:
         run: |
           set -euo pipefail
           change_set_name="canon-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          if [[ "${{ github.event.inputs.continue_rollback }}" == "true" ]]; then
+            if [[ "${STACK_NAME}" != "${CANON_IAM_STACK_NAME}" ]]; then
+              echo "Refusing to continue rollback. Rollback recovery is only allowed for ${CANON_IAM_STACK_NAME}."
+              exit 1
+            fi
+
+            echo "Continuing rollback for ${STACK_NAME}."
+            aws cloudformation continue-update-rollback --stack-name "${STACK_NAME}"
+            aws cloudformation wait stack-update-rollback-complete --stack-name "${STACK_NAME}"
+            echo "Rollback completed for ${STACK_NAME}."
+            exit 0
+          fi
 
           aws cloudformation create-change-set \
             --stack-name "${STACK_NAME}" \
