@@ -1,6 +1,26 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: DNS records for iscale-healthcare.com
 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: DNS Configuration
+        Parameters:
+          - OrgName
+          - EnvName
+          - DomainName
+          - DNSSECKey
+    ParameterLabels:
+      OrgName:
+        default: Organization Name
+      EnvName:
+        default: Environment
+      DomainName:
+        default: Domain Name
+      DNSSECKey:
+        default: DNSSEC KMS Key ARN
+
 Parameters:
   OrgName:
     Description: The name of the organization.
@@ -21,6 +41,10 @@ Parameters:
     Description: The domain name (e.g. example.com, iscale-healthcare.com).
     Type: String
     Default: iscale-healthcare.com
+  DNSSECKey:
+    Description: Enter the KMS key ARN from us-east-1 for DNSSEC. Leave blank to disable DNSSEC.
+    Type: String
+    Default: arn:aws:kms:us-east-1:178070162686:key/315d6bf8-09eb-4b0d-971c-5ef787b8d57b
 
 Mappings:
   Fn::Transform:
@@ -33,6 +57,7 @@ Conditions:
     Name: AWS::Include
     Parameters:
       Location: s3://iscale-dev-cloudformation/include/conditions.yaml
+  HasDNSSEC: !Not [!Equals [!Ref DNSSECKey, ""]]
 
 Resources:
 
@@ -64,3 +89,34 @@ Resources:
         - '"google-site-verification=jc1A1jYJQASXA4t8PhVkkiNisP4x9p4xGIlMM9PgQNU"'
       TTL: 14400
       Type: TXT
+
+  GoogleMailMXRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Comment: Google Mail MX Record
+      Name: !Ref DomainName
+      Type: MX
+      TTL: 14400
+      ResourceRecords:
+        - 1 SMTP.GOOGLE.COM.
+
+  ###
+  # DNSSEC
+  ###
+
+  HostedZoneDNSSECSigningKey:
+    Condition: HasDNSSEC
+    Type: AWS::Route53::KeySigningKey
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      KeyManagementServiceArn: !Ref DNSSECKey
+      Name: key_signing_key
+      Status: ACTIVE
+
+  HostedZoneDNSSEC:
+    Condition: HasDNSSEC
+    DependsOn: HostedZoneDNSSECSigningKey
+    Type: AWS::Route53::DNSSEC
+    Properties:
+      HostedZoneId: !Ref HostedZone
