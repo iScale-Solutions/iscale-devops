@@ -6,6 +6,7 @@ The GitHub workflow `Canon AWS Audit` assumes the Canon OIDC role, confirms acco
 
 The audit includes:
 
+- EC2 VPCs, subnets, route tables, internet gateways, and NAT gateways for the selected regions.
 - Optional IAM users, groups, roles, customer-managed policies, inline policies, attached policies, access-key metadata, MFA devices, and login-profile presence when `include_iam=true`.
 - Optional CloudFormation stacks, resources, and templates for the selected regions when `include_cloudformation=true`.
 - Optional CloudFormation drift detection when `include_drift=true`.

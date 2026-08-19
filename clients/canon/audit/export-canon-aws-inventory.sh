@@ -8,7 +8,7 @@ include_iam="${3:-true}"
 include_cloudformation="${4:-false}"
 include_drift="${5:-false}"
 
-mkdir -p "${out_dir}/meta" "${out_dir}/iam" "${out_dir}/cloudformation"
+mkdir -p "${out_dir}/meta" "${out_dir}/iam" "${out_dir}/cloudformation" "${out_dir}/ec2"
 
 run_json() {
   local output_file="$1"
@@ -164,6 +164,19 @@ if [[ "${include_iam}" == "true" ]]; then
 fi
 
 IFS=',' read -ra regions <<< "${regions_csv}"
+for raw_region in "${regions[@]}"; do
+  region="$(printf '%s' "${raw_region}" | xargs)"
+  [[ -n "${region}" ]] || continue
+
+  region_dir="${out_dir}/ec2/${region}"
+  mkdir -p "${region_dir}"
+  run_json "${region_dir}/vpcs.json" aws ec2 describe-vpcs --region "${region}" --output json
+  run_json "${region_dir}/subnets.json" aws ec2 describe-subnets --region "${region}" --output json
+  run_json "${region_dir}/route-tables.json" aws ec2 describe-route-tables --region "${region}" --output json
+  run_json "${region_dir}/internet-gateways.json" aws ec2 describe-internet-gateways --region "${region}" --output json
+  run_json "${region_dir}/nat-gateways.json" aws ec2 describe-nat-gateways --region "${region}" --output json
+done
+
 if [[ "${include_cloudformation}" == "true" ]]; then
   for raw_region in "${regions[@]}"; do
     region="$(printf '%s' "${raw_region}" | xargs)"
