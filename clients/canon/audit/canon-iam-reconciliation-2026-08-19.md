@@ -86,7 +86,7 @@ Observed live access:
 Recommendation:
 
 - Do not add these blindly to `canon-iam.yaml`.
-- Decide whether they belong in separate app-specific templates, likely `delighfulapp.yaml` or a new legacy/app IAM template.
+- Decide whether they belong in separate app-specific templates, likely `delightfulapp.yaml` or a new legacy/app IAM template.
 - `beta.canonph.app` looks like legacy Elastic Beanstalk app access.
 - `delightful-staging-user` looks like deployment access for CMP Delightful staging.
 - `cloudwatch-user` looks like a monitoring/reporting service user.
