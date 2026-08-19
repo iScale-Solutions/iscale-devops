@@ -30,6 +30,10 @@ on:
         required: true
         type: boolean
         default: false
+      rollback_resources_to_skip:
+        description: Optional comma-separated logical resource IDs to skip while continuing rollback
+        required: false
+        default: ""
   pull_request:
     paths:
       - clients/canon/**
@@ -53,6 +57,8 @@ env:
   CANON_BOOTSTRAP_TEMPLATE_PATH: clients/canon/bootstrap/github-actions-role.yaml
   CANON_IAM_STACK_NAME: canon-prd-iam
   CANON_IAM_TEMPLATE_PATH: clients/canon/canon-iam.yaml
+  CANON_DELIGHTFUL_STACK_NAME: canon-stg-delightfulapp
+  CANON_DELIGHTFUL_TEMPLATE_PATH: clients/canon/delightfulapp.yaml
 
 jobs:
   lint:
@@ -177,13 +183,14 @@ jobs:
         env:
           STACK_NAME: ${{ github.event.inputs.stack_name }}
           TEMPLATE_PATH: ${{ github.event.inputs.template_path }}
+          ROLLBACK_RESOURCES_TO_SKIP: ${{ github.event.inputs.rollback_resources_to_skip }}
         run: |
           set -euo pipefail
           change_set_name="canon-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           if [[ "${{ github.event.inputs.continue_rollback }}" == "true" ]]; then
-            if [[ "${STACK_NAME}" != "${CANON_IAM_STACK_NAME}" ]]; then
-              echo "Refusing to continue rollback. Rollback recovery is only allowed for ${CANON_IAM_STACK_NAME}."
+            if [[ "${STACK_NAME}" != "${CANON_IAM_STACK_NAME}" && "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" ]]; then
+              echo "Refusing to continue rollback. Rollback recovery is only allowed for ${CANON_IAM_STACK_NAME} or ${CANON_DELIGHTFUL_STACK_NAME}."
               exit 1
             fi
 
@@ -196,7 +203,14 @@ jobs:
                 ;;
               UPDATE_ROLLBACK_FAILED)
                 echo "Continuing rollback for ${STACK_NAME}."
-                aws cloudformation continue-update-rollback --stack-name "${STACK_NAME}"
+                if [[ -n "${ROLLBACK_RESOURCES_TO_SKIP}" ]]; then
+                  IFS=',' read -ra resources_to_skip <<< "${ROLLBACK_RESOURCES_TO_SKIP}"
+                  aws cloudformation continue-update-rollback \
+                    --stack-name "${STACK_NAME}" \
+                    --resources-to-skip "${resources_to_skip[@]}"
+                else
+                  aws cloudformation continue-update-rollback --stack-name "${STACK_NAME}"
+                fi
                 ;;
               UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS)
                 echo "Rollback is already in progress for ${STACK_NAME}; waiting for completion."
@@ -257,8 +271,8 @@ jobs:
             --output table
 
           if [[ "${{ github.event.inputs.execute_change_set }}" == "true" ]]; then
-            if [[ ! ( "${STACK_NAME}" == "${CANON_BOOTSTRAP_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_BOOTSTRAP_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_IAM_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_IAM_TEMPLATE_PATH}" ) ]]; then
-              echo "Refusing to execute change set. Execution is only allowed for ${CANON_BOOTSTRAP_STACK_NAME} using ${CANON_BOOTSTRAP_TEMPLATE_PATH}, or ${CANON_IAM_STACK_NAME} using ${CANON_IAM_TEMPLATE_PATH}."
+            if [[ ! ( "${STACK_NAME}" == "${CANON_BOOTSTRAP_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_BOOTSTRAP_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_IAM_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_IAM_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ) ]]; then
+              echo "Refusing to execute change set. Execution is only allowed for ${CANON_BOOTSTRAP_STACK_NAME} using ${CANON_BOOTSTRAP_TEMPLATE_PATH}, ${CANON_IAM_STACK_NAME} using ${CANON_IAM_TEMPLATE_PATH}, or ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}."
               exit 1
             fi
 
