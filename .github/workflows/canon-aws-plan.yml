@@ -59,6 +59,8 @@ env:
   CANON_IAM_TEMPLATE_PATH: clients/canon/canon-iam.yaml
   CANON_DELIGHTFUL_STACK_NAME: canon-stg-delightfulapp
   CANON_DELIGHTFUL_TEMPLATE_PATH: clients/canon/delightfulapp.yaml
+  CANON_DELIGHTFUL_CLOUDWATCH_STACK_NAME: canon-stg-delightful-cloudwatch-agent-policy
+  CANON_DELIGHTFUL_CLOUDWATCH_TEMPLATE_PATH: clients/canon/delightful-cloudwatch-agent-policy.yaml
 
 jobs:
   lint:
@@ -242,20 +244,24 @@ jobs:
             exit 1
           fi
 
+          change_set_type="UPDATE"
           parameter_args=()
           stack_parameters_file="$(mktemp)"
-          aws cloudformation describe-stacks \
+          if aws cloudformation describe-stacks \
             --stack-name "${STACK_NAME}" \
             --query 'Stacks[0].Parameters[].ParameterKey' \
-            --output json > "${stack_parameters_file}"
-          while IFS= read -r parameter_key; do
-            parameter_args+=("ParameterKey=${parameter_key},UsePreviousValue=true")
-          done < <(jq -r '.[]?' "${stack_parameters_file}")
+            --output json > "${stack_parameters_file}"; then
+            while IFS= read -r parameter_key; do
+              parameter_args+=("ParameterKey=${parameter_key},UsePreviousValue=true")
+            done < <(jq -r '.[]?' "${stack_parameters_file}")
+          else
+            change_set_type="CREATE"
+          fi
 
           create_change_set_args=(
             --stack-name "${STACK_NAME}"
             --change-set-name "${change_set_name}"
-            --change-set-type UPDATE
+            --change-set-type "${change_set_type}"
             --template-body "file://${TEMPLATE_PATH}"
             --capabilities CAPABILITY_NAMED_IAM
             --description "Prepared by GitHub Actions run ${GITHUB_RUN_ID}; not executed by this workflow."
@@ -313,8 +319,8 @@ jobs:
           ' "${change_set_file}" | column -t -s $'\t'
 
           if [[ "${{ github.event.inputs.execute_change_set }}" == "true" ]]; then
-            if [[ ! ( "${STACK_NAME}" == "${CANON_BOOTSTRAP_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_BOOTSTRAP_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_IAM_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_IAM_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ) ]]; then
-              echo "Refusing to execute change set. Execution is only allowed for ${CANON_BOOTSTRAP_STACK_NAME} using ${CANON_BOOTSTRAP_TEMPLATE_PATH}, ${CANON_IAM_STACK_NAME} using ${CANON_IAM_TEMPLATE_PATH}, or ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}."
+            if [[ ! ( "${STACK_NAME}" == "${CANON_BOOTSTRAP_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_BOOTSTRAP_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_IAM_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_IAM_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_CLOUDWATCH_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_CLOUDWATCH_TEMPLATE_PATH}" ) ]]; then
+              echo "Refusing to execute change set. Execution is only allowed for ${CANON_BOOTSTRAP_STACK_NAME} using ${CANON_BOOTSTRAP_TEMPLATE_PATH}, ${CANON_IAM_STACK_NAME} using ${CANON_IAM_TEMPLATE_PATH}, ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}, or ${CANON_DELIGHTFUL_CLOUDWATCH_STACK_NAME} using ${CANON_DELIGHTFUL_CLOUDWATCH_TEMPLATE_PATH}."
               exit 1
             fi
 
@@ -322,7 +328,12 @@ jobs:
             aws cloudformation execute-change-set \
               --stack-name "${STACK_NAME}" \
               --change-set-name "${change_set_name}"
-            if ! aws cloudformation wait stack-update-complete --stack-name "${STACK_NAME}"; then
+            if [[ "${change_set_type}" == "CREATE" ]]; then
+              waiter_name="stack-create-complete"
+            else
+              waiter_name="stack-update-complete"
+            fi
+            if ! aws cloudformation wait "${waiter_name}" --stack-name "${STACK_NAME}"; then
               aws cloudformation describe-stack-events \
                 --stack-name "${STACK_NAME}" \
                 --query 'StackEvents[0:20].{Time:Timestamp,LogicalResourceId:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
