@@ -4,7 +4,8 @@ export LC_ALL=C
 
 out_dir="${1:-canon-audit}"
 regions_csv="${2:-ap-southeast-1}"
-include_drift="${3:-false}"
+include_cloudformation="${3:-false}"
+include_drift="${4:-false}"
 
 mkdir -p "${out_dir}/meta" "${out_dir}/iam" "${out_dir}/cloudformation"
 
@@ -53,8 +54,9 @@ timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 jq -n \
   --arg generatedAt "${timestamp}" \
   --arg regions "${regions_csv}" \
+  --arg includeCloudFormation "${include_cloudformation}" \
   --arg includeDrift "${include_drift}" \
-  '{generatedAt: $generatedAt, regions: ($regions | split(",") | map(gsub("^\\s+|\\s+$"; ""))), includeDrift: ($includeDrift == "true")}' \
+  '{generatedAt: $generatedAt, regions: ($regions | split(",") | map(gsub("^\\s+|\\s+$"; ""))), includeCloudFormation: ($includeCloudFormation == "true"), includeDrift: ($includeDrift == "true")}' \
   > "${out_dir}/meta/audit-run.json"
 
 run_json "${out_dir}/meta/caller-identity.json" aws sts get-caller-identity --output json
@@ -157,35 +159,37 @@ for policy_arn in "${policies[@]}"; do
 done
 
 IFS=',' read -ra regions <<< "${regions_csv}"
-for raw_region in "${regions[@]}"; do
-  region="$(printf '%s' "${raw_region}" | xargs)"
-  [[ -n "${region}" ]] || continue
+if [[ "${include_cloudformation}" == "true" ]]; then
+  for raw_region in "${regions[@]}"; do
+    region="$(printf '%s' "${raw_region}" | xargs)"
+    [[ -n "${region}" ]] || continue
 
-  region_dir="${out_dir}/cloudformation/${region}"
-  mkdir -p "${region_dir}/stacks"
-  run_json "${region_dir}/stacks.json" aws cloudformation list-stacks \
-    --region "${region}" \
-    --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE IMPORT_COMPLETE IMPORT_ROLLBACK_COMPLETE ROLLBACK_COMPLETE \
-    --output json
+    region_dir="${out_dir}/cloudformation/${region}"
+    mkdir -p "${region_dir}/stacks"
+    run_json "${region_dir}/stacks.json" aws cloudformation list-stacks \
+      --region "${region}" \
+      --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE IMPORT_COMPLETE IMPORT_ROLLBACK_COMPLETE ROLLBACK_COMPLETE \
+      --output json
 
-  stack_names=()
-  while IFS= read -r line; do stack_names+=("${line}"); done < <(json_lines '.StackSummaries[]?.StackName' "${region_dir}/stacks.json")
-  write_lines_json "${region_dir}/stack-names.json" "${stack_names[@]}"
+    stack_names=()
+    while IFS= read -r line; do stack_names+=("${line}"); done < <(json_lines '.StackSummaries[]?.StackName' "${region_dir}/stacks.json")
+    write_lines_json "${region_dir}/stack-names.json" "${stack_names[@]}"
 
-  for stack_name in "${stack_names[@]}"; do
-    safe_stack="$(safe_name "${stack_name}")"
-    stack_dir="${region_dir}/stacks/${safe_stack}"
-    mkdir -p "${stack_dir}"
+    for stack_name in "${stack_names[@]}"; do
+      safe_stack="$(safe_name "${stack_name}")"
+      stack_dir="${region_dir}/stacks/${safe_stack}"
+      mkdir -p "${stack_dir}"
 
-    run_json "${stack_dir}/description.json" aws cloudformation describe-stacks --region "${region}" --stack-name "${stack_name}" --output json
-    run_json "${stack_dir}/resources.json" aws cloudformation describe-stack-resources --region "${region}" --stack-name "${stack_name}" --output json
-    run_json "${stack_dir}/template.json" aws cloudformation get-template --region "${region}" --stack-name "${stack_name}" --output json
-    if [[ "${include_drift}" == "true" ]]; then
-      run_json "${stack_dir}/drift.json" aws cloudformation describe-stack-drift-detection-status --region "${region}" --stack-drift-detection-id \
-        "$(aws cloudformation detect-stack-drift --region "${region}" --stack-name "${stack_name}" --query StackDriftDetectionId --output text)" \
-        --output json
-    fi
+      run_json "${stack_dir}/description.json" aws cloudformation describe-stacks --region "${region}" --stack-name "${stack_name}" --output json
+      run_json "${stack_dir}/resources.json" aws cloudformation describe-stack-resources --region "${region}" --stack-name "${stack_name}" --output json
+      run_json "${stack_dir}/template.json" aws cloudformation get-template --region "${region}" --stack-name "${stack_name}" --output json
+      if [[ "${include_drift}" == "true" ]]; then
+        run_json "${stack_dir}/drift.json" aws cloudformation describe-stack-drift-detection-status --region "${region}" --stack-drift-detection-id \
+          "$(aws cloudformation detect-stack-drift --region "${region}" --stack-name "${stack_name}" --query StackDriftDetectionId --output text)" \
+          --output json
+      fi
+    done
   done
-done
+fi
 
 find "${out_dir}" -type f | sort > "${out_dir}/manifest.txt"
