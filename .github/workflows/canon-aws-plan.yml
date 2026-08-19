@@ -137,8 +137,26 @@ jobs:
               exit 1
             fi
 
-            echo "Continuing rollback for ${STACK_NAME}."
-            aws cloudformation continue-update-rollback --stack-name "${STACK_NAME}"
+            stack_status="$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].StackStatus' --output text)"
+            echo "${STACK_NAME} status: ${stack_status}"
+            case "${stack_status}" in
+              UPDATE_ROLLBACK_COMPLETE)
+                echo "Rollback already completed for ${STACK_NAME}."
+                exit 0
+                ;;
+              UPDATE_ROLLBACK_FAILED)
+                echo "Continuing rollback for ${STACK_NAME}."
+                aws cloudformation continue-update-rollback --stack-name "${STACK_NAME}"
+                ;;
+              UPDATE_ROLLBACK_IN_PROGRESS|UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS)
+                echo "Rollback is already in progress for ${STACK_NAME}; waiting for completion."
+                ;;
+              *)
+                echo "Refusing to continue rollback from ${stack_status}."
+                exit 1
+                ;;
+            esac
+
             for attempt in {1..60}; do
               stack_status="$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].StackStatus' --output text)"
               echo "${STACK_NAME} status: ${stack_status}"
