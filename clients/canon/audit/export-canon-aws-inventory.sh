@@ -171,10 +171,10 @@ if [[ "${include_cloudformation}" == "true" ]]; then
 
     region_dir="${out_dir}/cloudformation/${region}"
     mkdir -p "${region_dir}/stacks"
-    run_json "${region_dir}/stacks.json" aws cloudformation list-stacks \
-      --region "${region}" \
-      --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE IMPORT_COMPLETE IMPORT_ROLLBACK_COMPLETE ROLLBACK_COMPLETE \
-      --output json
+	    run_json "${region_dir}/stacks.json" aws cloudformation list-stacks \
+	      --region "${region}" \
+	      --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_IN_PROGRESS UPDATE_ROLLBACK_IN_PROGRESS UPDATE_ROLLBACK_FAILED UPDATE_ROLLBACK_COMPLETE IMPORT_COMPLETE IMPORT_ROLLBACK_COMPLETE ROLLBACK_COMPLETE \
+	      --output json
 
     stack_names=()
     while IFS= read -r line; do stack_names+=("${line}"); done < <(json_lines '.StackSummaries[]?.StackName' "${region_dir}/stacks.json")
