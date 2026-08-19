@@ -4,8 +4,9 @@ export LC_ALL=C
 
 out_dir="${1:-canon-audit}"
 regions_csv="${2:-ap-southeast-1}"
-include_cloudformation="${3:-false}"
-include_drift="${4:-false}"
+include_iam="${3:-true}"
+include_cloudformation="${4:-false}"
+include_drift="${5:-false}"
 
 mkdir -p "${out_dir}/meta" "${out_dir}/iam" "${out_dir}/cloudformation"
 
@@ -54,109 +55,113 @@ timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 jq -n \
   --arg generatedAt "${timestamp}" \
   --arg regions "${regions_csv}" \
+  --arg includeIam "${include_iam}" \
   --arg includeCloudFormation "${include_cloudformation}" \
   --arg includeDrift "${include_drift}" \
-  '{generatedAt: $generatedAt, regions: ($regions | split(",") | map(gsub("^\\s+|\\s+$"; ""))), includeCloudFormation: ($includeCloudFormation == "true"), includeDrift: ($includeDrift == "true")}' \
+  '{generatedAt: $generatedAt, regions: ($regions | split(",") | map(gsub("^\\s+|\\s+$"; ""))), includeIam: ($includeIam == "true"), includeCloudFormation: ($includeCloudFormation == "true"), includeDrift: ($includeDrift == "true")}' \
   > "${out_dir}/meta/audit-run.json"
 
 run_json "${out_dir}/meta/caller-identity.json" aws sts get-caller-identity --output json
-run_json "${out_dir}/iam/account-summary.json" aws iam get-account-summary --output json
 
-run_json "${out_dir}/iam/users.json" aws iam list-users --output json
-run_json "${out_dir}/iam/groups.json" aws iam list-groups --output json
-run_json "${out_dir}/iam/roles.json" aws iam list-roles --output json
-run_json "${out_dir}/iam/customer-managed-policies.json" aws iam list-policies --scope Local --output json
+if [[ "${include_iam}" == "true" ]]; then
+  run_json "${out_dir}/iam/account-summary.json" aws iam get-account-summary --output json
 
-users=()
-while IFS= read -r line; do users+=("${line}"); done < <(json_lines '.Users[]?.UserName' "${out_dir}/iam/users.json")
-groups=()
-while IFS= read -r line; do groups+=("${line}"); done < <(json_lines '.Groups[]?.GroupName' "${out_dir}/iam/groups.json")
-roles=()
-while IFS= read -r line; do roles+=("${line}"); done < <(json_lines '.Roles[]?.RoleName' "${out_dir}/iam/roles.json")
-policies=()
-while IFS= read -r line; do policies+=("${line}"); done < <(json_lines '.Policies[]?.Arn' "${out_dir}/iam/customer-managed-policies.json")
+  run_json "${out_dir}/iam/users.json" aws iam list-users --output json
+  run_json "${out_dir}/iam/groups.json" aws iam list-groups --output json
+  run_json "${out_dir}/iam/roles.json" aws iam list-roles --output json
+  run_json "${out_dir}/iam/customer-managed-policies.json" aws iam list-policies --scope Local --output json
 
-write_lines_json "${out_dir}/iam/user-names.json" "${users[@]}"
-write_lines_json "${out_dir}/iam/group-names.json" "${groups[@]}"
-write_lines_json "${out_dir}/iam/role-names.json" "${roles[@]}"
-write_lines_json "${out_dir}/iam/customer-managed-policy-arns.json" "${policies[@]}"
+  users=()
+  while IFS= read -r line; do users+=("${line}"); done < <(json_lines '.Users[]?.UserName' "${out_dir}/iam/users.json")
+  groups=()
+  while IFS= read -r line; do groups+=("${line}"); done < <(json_lines '.Groups[]?.GroupName' "${out_dir}/iam/groups.json")
+  roles=()
+  while IFS= read -r line; do roles+=("${line}"); done < <(json_lines '.Roles[]?.RoleName' "${out_dir}/iam/roles.json")
+  policies=()
+  while IFS= read -r line; do policies+=("${line}"); done < <(json_lines '.Policies[]?.Arn' "${out_dir}/iam/customer-managed-policies.json")
 
-mkdir -p "${out_dir}/iam/users" "${out_dir}/iam/groups" "${out_dir}/iam/roles" "${out_dir}/iam/policies"
+  write_lines_json "${out_dir}/iam/user-names.json" "${users[@]}"
+  write_lines_json "${out_dir}/iam/group-names.json" "${groups[@]}"
+  write_lines_json "${out_dir}/iam/role-names.json" "${roles[@]}"
+  write_lines_json "${out_dir}/iam/customer-managed-policy-arns.json" "${policies[@]}"
 
-for user in "${users[@]}"; do
-  safe_user="$(safe_name "${user}")"
-  user_dir="${out_dir}/iam/users/${safe_user}"
-  mkdir -p "${user_dir}"
+  mkdir -p "${out_dir}/iam/users" "${out_dir}/iam/groups" "${out_dir}/iam/roles" "${out_dir}/iam/policies"
 
-  run_json "${user_dir}/groups.json" aws iam list-groups-for-user --user-name "${user}" --output json
-  run_json "${user_dir}/attached-policies.json" aws iam list-attached-user-policies --user-name "${user}" --output json
-  run_json "${user_dir}/inline-policy-names.json" aws iam list-user-policies --user-name "${user}" --output json
-  run_json "${user_dir}/access-keys.json" aws iam list-access-keys --user-name "${user}" --output json
-  run_json "${user_dir}/mfa-devices.json" aws iam list-mfa-devices --user-name "${user}" --output json
-  run_json "${user_dir}/login-profile.json" aws iam get-login-profile --user-name "${user}" --output json
+  for user in "${users[@]}"; do
+    safe_user="$(safe_name "${user}")"
+    user_dir="${out_dir}/iam/users/${safe_user}"
+    mkdir -p "${user_dir}"
 
-  inline_user_policies=()
-  while IFS= read -r line; do inline_user_policies+=("${line}"); done < <(json_lines '.PolicyNames[]?' "${user_dir}/inline-policy-names.json")
-  mkdir -p "${user_dir}/inline-policies"
-  for policy_name in "${inline_user_policies[@]}"; do
-    safe_policy="$(safe_name "${policy_name}")"
-    run_json "${user_dir}/inline-policies/${safe_policy}.json" \
-      aws iam get-user-policy --user-name "${user}" --policy-name "${policy_name}" --output json
+    run_json "${user_dir}/groups.json" aws iam list-groups-for-user --user-name "${user}" --output json
+    run_json "${user_dir}/attached-policies.json" aws iam list-attached-user-policies --user-name "${user}" --output json
+    run_json "${user_dir}/inline-policy-names.json" aws iam list-user-policies --user-name "${user}" --output json
+    run_json "${user_dir}/access-keys.json" aws iam list-access-keys --user-name "${user}" --output json
+    run_json "${user_dir}/mfa-devices.json" aws iam list-mfa-devices --user-name "${user}" --output json
+    run_json "${user_dir}/login-profile.json" aws iam get-login-profile --user-name "${user}" --output json
+
+    inline_user_policies=()
+    while IFS= read -r line; do inline_user_policies+=("${line}"); done < <(json_lines '.PolicyNames[]?' "${user_dir}/inline-policy-names.json")
+    mkdir -p "${user_dir}/inline-policies"
+    for policy_name in "${inline_user_policies[@]}"; do
+      safe_policy="$(safe_name "${policy_name}")"
+      run_json "${user_dir}/inline-policies/${safe_policy}.json" \
+        aws iam get-user-policy --user-name "${user}" --policy-name "${policy_name}" --output json
+    done
   done
-done
 
-for group in "${groups[@]}"; do
-  safe_group="$(safe_name "${group}")"
-  group_dir="${out_dir}/iam/groups/${safe_group}"
-  mkdir -p "${group_dir}"
+  for group in "${groups[@]}"; do
+    safe_group="$(safe_name "${group}")"
+    group_dir="${out_dir}/iam/groups/${safe_group}"
+    mkdir -p "${group_dir}"
 
-  run_json "${group_dir}/group.json" aws iam get-group --group-name "${group}" --output json
-  run_json "${group_dir}/attached-policies.json" aws iam list-attached-group-policies --group-name "${group}" --output json
-  run_json "${group_dir}/inline-policy-names.json" aws iam list-group-policies --group-name "${group}" --output json
+    run_json "${group_dir}/group.json" aws iam get-group --group-name "${group}" --output json
+    run_json "${group_dir}/attached-policies.json" aws iam list-attached-group-policies --group-name "${group}" --output json
+    run_json "${group_dir}/inline-policy-names.json" aws iam list-group-policies --group-name "${group}" --output json
 
-  inline_group_policies=()
-  while IFS= read -r line; do inline_group_policies+=("${line}"); done < <(json_lines '.PolicyNames[]?' "${group_dir}/inline-policy-names.json")
-  mkdir -p "${group_dir}/inline-policies"
-  for policy_name in "${inline_group_policies[@]}"; do
-    safe_policy="$(safe_name "${policy_name}")"
-    run_json "${group_dir}/inline-policies/${safe_policy}.json" \
-      aws iam get-group-policy --group-name "${group}" --policy-name "${policy_name}" --output json
+    inline_group_policies=()
+    while IFS= read -r line; do inline_group_policies+=("${line}"); done < <(json_lines '.PolicyNames[]?' "${group_dir}/inline-policy-names.json")
+    mkdir -p "${group_dir}/inline-policies"
+    for policy_name in "${inline_group_policies[@]}"; do
+      safe_policy="$(safe_name "${policy_name}")"
+      run_json "${group_dir}/inline-policies/${safe_policy}.json" \
+        aws iam get-group-policy --group-name "${group}" --policy-name "${policy_name}" --output json
+    done
   done
-done
 
-for role in "${roles[@]}"; do
-  safe_role="$(safe_name "${role}")"
-  role_dir="${out_dir}/iam/roles/${safe_role}"
-  mkdir -p "${role_dir}"
+  for role in "${roles[@]}"; do
+    safe_role="$(safe_name "${role}")"
+    role_dir="${out_dir}/iam/roles/${safe_role}"
+    mkdir -p "${role_dir}"
 
-  run_json "${role_dir}/role.json" aws iam get-role --role-name "${role}" --output json
-  run_json "${role_dir}/attached-policies.json" aws iam list-attached-role-policies --role-name "${role}" --output json
-  run_json "${role_dir}/inline-policy-names.json" aws iam list-role-policies --role-name "${role}" --output json
-  run_json "${role_dir}/instance-profiles.json" aws iam list-instance-profiles-for-role --role-name "${role}" --output json
+    run_json "${role_dir}/role.json" aws iam get-role --role-name "${role}" --output json
+    run_json "${role_dir}/attached-policies.json" aws iam list-attached-role-policies --role-name "${role}" --output json
+    run_json "${role_dir}/inline-policy-names.json" aws iam list-role-policies --role-name "${role}" --output json
+    run_json "${role_dir}/instance-profiles.json" aws iam list-instance-profiles-for-role --role-name "${role}" --output json
 
-  inline_role_policies=()
-  while IFS= read -r line; do inline_role_policies+=("${line}"); done < <(json_lines '.PolicyNames[]?' "${role_dir}/inline-policy-names.json")
-  mkdir -p "${role_dir}/inline-policies"
-  for policy_name in "${inline_role_policies[@]}"; do
-    safe_policy="$(safe_name "${policy_name}")"
-    run_json "${role_dir}/inline-policies/${safe_policy}.json" \
-      aws iam get-role-policy --role-name "${role}" --policy-name "${policy_name}" --output json
+    inline_role_policies=()
+    while IFS= read -r line; do inline_role_policies+=("${line}"); done < <(json_lines '.PolicyNames[]?' "${role_dir}/inline-policy-names.json")
+    mkdir -p "${role_dir}/inline-policies"
+    for policy_name in "${inline_role_policies[@]}"; do
+      safe_policy="$(safe_name "${policy_name}")"
+      run_json "${role_dir}/inline-policies/${safe_policy}.json" \
+        aws iam get-role-policy --role-name "${role}" --policy-name "${policy_name}" --output json
+    done
   done
-done
 
-for policy_arn in "${policies[@]}"; do
-  safe_policy_arn="$(safe_name "${policy_arn}")"
-  policy_dir="${out_dir}/iam/policies/${safe_policy_arn}"
-  mkdir -p "${policy_dir}"
+  for policy_arn in "${policies[@]}"; do
+    safe_policy_arn="$(safe_name "${policy_arn}")"
+    policy_dir="${out_dir}/iam/policies/${safe_policy_arn}"
+    mkdir -p "${policy_dir}"
 
-  run_json "${policy_dir}/policy.json" aws iam get-policy --policy-arn "${policy_arn}" --output json
-  default_version="$(jq -r '.Policy.DefaultVersionId // empty' "${policy_dir}/policy.json")"
-  if [[ -n "${default_version}" ]]; then
-    run_json "${policy_dir}/default-version.json" \
-      aws iam get-policy-version --policy-arn "${policy_arn}" --version-id "${default_version}" --output json
-  fi
-  run_json "${policy_dir}/versions.json" aws iam list-policy-versions --policy-arn "${policy_arn}" --output json
-done
+    run_json "${policy_dir}/policy.json" aws iam get-policy --policy-arn "${policy_arn}" --output json
+    default_version="$(jq -r '.Policy.DefaultVersionId // empty' "${policy_dir}/policy.json")"
+    if [[ -n "${default_version}" ]]; then
+      run_json "${policy_dir}/default-version.json" \
+        aws iam get-policy-version --policy-arn "${policy_arn}" --version-id "${default_version}" --output json
+    fi
+    run_json "${policy_dir}/versions.json" aws iam list-policy-versions --policy-arn "${policy_arn}" --output json
+  done
+fi
 
 IFS=',' read -ra regions <<< "${regions_csv}"
 if [[ "${include_cloudformation}" == "true" ]]; then

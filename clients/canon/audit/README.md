@@ -6,7 +6,7 @@ The GitHub workflow `Canon AWS Audit` assumes the Canon OIDC role, confirms acco
 
 The audit includes:
 
-- IAM users, groups, roles, customer-managed policies, inline policies, attached policies, access-key metadata, MFA devices, and login-profile presence.
+- Optional IAM users, groups, roles, customer-managed policies, inline policies, attached policies, access-key metadata, MFA devices, and login-profile presence when `include_iam=true`.
 - Optional CloudFormation stacks, resources, and templates for the selected regions when `include_cloudformation=true`.
 - Optional CloudFormation drift detection when `include_drift=true`.
 
@@ -15,5 +15,5 @@ It does not call `secretsmanager:GetSecretValue`, does not read secret values, a
 Run locally with AWS credentials pointed at the Canon account:
 
 ```bash
-clients/canon/audit/export-canon-aws-inventory.sh canon-audit ap-southeast-1 false false
+clients/canon/audit/export-canon-aws-inventory.sh canon-audit ap-southeast-1 true false false
 ```
