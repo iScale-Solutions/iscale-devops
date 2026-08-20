@@ -16,6 +16,11 @@ Parameters:
       - production
     Description: Select staging or production mode
 
+  ElasticBeanstalkApplicationName:
+    Type: String
+    Default: CMP Delightful App
+    Description: Elastic Beanstalk application name for this environment
+
   VpcId:
     Type: AWS::EC2::VPC::Id
     Default: vpc-0f28436a
@@ -177,7 +182,10 @@ Resources:
   DeveloperS3AccessPolicy:
     Type: AWS::IAM::Policy
     Properties:
-      PolicyName: cmp-delightful-app-s3-access
+      PolicyName: !If
+        - IsStaging
+        - cmp-delightful-app-s3-access
+        - cmp-delightful-app-production-s3-access
       Groups:
         - !Ref DeveloperGroup
       PolicyDocument:
@@ -387,7 +395,7 @@ Resources:
   CMPDelightfulApp:
     Type: AWS::ElasticBeanstalk::Application
     Properties:
-      ApplicationName: CMP Delightful App
+      ApplicationName: !Ref ElasticBeanstalkApplicationName
 
   CMPDelightfulAppVersion:
     Type: AWS::ElasticBeanstalk::ApplicationVersion
@@ -489,7 +497,7 @@ Resources:
       ApplicationName: !Ref CMPDelightfulApp
       EnvironmentName: !Sub cmp-delightful-${DeploymentMode}
       PlatformArn: arn:aws:elasticbeanstalk:ap-southeast-1::platform/PHP 8.3 running on 64bit Amazon Linux 2023/4.13.6
-      VersionLabel: !Ref CurrentApplicationVersionLabel
+      VersionLabel: !If [ IsStaging, !Ref CurrentApplicationVersionLabel, !Ref CMPDelightfulAppVersion ]
       OptionSettings:
         - Namespace: aws:autoscaling:launchconfiguration
           OptionName: InstanceType
@@ -503,12 +511,6 @@ Resources:
         - Namespace: aws:autoscaling:launchconfiguration
           OptionName: IamInstanceProfile
           Value: !Ref EBInstanceProfile
-        - Namespace: aws:ec2:vpc
-          OptionName: VPCId
-          Value: !Ref VpcId
-        - Namespace: aws:ec2:vpc
-          OptionName: Subnets
-          Value: !Join [ ",", !Ref SubnetIds ]
         - Namespace: aws:elasticbeanstalk:application:environment
           OptionName: DB_SECRET_ARN
           Value: !Ref CMPDatabaseSecret
@@ -523,10 +525,10 @@ Resources:
           Value: !Ref VpcId
         - Namespace: aws:ec2:vpc
           OptionName: Subnets
-          Value: !If [ IsStaging, !Join [ ",", !Ref SubnetIds ], !Join [ ",", !Ref PrivateSubnetIds ]]
+          Value: !Join [ ",", !Ref SubnetIds ]
         - Namespace: aws:ec2:vpc
           OptionName: AssociatePublicIpAddress
-          Value: !If [ IsStaging, true, false ]
+          Value: true
 
   #########################################
   # SNS + CloudWatch Alarms

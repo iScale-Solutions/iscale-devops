@@ -87,6 +87,12 @@ env:
   CANON_IAM_TEMPLATE_PATH: clients/canon/canon-iam.yaml
   CANON_DELIGHTFUL_STACK_NAME: canon-stg-delightfulapp
   CANON_DELIGHTFUL_TEMPLATE_PATH: clients/canon/delightfulapp.yaml
+  CANON_DELIGHTFUL_PROD_STACK_NAME: canon-prd-ase1-delightfulapp
+  CANON_DELIGHTFUL_PROD_TEMPLATE_PATH: clients/canon/delightfulapp.yaml
+  CANON_DELIGHTFUL_PROD_EB_APP_NAME: CMP Delightful App Production
+  CANON_DELIGHTFUL_PROD_VPC_ID: vpc-0940b2efc7b4cf2c5
+  CANON_DELIGHTFUL_PROD_PUBLIC_SUBNET_IDS: subnet-05cab077a7d3aa68b,subnet-04eb4f6dab658751c
+  CANON_DELIGHTFUL_PROD_PRIVATE_SUBNET_IDS: subnet-0bcf598c03ec5dd3f,subnet-0c4e218892ad9558f
   CANON_DELIGHTFUL_VPC_STACK_NAME: canon-prd-ase1-delightful-vpc
   CANON_DELIGHTFUL_VPC_TEMPLATE_PATH: clients/canon/delightful-vpc.yaml
 
@@ -410,8 +416,8 @@ jobs:
           fi
 
           if [[ "${{ github.event.inputs.continue_rollback }}" == "true" ]]; then
-            if [[ "${STACK_NAME}" != "${CANON_IAM_STACK_NAME}" && "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" ]]; then
-              echo "Refusing to continue rollback. Rollback recovery is only allowed for ${CANON_IAM_STACK_NAME} or ${CANON_DELIGHTFUL_STACK_NAME}."
+            if [[ "${STACK_NAME}" != "${CANON_IAM_STACK_NAME}" && "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" && "${STACK_NAME}" != "${CANON_DELIGHTFUL_PROD_STACK_NAME}" ]]; then
+              echo "Refusing to continue rollback. Rollback recovery is only allowed for ${CANON_IAM_STACK_NAME}, ${CANON_DELIGHTFUL_STACK_NAME}, or ${CANON_DELIGHTFUL_PROD_STACK_NAME}."
               exit 1
             fi
 
@@ -495,6 +501,15 @@ jobs:
               change_set_type="CREATE"
             fi
 
+            if [[ "${change_set_type}" == "CREATE" && "${STACK_NAME}" == "${CANON_DELIGHTFUL_PROD_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" ]]; then
+              parameter_args+=("ParameterKey=DeploymentMode,ParameterValue=production")
+              parameter_args+=("ParameterKey=ElasticBeanstalkApplicationName,ParameterValue=${CANON_DELIGHTFUL_PROD_EB_APP_NAME}")
+              parameter_args+=("ParameterKey=VpcId,ParameterValue=${CANON_DELIGHTFUL_PROD_VPC_ID}")
+              parameter_args+=("ParameterKey=SubnetIds,ParameterValue=${CANON_DELIGHTFUL_PROD_PUBLIC_SUBNET_IDS}")
+              parameter_args+=("ParameterKey=PrivateSubnetIds,ParameterValue=${CANON_DELIGHTFUL_PROD_PRIVATE_SUBNET_IDS}")
+              parameter_args+=("ParameterKey=EnableStagingRdsSchedule,ParameterValue=false")
+            fi
+
             if [[ "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ]]; then
               stack_tags_file="$(mktemp)"
               if aws cloudformation describe-stacks \
@@ -510,6 +525,31 @@ jobs:
                 ' "${stack_tags_file}")
               else
                 tag_args+=("Key=Environment,Value=Staging")
+              fi
+            fi
+
+            if [[ "${STACK_NAME}" == "${CANON_DELIGHTFUL_PROD_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" ]]; then
+              stack_tags_file="$(mktemp)"
+              if aws cloudformation describe-stacks \
+                --stack-name "${STACK_NAME}" \
+                --query 'Stacks[0].Tags' \
+                --output json > "${stack_tags_file}"; then
+                while IFS= read -r tag; do
+                  tag_args+=("${tag}")
+                done < <(jq -r '
+                  (
+                    map(select(.Key != "System" and .Key != "Environment"))
+                    + [
+                      {"Key":"System","Value":"Delightful"},
+                      {"Key":"Environment","Value":"Production"}
+                    ]
+                  )
+                  | .[]
+                  | "Key=\(.Key),Value=\(.Value)"
+                ' "${stack_tags_file}")
+              else
+                tag_args+=("Key=System,Value=Delightful")
+                tag_args+=("Key=Environment,Value=Production")
               fi
             fi
 
@@ -603,8 +643,8 @@ jobs:
           ' "${change_set_file}" | column -t -s $'\t'
 
           if [[ "${{ github.event.inputs.execute_change_set }}" == "true" ]]; then
-            if [[ ! ( "${STACK_NAME}" == "${CANON_BOOTSTRAP_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_BOOTSTRAP_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_IAM_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_IAM_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_VPC_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_VPC_TEMPLATE_PATH}" ) ]]; then
-              echo "Refusing to execute change set. Execution is only allowed for ${CANON_BOOTSTRAP_STACK_NAME} using ${CANON_BOOTSTRAP_TEMPLATE_PATH}, ${CANON_IAM_STACK_NAME} using ${CANON_IAM_TEMPLATE_PATH}, ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}, or ${CANON_DELIGHTFUL_VPC_STACK_NAME} using ${CANON_DELIGHTFUL_VPC_TEMPLATE_PATH}."
+            if [[ ! ( "${STACK_NAME}" == "${CANON_BOOTSTRAP_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_BOOTSTRAP_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_IAM_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_IAM_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_PROD_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_VPC_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_VPC_TEMPLATE_PATH}" ) ]]; then
+              echo "Refusing to execute change set. Execution is only allowed for ${CANON_BOOTSTRAP_STACK_NAME} using ${CANON_BOOTSTRAP_TEMPLATE_PATH}, ${CANON_IAM_STACK_NAME} using ${CANON_IAM_TEMPLATE_PATH}, ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}, ${CANON_DELIGHTFUL_PROD_STACK_NAME} using ${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}, or ${CANON_DELIGHTFUL_VPC_STACK_NAME} using ${CANON_DELIGHTFUL_VPC_TEMPLATE_PATH}."
               exit 1
             fi
 
