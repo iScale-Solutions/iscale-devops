@@ -30,6 +30,11 @@ on:
         required: true
         type: boolean
         default: false
+      delete_stack:
+        description: Delete a failed Canon stack after explicit recovery review
+        required: true
+        type: boolean
+        default: false
       rollback_resources_to_skip:
         description: Optional comma-separated logical resource IDs to skip while continuing rollback
         required: false
@@ -194,7 +199,7 @@ jobs:
     name: Prepare change set
     runs-on: ubuntu-latest
     needs: validate
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true' || github.event.inputs.continue_rollback == 'true' || github.event.inputs.existing_change_set_name != '' || github.event.inputs.inspect_stack_only == 'true' || github.event.inputs.cleanup_delightful_rds_schedule == 'true' || github.event.inputs.repair_delightful_app_zip_uploader == 'true') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.create_change_set == 'true' || github.event.inputs.execute_change_set == 'true' || github.event.inputs.continue_rollback == 'true' || github.event.inputs.delete_stack == 'true' || github.event.inputs.existing_change_set_name != '' || github.event.inputs.inspect_stack_only == 'true' || github.event.inputs.cleanup_delightful_rds_schedule == 'true' || github.event.inputs.repair_delightful_app_zip_uploader == 'true') }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -465,6 +470,29 @@ jobs:
             done
             echo "Timed out waiting for rollback to complete for ${STACK_NAME}."
             exit 1
+          fi
+
+          if [[ "${{ github.event.inputs.delete_stack }}" == "true" ]]; then
+            if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_PROD_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" ]]; then
+              echo "Refusing to delete stack. Delete recovery is only allowed for ${CANON_DELIGHTFUL_PROD_STACK_NAME} using ${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}."
+              exit 1
+            fi
+
+            stack_status="$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].StackStatus' --output text)"
+            echo "${STACK_NAME} status: ${stack_status}"
+            case "${stack_status}" in
+              ROLLBACK_FAILED|ROLLBACK_COMPLETE|CREATE_FAILED)
+                echo "Deleting failed stack ${STACK_NAME}."
+                aws cloudformation delete-stack --stack-name "${STACK_NAME}"
+                aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}"
+                echo "Deleted stack ${STACK_NAME}."
+                exit 0
+                ;;
+              *)
+                echo "Refusing to delete ${STACK_NAME} from ${stack_status}."
+                exit 1
+                ;;
+            esac
           fi
 
           if [[ -n "${EXISTING_CHANGE_SET_NAME}" ]]; then
