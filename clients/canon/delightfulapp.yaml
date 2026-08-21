@@ -16,6 +16,18 @@ Parameters:
     Default: CMP Delightful App
     Description: Elastic Beanstalk application name for this environment
 
+  ClientCode:
+    Type: String
+    Default: canon
+    AllowedPattern: "^[a-z0-9-]+$"
+    Description: Short customer code used in production resource names
+
+  SystemName:
+    Type: String
+    Default: delightful
+    AllowedPattern: "^[a-z0-9-]+$"
+    Description: Short system name used in production resource names
+
   VpcId:
     Type: AWS::EC2::VPC::Id
     Default: vpc-0f28436a
@@ -72,14 +84,20 @@ Mappings:
   DeploymentModeSettings:
     staging:
       NameSuffix: staging
+      EnvironmentCode: stg
       DatabaseIdentifier: cmp-delightful-db-staging
       DatabaseSecretName: cmp-delightful-db-staging-credentials
       TagValue: Staging
     production:
       NameSuffix: prod
+      EnvironmentCode: prd
       DatabaseIdentifier: canon-prd-ase1-delightful
       DatabaseSecretName: canon-prd-ase1-delightful-credentials
       TagValue: Production
+
+  RegionNameSegments:
+    ap-southeast-1:
+      RegionCode: ase1
 
 Resources:
 
@@ -516,7 +534,16 @@ Resources:
       EnvironmentName: !If
         - IsStaging
         - cmp-delightful-staging
-        - canon-prd-ase1-delightful
+        - !Sub
+          - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}
+          - EnvironmentCode: !FindInMap
+              - DeploymentModeSettings
+              - !Ref DeploymentMode
+              - EnvironmentCode
+            RegionCode: !FindInMap
+              - RegionNameSegments
+              - !Ref AWS::Region
+              - RegionCode
       PlatformArn: arn:aws:elasticbeanstalk:ap-southeast-1::platform/PHP 8.3 running on 64bit Amazon Linux 2023/4.13.6
       VersionLabel: !If [ IsStaging, !Ref CurrentApplicationVersionLabel, !Ref CMPDelightfulAppVersion ]
       OptionSettings:
@@ -589,9 +616,19 @@ Resources:
       MetricName: EnvironmentHealth
       Dimensions:
         - Name: EnvironmentName
-          Value: !Sub
-            - cmp-delightful-${NameSuffix}
-            - NameSuffix: !FindInMap [ DeploymentModeSettings, !Ref DeploymentMode, NameSuffix ]
+          Value: !If
+            - IsStaging
+            - cmp-delightful-staging
+            - !Sub
+              - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}
+              - EnvironmentCode: !FindInMap
+                  - DeploymentModeSettings
+                  - !Ref DeploymentMode
+                  - EnvironmentCode
+                RegionCode: !FindInMap
+                  - RegionNameSegments
+                  - !Ref AWS::Region
+                  - RegionCode
       Statistic: Average
       Period: 300
       EvaluationPeriods: 2
