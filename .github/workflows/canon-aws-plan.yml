@@ -66,6 +66,14 @@ on:
           - "true"
           - "false"
         default: previous
+      delightful_staging_db_snapshot_identifier:
+        description: Optional staging DB snapshot ARN/name for a deliberate staging DB replacement
+        required: false
+        default: ""
+      delightful_staging_db_snapshot_secret_arn:
+        description: Optional secret ARN that matches the staging DB snapshot credentials
+        required: false
+        default: ""
   pull_request:
     paths:
       - clients/canon/**
@@ -178,6 +186,8 @@ jobs:
           EXISTING_CHANGE_SET_NAME: ${{ github.event.inputs.existing_change_set_name }}
           ENABLE_DELIGHTFUL_STAGING_RDS_SCHEDULE: ${{ github.event.inputs.enable_delightful_staging_rds_schedule }}
           ENABLE_DELIGHTFUL_PROD_EB_ENVIRONMENT: ${{ github.event.inputs.enable_delightful_prod_eb_environment }}
+          DELIGHTFUL_STAGING_DB_SNAPSHOT_IDENTIFIER: ${{ github.event.inputs.delightful_staging_db_snapshot_identifier }}
+          DELIGHTFUL_STAGING_DB_SNAPSHOT_SECRET_ARN: ${{ github.event.inputs.delightful_staging_db_snapshot_secret_arn }}
         run: |
           set -euo pipefail
           change_set_name="canon-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -354,11 +364,25 @@ jobs:
             parameter_args=()
             tag_args=()
             saw_enable_elastic_beanstalk_environment_parameter="false"
+            saw_staging_database_snapshot_identifier_parameter="false"
+            saw_staging_database_snapshot_secret_arn_parameter="false"
+            resolved_staging_database_snapshot_secret_arn="${DELIGHTFUL_STAGING_DB_SNAPSHOT_SECRET_ARN}"
             stack_parameters_file="$(mktemp)"
             if aws cloudformation describe-stacks \
               --stack-name "${STACK_NAME}" \
               --query 'Stacks[0].Parameters[].ParameterKey' \
               --output json > "${stack_parameters_file}"; then
+              if [[ "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" && -n "${DELIGHTFUL_STAGING_DB_SNAPSHOT_IDENTIFIER}" && -z "${resolved_staging_database_snapshot_secret_arn}" ]]; then
+                resolved_staging_database_snapshot_secret_arn="$(aws cloudformation describe-stacks \
+                  --stack-name "${STACK_NAME}" \
+                  --query 'Stacks[0].Outputs[?OutputKey==`DatabaseSecretArn`].OutputValue | [0]' \
+                  --output text)"
+                if [[ -z "${resolved_staging_database_snapshot_secret_arn}" || "${resolved_staging_database_snapshot_secret_arn}" == "None" ]]; then
+                  echo "Could not resolve current DatabaseSecretArn output for staging snapshot restore."
+                  exit 1
+                fi
+                echo "Using current staging DatabaseSecretArn output for snapshot restore."
+              fi
               while IFS= read -r parameter_key; do
                 if [[ "${parameter_key}" == "CanonDelightfulCloudWatchStackName" ]]; then
                   continue
@@ -376,12 +400,35 @@ jobs:
                     exit 1
                   fi
                   parameter_args+=("ParameterKey=${parameter_key},ParameterValue=${ENABLE_DELIGHTFUL_PROD_EB_ENVIRONMENT}")
+                elif [[ "${parameter_key}" == "StagingDatabaseSnapshotIdentifier" && -n "${DELIGHTFUL_STAGING_DB_SNAPSHOT_IDENTIFIER}" ]]; then
+                  saw_staging_database_snapshot_identifier_parameter="true"
+                  if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ]]; then
+                    echo "Refusing staging DB snapshot override for this stack."
+                    exit 1
+                  fi
+                  parameter_args+=("ParameterKey=${parameter_key},ParameterValue=${DELIGHTFUL_STAGING_DB_SNAPSHOT_IDENTIFIER}")
+                elif [[ "${parameter_key}" == "StagingDatabaseSnapshotSecretArn" && -n "${resolved_staging_database_snapshot_secret_arn}" ]]; then
+                  saw_staging_database_snapshot_secret_arn_parameter="true"
+                  if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ]]; then
+                    echo "Refusing staging DB snapshot secret override for this stack."
+                    exit 1
+                  fi
+                  parameter_args+=("ParameterKey=${parameter_key},ParameterValue=${resolved_staging_database_snapshot_secret_arn}")
                 else
                   parameter_args+=("ParameterKey=${parameter_key},UsePreviousValue=true")
                 fi
               done < <(jq -r '.[]?' "${stack_parameters_file}")
             else
               change_set_type="CREATE"
+            fi
+
+            if [[ "${change_set_type}" == "UPDATE" && "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ]]; then
+              if [[ -n "${DELIGHTFUL_STAGING_DB_SNAPSHOT_IDENTIFIER}" && "${saw_staging_database_snapshot_identifier_parameter}" == "false" ]]; then
+                parameter_args+=("ParameterKey=StagingDatabaseSnapshotIdentifier,ParameterValue=${DELIGHTFUL_STAGING_DB_SNAPSHOT_IDENTIFIER}")
+              fi
+              if [[ -n "${resolved_staging_database_snapshot_secret_arn}" && "${saw_staging_database_snapshot_secret_arn_parameter}" == "false" ]]; then
+                parameter_args+=("ParameterKey=StagingDatabaseSnapshotSecretArn,ParameterValue=${resolved_staging_database_snapshot_secret_arn}")
+              fi
             fi
 
             if [[ "${change_set_type}" == "UPDATE" && "${STACK_NAME}" == "${CANON_DELIGHTFUL_PROD_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" && "${ENABLE_DELIGHTFUL_PROD_EB_ENVIRONMENT}" != "previous" && "${saw_enable_elastic_beanstalk_environment_parameter}" == "false" ]]; then

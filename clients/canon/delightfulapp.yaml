@@ -60,6 +60,16 @@ Parameters:
       - "false"
     Description: Enable the Elastic Beanstalk environment
 
+  StagingDatabaseSnapshotIdentifier:
+    Type: String
+    Default: ""
+    Description: Optional staging DB snapshot ARN or name to restore from when replacing the RDS instance
+
+  StagingDatabaseSnapshotSecretArn:
+    Type: String
+    Default: ""
+    Description: Optional secret ARN containing credentials that match the staging DB snapshot
+
   NotificationEmail:
     Type: String
     Default: iannis@iscale-solutions.com
@@ -67,6 +77,14 @@ Parameters:
 
 Conditions:
   IsStaging: !Equals [ !Ref DeploymentMode, staging ]
+  HasStagingDatabaseSnapshot: !Not [ !Equals [ !Ref StagingDatabaseSnapshotIdentifier, "" ] ]
+  HasStagingDatabaseSnapshotSecret: !Not [ !Equals [ !Ref StagingDatabaseSnapshotSecretArn, "" ] ]
+  UseStagingDatabaseSnapshot: !And
+    - !Condition IsStaging
+    - !Condition HasStagingDatabaseSnapshot
+  UseStagingDatabaseSnapshotSecret: !And
+    - !Condition IsStaging
+    - !Condition HasStagingDatabaseSnapshotSecret
   ShouldCreateElasticBeanstalkEnvironment: !Or
     - !Condition IsStaging
     - !Equals [ !Ref EnableElasticBeanstalkEnvironment, "true" ]
@@ -79,14 +97,10 @@ Mappings:
     staging:
       NameSuffix: staging
       EnvironmentCode: stg
-      DatabaseIdentifier: cmp-delightful-db-staging
-      DatabaseSecretName: cmp-delightful-db-staging-credentials
       TagValue: Staging
     production:
       NameSuffix: prod
       EnvironmentCode: prd
-      DatabaseIdentifier: canon-prd-ase1-delightful
-      DatabaseSecretName: canon-prd-ase1-delightful-credentials
       TagValue: Production
 
   RegionNameSegments:
@@ -249,7 +263,21 @@ Resources:
   CMPDatabaseSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !FindInMap [ DeploymentModeSettings, !Ref DeploymentMode, DatabaseSecretName ]
+      Name: !Sub
+        - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}-credentials
+        - ClientCode: !Select
+            - 0
+            - !Split
+              - "-"
+              - !Ref AWS::StackName
+          EnvironmentCode: !FindInMap
+            - DeploymentModeSettings
+            - !Ref DeploymentMode
+            - EnvironmentCode
+          RegionCode: !FindInMap
+            - RegionNameSegments
+            - !Ref AWS::Region
+            - RegionCode
       Description: DB credentials for CMP Delightful App
       GenerateSecretString:
         SecretStringTemplate: '{"username":"cmpapp","dbname":"cmpdelightful"}'
@@ -308,7 +336,12 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Ref CMPDatabaseSecret
+                Resource:
+                  - !Ref CMPDatabaseSecret
+                  - !If
+                    - UseStagingDatabaseSnapshotSecret
+                    - !Ref StagingDatabaseSnapshotSecretArn
+                    - !Ref AWS::NoValue
         - PolicyName: EC2
           PolicyDocument:
             Version: '2012-10-17'
@@ -379,7 +412,12 @@ Resources:
               - Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:secret:/cmp-delightful-db*'
+                Resource:
+                  - !Ref CMPDatabaseSecret
+                  - !If
+                    - UseStagingDatabaseSnapshotSecret
+                    - !Ref StagingDatabaseSnapshotSecretArn
+                    - !Ref AWS::NoValue
         - PolicyName: S3
           PolicyDocument:
             Version: '2012-10-17'
@@ -497,7 +535,21 @@ Resources:
   CMPDatabase:
     Type: AWS::RDS::DBInstance
     Properties:
-      DBInstanceIdentifier: !FindInMap [ DeploymentModeSettings, !Ref DeploymentMode, DatabaseIdentifier ]
+      DBInstanceIdentifier: !Sub
+        - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}
+        - ClientCode: !Select
+            - 0
+            - !Split
+              - "-"
+              - !Ref AWS::StackName
+          EnvironmentCode: !FindInMap
+            - DeploymentModeSettings
+            - !Ref DeploymentMode
+            - EnvironmentCode
+          RegionCode: !FindInMap
+            - RegionNameSegments
+            - !Ref AWS::Region
+            - RegionCode
       Engine: mysql
       EngineVersion: 8.4.6
       DBInstanceClass: db.t4g.micro
@@ -505,9 +557,22 @@ Resources:
       MaxAllocatedStorage: 200
       StorageType: gp3
       MultiAZ: !If [ IsStaging, false, true ]
-      MasterUsername: !Sub '{{resolve:secretsmanager:${CMPDatabaseSecret}::username}}'
-      MasterUserPassword: !Sub '{{resolve:secretsmanager:${CMPDatabaseSecret}::password}}'
-      DBName: !Sub '{{resolve:secretsmanager:${CMPDatabaseSecret}::dbname}}'
+      DBSnapshotIdentifier: !If
+        - UseStagingDatabaseSnapshot
+        - !Ref StagingDatabaseSnapshotIdentifier
+        - !Ref AWS::NoValue
+      MasterUsername: !If
+        - UseStagingDatabaseSnapshot
+        - !Ref AWS::NoValue
+        - !Sub '{{resolve:secretsmanager:${CMPDatabaseSecret}::username}}'
+      MasterUserPassword: !If
+        - UseStagingDatabaseSnapshot
+        - !Ref AWS::NoValue
+        - !Sub '{{resolve:secretsmanager:${CMPDatabaseSecret}::password}}'
+      DBName: !If
+        - UseStagingDatabaseSnapshot
+        - !Ref AWS::NoValue
+        - !Sub '{{resolve:secretsmanager:${CMPDatabaseSecret}::dbname}}'
       VPCSecurityGroups: [ !Ref RDSSecurityGroup ]
       DBSubnetGroupName: !Ref RDSSubnetGroup
       DBParameterGroupName: !Ref RDSParameterGroup
@@ -525,24 +590,21 @@ Resources:
     Type: AWS::ElasticBeanstalk::Environment
     Properties:
       ApplicationName: !Ref CMPDelightfulApp
-      EnvironmentName: !If
-        - IsStaging
-        - cmp-delightful-staging
-        - !Sub
-          - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}
-          - ClientCode: !Select
-              - 0
-              - !Split
-                - "-"
-                - !Ref AWS::StackName
-            EnvironmentCode: !FindInMap
-              - DeploymentModeSettings
-              - !Ref DeploymentMode
-              - EnvironmentCode
-            RegionCode: !FindInMap
-              - RegionNameSegments
-              - !Ref AWS::Region
-              - RegionCode
+      EnvironmentName: !Sub
+        - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}
+        - ClientCode: !Select
+            - 0
+            - !Split
+              - "-"
+              - !Ref AWS::StackName
+          EnvironmentCode: !FindInMap
+            - DeploymentModeSettings
+            - !Ref DeploymentMode
+            - EnvironmentCode
+          RegionCode: !FindInMap
+            - RegionNameSegments
+            - !Ref AWS::Region
+            - RegionCode
       PlatformArn: arn:aws:elasticbeanstalk:ap-southeast-1::platform/PHP 8.3 running on 64bit Amazon Linux 2023/4.13.6
       VersionLabel: !If [ IsStaging, !Ref CurrentApplicationVersionLabel, !Ref CMPDelightfulAppVersion ]
       OptionSettings:
@@ -560,7 +622,10 @@ Resources:
           Value: !Ref EBInstanceProfile
         - Namespace: aws:elasticbeanstalk:application:environment
           OptionName: DB_SECRET_ARN
-          Value: !Ref CMPDatabaseSecret
+          Value: !If
+            - UseStagingDatabaseSnapshotSecret
+            - !Ref StagingDatabaseSnapshotSecretArn
+            - !Ref CMPDatabaseSecret
         - Namespace: aws:elasticbeanstalk:application:environment
           OptionName: DB_HOST
           Value: !GetAtt CMPDatabase.Endpoint.Address
@@ -615,24 +680,21 @@ Resources:
       MetricName: EnvironmentHealth
       Dimensions:
         - Name: EnvironmentName
-          Value: !If
-            - IsStaging
-            - cmp-delightful-staging
-            - !Sub
-              - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}
-              - ClientCode: !Select
-                  - 0
-                  - !Split
-                    - "-"
-                    - !Ref AWS::StackName
-                EnvironmentCode: !FindInMap
-                  - DeploymentModeSettings
-                  - !Ref DeploymentMode
-                  - EnvironmentCode
-                RegionCode: !FindInMap
-                  - RegionNameSegments
-                  - !Ref AWS::Region
-                  - RegionCode
+          Value: !Sub
+            - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}
+            - ClientCode: !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Ref AWS::StackName
+              EnvironmentCode: !FindInMap
+                - DeploymentModeSettings
+                - !Ref DeploymentMode
+                - EnvironmentCode
+              RegionCode: !FindInMap
+                - RegionNameSegments
+                - !Ref AWS::Region
+                - RegionCode
       Statistic: Average
       Period: 300
       EvaluationPeriods: 2
@@ -666,7 +728,23 @@ Resources:
                 Action:
                   - rds:StartDBInstance
                   - rds:StopDBInstance
-                Resource: !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:cmp-delightful-db-staging
+                Resource: !Sub
+                  - arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${DatabaseIdentifier}
+                  - DatabaseIdentifier: !Sub
+                      - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}
+                      - ClientCode: !Select
+                          - 0
+                          - !Split
+                            - "-"
+                            - !Ref AWS::StackName
+                        EnvironmentCode: !FindInMap
+                          - DeploymentModeSettings
+                          - !Ref DeploymentMode
+                          - EnvironmentCode
+                        RegionCode: !FindInMap
+                          - RegionNameSegments
+                          - !Ref AWS::Region
+                          - RegionCode
 
   RDSStartStopFunction:
     Condition: EnableStagingRdsScheduleCondition
@@ -678,7 +756,21 @@ Resources:
       Timeout: 60
       Environment:
         Variables:
-          DB_INSTANCE_ID: cmp-delightful-db-staging
+          DB_INSTANCE_ID: !Sub
+            - ${ClientCode}-${EnvironmentCode}-${RegionCode}-${SystemName}
+            - ClientCode: !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Ref AWS::StackName
+              EnvironmentCode: !FindInMap
+                - DeploymentModeSettings
+                - !Ref DeploymentMode
+                - EnvironmentCode
+              RegionCode: !FindInMap
+                - RegionNameSegments
+                - !Ref AWS::Region
+                - RegionCode
       Code:
         ZipFile: |
           import os
@@ -737,4 +829,7 @@ Outputs:
     Value: !GetAtt CMPDatabase.Endpoint.Address
 
   DatabaseSecretArn:
-    Value: !Ref CMPDatabaseSecret
+    Value: !If
+      - UseStagingDatabaseSnapshotSecret
+      - !Ref StagingDatabaseSnapshotSecretArn
+      - !Ref CMPDatabaseSecret
