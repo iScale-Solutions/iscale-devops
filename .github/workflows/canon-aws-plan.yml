@@ -324,21 +324,24 @@ jobs:
                   echo "Emptying versioned app source bucket ${bucket_name} before stack delete."
                   versions_file="$(mktemp)"
                   delete_file="$(mktemp)"
-                  aws s3api list-object-versions --bucket "${bucket_name}" --output json > "${versions_file}" || true
-                  jq '
-                    {
-                      Objects: (
-                        ([.Versions[]? | {Key: .Key, VersionId: .VersionId}]
-                        + [.DeleteMarkers[]? | {Key: .Key, VersionId: .VersionId}])
-                      ),
-                      Quiet: true
-                    }
-                  ' "${versions_file}" > "${delete_file}"
-                  object_count="$(jq '.Objects | length' "${delete_file}")"
-                  if [[ "${object_count}" != "0" ]]; then
-                    aws s3api delete-objects --bucket "${bucket_name}" --delete "file://${delete_file}"
+                  if aws s3api list-object-versions --bucket "${bucket_name}" --output json > "${versions_file}"; then
+                    jq '
+                      {
+                        Objects: (
+                          ([.Versions[]? | {Key: .Key, VersionId: .VersionId}]
+                          + [.DeleteMarkers[]? | {Key: .Key, VersionId: .VersionId}])
+                        ),
+                        Quiet: true
+                      }
+                    ' "${versions_file}" > "${delete_file}"
+                    object_count="$(jq '.Objects | length' "${delete_file}")"
+                    if [[ "${object_count}" != "0" ]]; then
+                      aws s3api delete-objects --bucket "${bucket_name}" --delete "file://${delete_file}"
+                    else
+                      echo "Bucket ${bucket_name} has no object versions to delete."
+                    fi
                   else
-                    echo "Bucket ${bucket_name} has no object versions to delete."
+                    echo "Bucket ${bucket_name} does not exist or object versions could not be listed; continuing stack delete."
                   fi
                 fi
 
