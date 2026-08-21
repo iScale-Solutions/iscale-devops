@@ -62,6 +62,15 @@ on:
           - "true"
           - "false"
         default: previous
+      enable_delightful_prod_eb_environment:
+        description: Override Delightful production Elastic Beanstalk environment parameter for this deployment
+        required: true
+        type: choice
+        options:
+          - previous
+          - "true"
+          - "false"
+        default: previous
   pull_request:
     paths:
       - clients/canon/**
@@ -172,6 +181,7 @@ jobs:
           ROLLBACK_RESOURCES_TO_SKIP: ${{ github.event.inputs.rollback_resources_to_skip }}
           EXISTING_CHANGE_SET_NAME: ${{ github.event.inputs.existing_change_set_name }}
           ENABLE_DELIGHTFUL_STAGING_RDS_SCHEDULE: ${{ github.event.inputs.enable_delightful_staging_rds_schedule }}
+          ENABLE_DELIGHTFUL_PROD_EB_ENVIRONMENT: ${{ github.event.inputs.enable_delightful_prod_eb_environment }}
         run: |
           set -euo pipefail
           change_set_name="canon-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -433,15 +443,18 @@ jobs:
                 if [[ "${parameter_key}" == "CanonDelightfulCloudWatchStackName" ]]; then
                   continue
                 fi
-                if [[ "${parameter_key}" == "EnableElasticBeanstalkEnvironment" ]]; then
-                  continue
-                fi
                 if [[ "${parameter_key}" == "EnableStagingRdsSchedule" && "${ENABLE_DELIGHTFUL_STAGING_RDS_SCHEDULE}" != "previous" ]]; then
                   if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ]]; then
                     echo "Refusing EnableStagingRdsSchedule override outside ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}."
                     exit 1
                   fi
                   parameter_args+=("ParameterKey=${parameter_key},ParameterValue=${ENABLE_DELIGHTFUL_STAGING_RDS_SCHEDULE}")
+                elif [[ "${parameter_key}" == "EnableElasticBeanstalkEnvironment" && "${ENABLE_DELIGHTFUL_PROD_EB_ENVIRONMENT}" != "previous" ]]; then
+                  if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_PROD_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" ]]; then
+                    echo "Refusing EnableElasticBeanstalkEnvironment override outside ${CANON_DELIGHTFUL_PROD_STACK_NAME} using ${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}."
+                    exit 1
+                  fi
+                  parameter_args+=("ParameterKey=${parameter_key},ParameterValue=${ENABLE_DELIGHTFUL_PROD_EB_ENVIRONMENT}")
                 else
                   parameter_args+=("ParameterKey=${parameter_key},UsePreviousValue=true")
                 fi
@@ -457,6 +470,7 @@ jobs:
               parameter_args+=("ParameterKey=SubnetIds,ParameterValue=${CANON_DELIGHTFUL_PROD_PUBLIC_SUBNET_IDS//,/\\,}")
               parameter_args+=("ParameterKey=PrivateSubnetIds,ParameterValue=${CANON_DELIGHTFUL_PROD_PRIVATE_SUBNET_IDS//,/\\,}")
               parameter_args+=("ParameterKey=EnableStagingRdsSchedule,ParameterValue=false")
+              parameter_args+=("ParameterKey=EnableElasticBeanstalkEnvironment,ParameterValue=true")
             fi
 
             if [[ "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ]]; then
