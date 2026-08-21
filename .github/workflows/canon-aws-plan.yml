@@ -30,11 +30,6 @@ on:
         required: true
         type: boolean
         default: false
-      delete_stack:
-        description: Delete a failed Canon stack after explicit recovery review
-        required: true
-        type: boolean
-        default: false
       rollback_resources_to_skip:
         description: Optional comma-separated logical resource IDs to skip while continuing rollback
         required: false
@@ -218,7 +213,7 @@ jobs:
 
           if [[ "${{ github.event.inputs.cleanup_delightful_rds_schedule }}" == "true" ]]; then
             if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ]]; then
-              echo "Refusing cleanup. This mode is only allowed for ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}."
+              echo "Refusing cleanup outside the Delightful staging stack."
               exit 1
             fi
 
@@ -283,7 +278,7 @@ jobs:
 
           if [[ "${{ github.event.inputs.continue_rollback }}" == "true" ]]; then
             if [[ "${STACK_NAME}" != "${CANON_IAM_STACK_NAME}" && "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" && "${STACK_NAME}" != "${CANON_DELIGHTFUL_PROD_STACK_NAME}" ]]; then
-              echo "Refusing to continue rollback. Rollback recovery is only allowed for ${CANON_IAM_STACK_NAME}, ${CANON_DELIGHTFUL_STACK_NAME}, or ${CANON_DELIGHTFUL_PROD_STACK_NAME}."
+              echo "Refusing rollback recovery for this stack."
               exit 1
             fi
 
@@ -333,96 +328,6 @@ jobs:
             exit 1
           fi
 
-          if [[ "${{ github.event.inputs.delete_stack }}" == "true" ]]; then
-            if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_PROD_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" ]]; then
-              echo "Refusing to delete stack. Delete recovery is only allowed for ${CANON_DELIGHTFUL_PROD_STACK_NAME} using ${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}."
-              exit 1
-            fi
-
-            stack_status="$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].StackStatus' --output text)"
-            echo "${STACK_NAME} status: ${stack_status}"
-            case "${stack_status}" in
-              DELETE_FAILED|ROLLBACK_FAILED|ROLLBACK_COMPLETE|CREATE_FAILED)
-                bucket_name="$(aws cloudformation describe-stack-resources \
-                  --stack-name "${STACK_NAME}" \
-                  --logical-resource-id AppSourceBucket \
-                  --query 'StackResources[0].PhysicalResourceId' \
-                  --output text 2>/dev/null || true)"
-                if [[ -n "${bucket_name}" && "${bucket_name}" != "None" ]]; then
-                  echo "Emptying versioned app source bucket ${bucket_name} before stack delete."
-                  versions_file="$(mktemp)"
-                  delete_file="$(mktemp)"
-                  if aws s3api list-object-versions --bucket "${bucket_name}" --output json > "${versions_file}"; then
-                    jq '
-                      {
-                        Objects: (
-                          ([.Versions[]? | {Key: .Key, VersionId: .VersionId}]
-                          + [.DeleteMarkers[]? | {Key: .Key, VersionId: .VersionId}])
-                        ),
-                        Quiet: true
-                      }
-                    ' "${versions_file}" > "${delete_file}"
-                    object_count="$(jq '.Objects | length' "${delete_file}")"
-                    if [[ "${object_count}" != "0" ]]; then
-                      aws s3api delete-objects --bucket "${bucket_name}" --delete "file://${delete_file}"
-                    else
-                      echo "Bucket ${bucket_name} has no object versions to delete."
-                    fi
-                  else
-                    echo "Bucket ${bucket_name} does not exist or object versions could not be listed; continuing stack delete."
-                  fi
-                fi
-
-                db_instance_id="$(aws cloudformation describe-stack-resources \
-                  --stack-name "${STACK_NAME}" \
-                  --logical-resource-id CMPDatabase \
-                  --query 'StackResources[0].PhysicalResourceId' \
-                  --output text 2>/dev/null || true)"
-                if [[ -n "${db_instance_id}" && "${db_instance_id}" != "None" ]]; then
-                  echo "Disabling deletion protection on DB instance ${db_instance_id} before stack delete."
-                  if aws rds describe-db-instances --db-instance-identifier "${db_instance_id}" >/dev/null 2>&1; then
-                    aws rds modify-db-instance \
-                      --db-instance-identifier "${db_instance_id}" \
-                      --no-deletion-protection \
-                      --apply-immediately
-                    aws rds wait db-instance-available --db-instance-identifier "${db_instance_id}"
-                  else
-                    echo "DB instance ${db_instance_id} does not exist; continuing stack delete."
-                  fi
-                fi
-
-                echo "Deleting failed stack ${STACK_NAME}."
-                aws cloudformation delete-stack --stack-name "${STACK_NAME}"
-                if ! aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}"; then
-                  aws cloudformation describe-stack-events \
-                    --stack-name "${STACK_NAME}" \
-                    --query 'StackEvents[0:40].{Time:Timestamp,LogicalResourceId:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
-                    --output table
-
-                  stack_reason="$(aws cloudformation describe-stacks \
-                    --stack-name "${STACK_NAME}" \
-                    --query 'Stacks[0].StackStatusReason' \
-                    --output text)"
-                  if [[ "${stack_reason}" == *"[RDSOptionGroup]"* ]]; then
-                    echo "Retaining orphaned RDSOptionGroup so CloudFormation can release the failed stack name."
-                    aws cloudformation delete-stack \
-                      --stack-name "${STACK_NAME}" \
-                      --retain-resources RDSOptionGroup
-                    aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}"
-                  else
-                    exit 1
-                  fi
-                fi
-                echo "Deleted stack ${STACK_NAME}."
-                exit 0
-                ;;
-              *)
-                echo "Refusing to delete ${STACK_NAME} from ${stack_status}."
-                exit 1
-                ;;
-            esac
-          fi
-
           if [[ -n "${EXISTING_CHANGE_SET_NAME}" ]]; then
             change_set_name="${EXISTING_CHANGE_SET_NAME}"
             change_set_type="$(aws cloudformation describe-change-set \
@@ -446,14 +351,14 @@ jobs:
                 fi
                 if [[ "${parameter_key}" == "EnableStagingRdsSchedule" && "${ENABLE_DELIGHTFUL_STAGING_RDS_SCHEDULE}" != "previous" ]]; then
                   if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ]]; then
-                    echo "Refusing EnableStagingRdsSchedule override outside ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}."
+                    echo "Refusing staging RDS schedule override for this stack."
                     exit 1
                   fi
                   parameter_args+=("ParameterKey=${parameter_key},ParameterValue=${ENABLE_DELIGHTFUL_STAGING_RDS_SCHEDULE}")
                 elif [[ "${parameter_key}" == "EnableElasticBeanstalkEnvironment" && "${ENABLE_DELIGHTFUL_PROD_EB_ENVIRONMENT}" != "previous" ]]; then
                   saw_enable_elastic_beanstalk_environment_parameter="true"
                   if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_PROD_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" ]]; then
-                    echo "Refusing EnableElasticBeanstalkEnvironment override outside ${CANON_DELIGHTFUL_PROD_STACK_NAME} using ${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}."
+                    echo "Refusing prod EB environment override for this stack."
                     exit 1
                   fi
                   parameter_args+=("ParameterKey=${parameter_key},ParameterValue=${ENABLE_DELIGHTFUL_PROD_EB_ENVIRONMENT}")
@@ -622,7 +527,7 @@ jobs:
 
           if [[ "${{ github.event.inputs.execute_change_set }}" == "true" ]]; then
             if [[ ! ( "${STACK_NAME}" == "${CANON_BOOTSTRAP_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_BOOTSTRAP_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_IAM_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_IAM_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_PROD_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" ) && ! ( "${STACK_NAME}" == "${CANON_DELIGHTFUL_VPC_STACK_NAME}" && "${TEMPLATE_PATH}" == "${CANON_DELIGHTFUL_VPC_TEMPLATE_PATH}" ) ]]; then
-              echo "Refusing to execute change set. Execution is only allowed for ${CANON_BOOTSTRAP_STACK_NAME} using ${CANON_BOOTSTRAP_TEMPLATE_PATH}, ${CANON_IAM_STACK_NAME} using ${CANON_IAM_TEMPLATE_PATH}, ${CANON_DELIGHTFUL_STACK_NAME} using ${CANON_DELIGHTFUL_TEMPLATE_PATH}, ${CANON_DELIGHTFUL_PROD_STACK_NAME} using ${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}, or ${CANON_DELIGHTFUL_VPC_STACK_NAME} using ${CANON_DELIGHTFUL_VPC_TEMPLATE_PATH}."
+              echo "Refusing to execute change set for this stack/template."
               exit 1
             fi
 
