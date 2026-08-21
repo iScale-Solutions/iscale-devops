@@ -429,7 +429,34 @@ jobs:
             stack_status="$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --query 'Stacks[0].StackStatus' --output text)"
             echo "${STACK_NAME} status: ${stack_status}"
             case "${stack_status}" in
-              ROLLBACK_FAILED|ROLLBACK_COMPLETE|CREATE_FAILED)
+              DELETE_FAILED|ROLLBACK_FAILED|ROLLBACK_COMPLETE|CREATE_FAILED)
+                bucket_name="$(aws cloudformation describe-stack-resources \
+                  --stack-name "${STACK_NAME}" \
+                  --logical-resource-id AppSourceBucket \
+                  --query 'StackResources[0].PhysicalResourceId' \
+                  --output text 2>/dev/null || true)"
+                if [[ -n "${bucket_name}" && "${bucket_name}" != "None" ]]; then
+                  echo "Emptying versioned app source bucket ${bucket_name} before stack delete."
+                  versions_file="$(mktemp)"
+                  delete_file="$(mktemp)"
+                  aws s3api list-object-versions --bucket "${bucket_name}" --output json > "${versions_file}" || true
+                  jq '
+                    {
+                      Objects: (
+                        ([.Versions[]? | {Key: .Key, VersionId: .VersionId}]
+                        + [.DeleteMarkers[]? | {Key: .Key, VersionId: .VersionId}])
+                      ),
+                      Quiet: true
+                    }
+                  ' "${versions_file}" > "${delete_file}"
+                  object_count="$(jq '.Objects | length' "${delete_file}")"
+                  if [[ "${object_count}" != "0" ]]; then
+                    aws s3api delete-objects --bucket "${bucket_name}" --delete "file://${delete_file}"
+                  else
+                    echo "Bucket ${bucket_name} has no object versions to delete."
+                  fi
+                fi
+
                 echo "Deleting failed stack ${STACK_NAME}."
                 aws cloudformation delete-stack --stack-name "${STACK_NAME}"
                 aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}"

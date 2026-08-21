@@ -102,6 +102,12 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - s3:ListBucketVersions
+                Resource: !Sub "arn:aws:s3:::${AppSourceBucket}"
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
                   - s3:PutObject
                 Resource: !Sub "arn:aws:s3:::${AppSourceBucket}/*"
 
@@ -152,11 +158,20 @@ Resources:
                 s3 = boto3.client("s3")
                 request_type = event.get("RequestType")
                 if request_type == "Delete":
-                  # Delete the object from S3
                   try:
-                    s3.delete_object(Bucket=S3_BUCKET, Key=S3_KEY)
+                    paginator = s3.get_paginator("list_object_versions")
+                    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=S3_KEY):
+                      objects = []
+                      for version in page.get("Versions", []):
+                        if version.get("Key") == S3_KEY:
+                          objects.append({"Key": S3_KEY, "VersionId": version["VersionId"]})
+                      for marker in page.get("DeleteMarkers", []):
+                        if marker.get("Key") == S3_KEY:
+                          objects.append({"Key": S3_KEY, "VersionId": marker["VersionId"]})
+                      if objects:
+                        s3.delete_objects(Bucket=S3_BUCKET, Delete={"Objects": objects, "Quiet": True})
                   except Exception as e:
-                    print(f"S3 delete_object failed: {e}")
+                    print(f"S3 object version cleanup failed: {e}")
                   send_response(event, context, "SUCCESS")
                   return
                 elif request_type == "Update":
