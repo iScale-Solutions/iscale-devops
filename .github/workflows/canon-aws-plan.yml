@@ -365,7 +365,26 @@ jobs:
 
                 echo "Deleting failed stack ${STACK_NAME}."
                 aws cloudformation delete-stack --stack-name "${STACK_NAME}"
-                aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}"
+                if ! aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}"; then
+                  aws cloudformation describe-stack-events \
+                    --stack-name "${STACK_NAME}" \
+                    --query 'StackEvents[0:40].{Time:Timestamp,LogicalResourceId:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+                    --output table
+
+                  stack_reason="$(aws cloudformation describe-stacks \
+                    --stack-name "${STACK_NAME}" \
+                    --query 'Stacks[0].StackStatusReason' \
+                    --output text)"
+                  if [[ "${stack_reason}" == "The following resource(s) failed to delete: [RDSOptionGroup]." ]]; then
+                    echo "Retaining orphaned RDSOptionGroup so CloudFormation can release the failed stack name."
+                    aws cloudformation delete-stack \
+                      --stack-name "${STACK_NAME}" \
+                      --retain-resources RDSOptionGroup
+                    aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}"
+                  else
+                    exit 1
+                  fi
+                fi
                 echo "Deleted stack ${STACK_NAME}."
                 exit 0
                 ;;
