@@ -176,6 +176,23 @@ jobs:
           set -euo pipefail
           change_set_name="canon-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
+          describe_delightful_prod_eb() {
+            if [[ "${STACK_NAME}" != "${CANON_DELIGHTFUL_PROD_STACK_NAME}" || "${TEMPLATE_PATH}" != "${CANON_DELIGHTFUL_PROD_TEMPLATE_PATH}" ]]; then
+              return
+            fi
+            aws elasticbeanstalk describe-environments \
+              --application-name "${CANON_DELIGHTFUL_PROD_EB_APP_NAME}" \
+              --environment-names cmp-delightful-prod \
+              --query 'Environments[].{EnvironmentName:EnvironmentName,Status:Status,Health:Health,HealthStatus:HealthStatus,VersionLabel:VersionLabel,AbortableOperationInProgress:AbortableOperationInProgress,EndpointURL:EndpointURL}' \
+              --output table || true
+            aws elasticbeanstalk describe-events \
+              --application-name "${CANON_DELIGHTFUL_PROD_EB_APP_NAME}" \
+              --environment-name cmp-delightful-prod \
+              --max-records 40 \
+              --query 'Events[].{Time:EventDate,Severity:Severity,Message:Message}' \
+              --output table || true
+          }
+
           if [[ "${{ github.event.inputs.inspect_stack_only }}" == "true" ]]; then
             aws cloudformation describe-stacks \
               --stack-name "${STACK_NAME}" \
@@ -185,6 +202,7 @@ jobs:
               --stack-name "${STACK_NAME}" \
               --query 'StackEvents[0:80].{Time:Timestamp,LogicalResourceId:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
               --output table
+            describe_delightful_prod_eb
             exit 0
           fi
 
@@ -599,6 +617,7 @@ jobs:
                 --stack-name "${STACK_NAME}" \
                 --query 'StackEvents[0:80].{Time:Timestamp,LogicalResourceId:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
                 --output table
+              describe_delightful_prod_eb
               exit 1
             fi
             echo "Stack update completed for ${STACK_NAME}."
